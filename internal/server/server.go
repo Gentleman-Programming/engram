@@ -32,6 +32,8 @@ import (
 
 var observedGenerationError = (*store.Store).GenerationError
 
+var checkServerReadiness = (*store.Store).CheckReadiness
+
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
@@ -546,7 +548,7 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if _, err := loadServerStats(s.store); err != nil {
+	if err := checkServerReadiness(s.store); err != nil {
 		jsonError(w, http.StatusInternalServerError, "health check failed")
 		return
 	}
@@ -1194,18 +1196,12 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 		jsonError(w, http.StatusBadRequest, "observation_id is required")
 		return
 	}
-	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	resolved, err := s.resolveRequestProjectWithDetector(r, projectpkg.ResolutionCurrent, true, s.captureProjectDetector(false))
 	if err != nil {
 		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
-	markReviewed := s.store.MarkReviewed
-	if resolved.Project != "" {
-		markReviewed = func(observationID int64) error {
-			return s.store.MarkReviewedForProject(observationID, resolved.Project)
-		}
-	}
-	if err := markReviewed(id); err != nil {
+	if err := s.store.MarkReviewedForProject(id, resolved.Project); err != nil {
 		if errors.Is(err, store.ErrObservationNotFound) {
 			if resolved.Project != "" {
 				jsonError(w, http.StatusNotFound, "observation not found in resolved project")
@@ -1925,6 +1921,7 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 		Status:             status,
 		Limit:              limit,
 		Offset:             offset,
+		ActionableOnly:     true,
 		ExcludeNotConflict: true,
 	}
 
@@ -1949,6 +1946,7 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 		Project:            project,
 		Status:             status,
 		SinceTime:          opts.SinceTime,
+		ActionableOnly:     true,
 		ExcludeNotConflict: true,
 	}
 	total, err := s.store.CountRelations(countOpts)
@@ -1975,7 +1973,7 @@ func (s *Server) handleConflictsStats(w http.ResponseWriter, r *http.Request) {
 	}
 	project := resolved.Project
 
-	stats, err := s.store.GetRelationStats(project)
+	stats, err := s.store.GetActionableRelationStats(project)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

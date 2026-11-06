@@ -36,7 +36,7 @@ establish runtime compatibility, final release provenance or publication rights.
 The trusted workflow and frozen candidate have separate sibling checkouts.
 The manifest records workflow SHA, actual candidate SHA, run ID/attempt, core
 version, independent Pi package version, sizes, SHA256 and SHA512 SRI per file.
-Go 1.25.10 builds six Linux/macOS/Windows amd64/arm64 raw unsigned binaries with
+Go 1.26.10 builds six Linux/macOS/Windows amd64/arm64 raw unsigned binaries with
 CGO disabled, readonly modules, trimpath and embedded version/VCS information.
 Each binary's inspected build metadata must match the source revision and report
 `vcs.modified=false`; source cleanliness is checked before and after packaging.

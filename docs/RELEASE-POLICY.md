@@ -22,6 +22,13 @@ Before upgrading:
 4. Validate compatibility with your environment and integrations.
 5. Retain a known-good installation or artifact until the upgrade is accepted.
 
+After installing the replacement binary, restart any already-running local
+`engram serve` HTTP server through its existing supervisor or launcher. Verify the intended server's
+`/health` version against the installed executable and recheck HTTP integrations;
+a running process or successful local CLI check alone does not confirm that the
+server was upgraded. Follow [After upgrading](./INSTALLATION.md#after-upgrading)
+for endpoint, authentication, and service guidance.
+
 ## Rollback expectations
 
 Rollback means restoring the known-good release and configuration, plus any required backup, using the documented procedure for the affected component. It does not promise an automated rollback path or behavior beyond that component's documentation. Feature or data migrations can constrain rollback; consult the release-specific notes before upgrading.
@@ -31,6 +38,15 @@ Rollback means restoring the known-good release and configuration, plus any requ
 The [stable release gap audit](../.github/workflows/release-gap-audit.yml) runs weekly and can be dispatched manually. It compares npm's `gentle-engram/latest` to the matching `pi-v*` tag and the latest stable GitHub Release to its `v*` tag. Changes on `main` to Pi plugin or Go runtime/build inputs after those tags produce a failing run and an actionable step summary. Documentation-only changes do not trigger a gap. Path changes are only a signal to review release need; they do not identify fixes or guarantee an artifact is broken. Unavailable metadata or missing tags fail the run rather than implying the channel is current. Maintainers should inspect the summary and changes, decide whether publication is appropriate, and use the existing tag-driven release workflows; the audit never publishes or edits issues.
 
 The Pi npm publish workflow also supports manual dispatch, but it only publishes when the selected GitHub ref is the full `refs/tags/pi-v<package version>` tag matching `plugin/pi/package.json`. Select that tag for a manual run: dispatching from a branch, even one named `pi-v<package version>`, fails the release preflight.
+
+## Module metadata before tagging
+
+The existing required **Unit Tests** job runs `go mod tidy -diff` with the same
+Go toolchain as the release workflow, before build checks on pull requests,
+merge groups and main pushes. Fix and commit any reported `go.mod`/`go.sum`
+drift through normal review; release packaging retains its own non-mutating
+check and never repairs tagged sources. This reuses the existing check/context,
+not a new required status or publication approval.
 
 ## Candidate-first publication and manual promotion
 
@@ -54,9 +70,12 @@ For a separately authorized release:
    Missing versions, transport/HTTP/JSON failures and mismatched required `startupPolicy` or
    declared `sessionOwned` metadata stop core publication. There are no retries, redirects,
    private npm config reads or configurable registry endpoints. Startup-only source contracts
-   remain supported when `sessionOwned` is absent. Current source and installer pin select 0.5.0
+   remain supported when `sessionOwned` is absent. Current source and installer pin prepare 0.6.0
    and require owned metadata; public 0.4.2 lacks that contract and is not a compatible substitute.
-   Source preparation does not establish public availability of 0.5.0.
+   This version preparation adds no runtime functionality. The managed 0.5.1 pin joins the older
+   predecessor cleanup while custom/local/object entries and unrelated settings remain intact.
+   Source preparation does not establish public availability of 0.6.0 or change an already
+   published core's installer pin.
    This is rejection-only availability evidence, **not** protocol, source-byte identity,
    published-content integrity or permission approval.
 4. Core GoReleaser still performs its existing release and automatic Homebrew tap behavior.

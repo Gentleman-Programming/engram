@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 const { publishSizeNotice } = await import('./pr-size-notice.mjs').catch((error) => ({
   publishSizeNotice: async () => { throw error; },
 }));
@@ -120,10 +121,72 @@ test('workflow is trusted-base, SHA-pinned, read-only, non-blocking and comment-
   assert.match(workflow, /await publishSizeNotice\(\{ github, context, core \}\)/);
 });
 
-test('refreshes on base-branch retargeting while retaining all previous PR events', () => {
+test('subscribes to events needed for diff changes and exception refresh', () => {
   const workflow = fs.readFileSync('.github/workflows/pr-size-notice.yml', 'utf8');
   const events = workflow.match(/^    types: \[([^\]]+)\]/m)?.[1].split(',').map((event) => event.trim());
   assert.deepEqual(events, ['opened', 'edited', 'synchronize', 'reopened', 'labeled', 'unlabeled']);
+});
+
+// Execute the workflow's admission expression, not a duplicate routing helper.
+function admits(path, action, payload = {}) {
+  const workflow = fs.readFileSync(path, 'utf8');
+  const events = workflow.match(/^    types: \[([^\]]+)\]/m)[1].split(',').map(value => value.trim());
+  if (!events.includes(action)) return false;
+  const expression = workflow.match(/^    if: \$\{\{ (.+) \}\}$/m)?.[1];
+  if (!expression) return true;
+  return vm.runInNewContext(expression, { github: { event: { action, changes: {}, label: {}, ...payload } } });
+}
+
+const artifactWorkflow = '.github/workflows/transient-artifacts.yml';
+const sizeWorkflow = '.github/workflows/pr-size-notice.yml';
+
+for (const path of [artifactWorkflow, sizeWorkflow]) {
+  test(`${path}: retains opening, reopening, synchronization and base edits for forks`, () => {
+    const pull_request = { head: { repo: { fork: true }, sha: 'untrusted' }, base: { sha: 'trusted' } };
+    for (const action of ['opened', 'reopened', 'synchronize']) {
+      assert.equal(admits(path, action, { pull_request }), true, action);
+    }
+    for (const base of [{ ref: { from: 'main' } }, { sha: { from: 'old-base' } }]) {
+      assert.equal(admits(path, 'edited', { pull_request, changes: { base } }), true);
+    }
+  });
+
+  test(`${path}: omits title/body-only edits but retains combined base edits`, () => {
+    for (const changes of [{}, { title: { from: 'old' } }, { body: { from: 'old' } }]) {
+      assert.equal(admits(path, 'edited', { changes }), false);
+      assert.equal(admits(path, 'edited', { changes: { ...changes, base: { ref: { from: 'main' } } } }), true);
+    }
+  });
+}
+
+test('artifact policy omits all label changes at subscription time', () => {
+  const workflow = fs.readFileSync(artifactWorkflow, 'utf8');
+  assert.match(workflow, /types: \[opened, edited, synchronize, reopened\]/);
+  for (const action of ['labeled', 'unlabeled']) {
+    for (const name of ['type:feature', 'status:approved', 'size:exception']) {
+      assert.equal(admits(artifactWorkflow, action, { label: { name } }), false);
+    }
+  }
+});
+
+test('size notice admits only size:exception label additions and removals', () => {
+  for (const action of ['labeled', 'unlabeled']) {
+    assert.equal(admits(sizeWorkflow, action, { label: { name: 'size:exception' } }), true);
+    for (const name of ['type:feature', 'status:approved', 'size:other', '']) {
+      assert.equal(admits(sizeWorkflow, action, { label: { name } }), false);
+    }
+  }
+});
+
+test('artifact filtering preserves trusted base policy, read-only access and full file enumeration', () => {
+  const workflow = fs.readFileSync(artifactWorkflow, 'utf8');
+  assert.match(workflow, /^  pull_request_target:/m);
+  assert.match(workflow, /ref: \$\{\{ github.event.pull_request.base.sha \}\}/);
+  assert.match(workflow, /persist-credentials: false/);
+  assert.match(workflow, /^  contents: read$/m);
+  assert.match(workflow, /^  pull-requests: read$/m);
+  assert.match(workflow, /await listPullRequestFiles\(github,/);
+  assert.doesNotMatch(workflow, /: write|pull_request.head|merge_group|pull_request:/);
 });
 
 test('CI includes the new suite while preserving all previous policy helper suites', () => {

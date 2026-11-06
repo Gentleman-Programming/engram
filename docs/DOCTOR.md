@@ -2,6 +2,54 @@
 
 `engram doctor` runs read-only operational diagnostics against the local SQLite store and, for unfiltered CLI runs, generic MCP client registrations. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
 
+## SQLite CANTOPEN context
+
+SQLite errors with primary result code `SQLITE_CANTOPEN` (14) returned through
+Engram's store driver fence now include the failing driver operation and full
+numeric result code, for example:
+
+```text
+SQLite CANTOPEN during conn.exec_context (code 14)
+```
+
+Connection open/prepare/begin, context execution/query, ping/session reset,
+file-control, statement, transaction and row error boundaries are covered.
+Fallbacks retain the operation that actually ran; an already annotated error
+keeps its innermost operation. Caller context may precede this text.
+The diagnostic does not render the original driver message, SQL, arguments,
+DSN or private paths. The original error remains available via Go `errors.Is`
+and `errors.As`; extended SQLite codes are retained. Other errors are unchanged.
+
+This is error annotation, not a new doctor check. It adds no filesystem probes,
+opens/closes, retries, repairs, environment or pragma changes. Existing generation
+checks and cleanup still run as before. It cannot identify the failing OS
+filename, TEMP location or Win32 error, distinguish permission from resource
+failures, or establish the unexplained cause of #1937. That issue remains open;
+this diagnostic scope is tracked separately in #2025.
+
+## Project alias evidence and repair veto
+
+Directory and manual-name mismatch findings include `project_aliases` evidence.
+Doctor resolves the exact session cwd and the actual Git-root candidate key,
+not the remote label or private project binding (see [aliases](PROJECT-ALIASES.md)).
+An unavailable or invalid root key supplies no key-alias evidence; the exact cwd
+alias is still inspected. Such a root does not invalidate independent repair evidence.
+Repair planning reads aliases afresh: conflicting key/cwd aliases or an alias
+pointing away from the proposed target produce a
+`project_alias_contradicts_reclassification` skip. With no remaining actions,
+even `--apply` is a nonmutating `noop`. Thus `"from_project": "my-name",` /
+`"to_project": "upstream-name",` is not proposed when a relevant alias contradicts it.
+Aliases never establish historical ownership or authorize moves; agreeing aliases
+only leave an independently supported repair eligible. No-alias behavior is unchanged.
+
+## Automatic repair backup privacy
+
+On Unix, automatic SQLite repair snapshots under `<ENGRAM_DATA_DIR>/backups/` are reserved with mode `0600` before SQLite writes to them. New backup directories are created with mode `0700`. Reservation or close errors stop the backup before repair proceeds. Windows access remains governed by inherited ACLs.
+
+Existing directories and snapshots keep their permissions and contents; there is no automatic permission migration or cleanup. Older snapshots can remain readable by other local users when their parent directories are traversable. Review those copies separately, since they contain the plaintext memory store. This change does not retroactively make them private.
+
+A failed attempt can leave an empty or incomplete backup reservation. File presence alone is not proof of a valid recovery copy; verify a backup before restoring it.
+
 ## Enrolled sync journal repair
 
 Before export or autosync push, missing journal entries are repaired in bounded atomic batches. A failed or cancelled attempt preserves earlier committed batches; retry resumes missing work without treating partial progress as completion. Other operations such as enrollment, project merge and cloud upgrade retain their caller-owned atomic transactions. This does not turn the base doctor command into a repair operation or promise a writer latency bound.

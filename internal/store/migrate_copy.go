@@ -3,9 +3,11 @@ package store
 import (
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -347,6 +349,11 @@ func copyCatalog(db *sql.DB) (map[string]copyCatalogObject, error) {
 		if e = rows.Scan(&name, &o.Kind, &o.Table, &o.SQL); e != nil {
 			return nil, e
 		}
+		// SQLite trigger names can collide with index/table names. A name-keyed
+		// map must not discard an unknown object before exact comparison.
+		if _, exists := out[name]; exists {
+			return nil, fmt.Errorf("unsupported database catalog; duplicate object name")
+		}
 		o.SQL = copySQLWhitespace(o.SQL)
 		out[name] = o
 	}
@@ -356,9 +363,9 @@ func copyCatalog(db *sql.DB) (map[string]copyCatalogObject, error) {
 	return out, rows.Close()
 }
 
-// Supported catalogs are the complete current migration catalog and the 3.3.2
-// catalog: local git v3.3.2 -> b81ea5e differs only by session_finalizations and
-// the two superseded_by_sync_id columns. Schema version equality alone is never
+// Supported catalogs are the current migration catalog, the existing derived
+// legacy compatibility shape originally based on the v3.3.2 -> b81ea5e diff,
+// and one frozen complete v3.6.0 catalog. Schema version equality alone is never
 // admission. Unknown objects, columns, triggers and constraints fail closed.
 func copyValidateDB(db *sql.DB) error {
 	var v int
@@ -403,6 +410,24 @@ func copyValidateDB(db *sql.DB) error {
 	if reflect.DeepEqual(actual, current) {
 		return nil
 	}
+	// The immediately preceding catalog differs only by this derived index.
+	// Compare whole catalogs, never admit arbitrary optional objects.
+	withoutEvidence := maps.Clone(current)
+	delete(withoutEvidence, "sync_chunk_delete_evidence")
+	delete(withoutEvidence, "sqlite_autoindex_sync_chunk_delete_evidence_1")
+	if reflect.DeepEqual(actual, withoutEvidence) {
+		return nil
+	}
+	// The digest pins every normalized object (kind, owner and SQL), not merely
+	// object names or a set of independently optional migration differences.
+	// Its complete migration-produced catalog and provenance live in testdata.
+	encoded, e := json.Marshal(actual)
+	if e != nil {
+		return e
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(encoded)) == "1f217c73a6f4949a5e84e92a5e79c5096e3e18e1c4e8f97b0af9067d6d1abf95" {
+		return nil
+	}
 	delete(current, "session_finalizations")
 	delete(current, "sqlite_autoindex_session_finalizations_1")
 	for _, name := range []string{"observations", "sync_delete_tombstones"} {
@@ -410,6 +435,11 @@ func copyValidateDB(db *sql.DB) error {
 		o.SQL = strings.Replace(o.SQL, "superseded_by_sync_id TEXT,", "", 1)
 		current[name] = o
 	}
+	if reflect.DeepEqual(actual, current) {
+		return nil
+	}
+	delete(current, "sync_chunk_delete_evidence")
+	delete(current, "sqlite_autoindex_sync_chunk_delete_evidence_1")
 	if reflect.DeepEqual(actual, current) {
 		return nil
 	}

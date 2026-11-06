@@ -76,12 +76,24 @@ var suggestTopicKey = store.SuggestTopicKey
 
 var capturePromptForSave = (*store.Store).CapturePromptForSave
 
+var listSaveProjectNames = (*store.Store).ListProjectNames
+
+var hasSaveProjectObservations = (*store.Store).HasObservationsForProject
+
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
 
-var loadContextStats = func(s *store.Store) (*store.Stats, error) {
-	return s.Stats()
+var loadContextStats = func(s *store.Store, project string) (*store.Stats, int, error) {
+	if project == "" {
+		return s.ContextStats("", memContextMaxStatsProjects)
+	}
+	// Scoped lists are already narrow; retain their existing query path.
+	stats, err := s.StatsProject(project)
+	if err != nil {
+		return nil, 0, err
+	}
+	return stats, len(stats.Projects), nil
 }
 
 func truncationWarning(metadata store.TruncationMetadata) string {
@@ -333,10 +345,10 @@ type coreToolDesc struct {
 }
 
 var coreTools = []coreToolDesc{
-	{"mem_save", "mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)"},
+	{"mem_save", "mem_save — save verified durable conclusions, grouped by topic"},
 	{"mem_search", "mem_search — find past work, decisions, or context from previous sessions"},
-	{"mem_context", "mem_context — get recent session history (call at session start or after compaction)"},
-	{"mem_session_summary", "mem_session_summary — save end-of-session summary (MANDATORY before saying \"done\")"},
+	{"mem_context", "mem_context — get recent history for useful recall or relevant recovery"},
+	{"mem_session_summary", "mem_session_summary — significant explicit closure or handoff; ordinary completion does not require it"},
 	{"mem_get_observation", "mem_get_observation — get full untruncated content of a search result by ID"},
 	{"mem_save_prompt", "mem_save_prompt — save user prompt for context"},
 	{"mem_current_project", "mem_current_project — detect current project from cwd (recommended first call)"},
@@ -403,7 +415,7 @@ func buildServerInstructions(allowlist map[string]bool) string {
 	}
 
 	if shouldRegister("mem_save", allowlist) {
-		b.WriteString("PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.\n\n")
+		b.WriteString("PROACTIVE SAVE RULE: Persist verified durable knowledge costly to reconstruct; group related conclusions, not every event.\n\n")
 	}
 	if hasRegisteredMemoryWriter(allowlist) {
 		b.WriteString("## DELIVERY GUARANTEE\n\n" +
@@ -559,6 +571,8 @@ FORMAT for content — use this structured format:
   **Why**: [the reasoning, user request, or problem that drove it]
   **Where**: [files/paths affected, e.g. src/auth/middleware.ts, internal/store/store.go]
   **Learned**: [any gotchas, edge cases, or decisions made — omit if none]
+
+If candidate_detection_status is incomplete, the observation was saved but conflict detection failed or only partially persisted. Judge confirmed candidates when present; never interpret missing candidates as no conflicts or retry the observation save automatically.
 
 TITLE should be short and searchable, like: "JWT auth middleware", "FTS5 query sanitization", "Fixed N+1 in user list"
 
@@ -734,6 +748,12 @@ Examples:
 				mcp.WithString("content",
 					mcp.Required(),
 					mcp.Description("The user's prompt text"),
+				),
+				mcp.WithString("directory",
+					mcp.Description("Absolute workspace directory for this call when the server starts elsewhere. Does not replace session or process project authority. Discovery does not bind later writes."),
+				),
+				mcp.WithString("cwd",
+					mcp.Description("Alias for directory; directory takes precedence."),
 				),
 				mcp.WithString("session_id",
 					mcp.Description(sessionIDPropertyDescription),
@@ -1537,6 +1557,33 @@ func handlePin(s *store.Store, pinned bool) server.ToolHandlerFunc {
 	}
 }
 
+// prepareWriteProject preserves raw detection evidence separately from the normalized
+// project used for persistence. Callers validate their content/options first.
+func prepareWriteProject(s *store.Store, cfg MCPConfig, activity *SessionActivity, req mcp.CallToolRequest) (projectpkg.DetectionResult, string, string, *mcp.CallToolResult) {
+	sessionID, _ := req.GetArguments()["session_id"].(string)
+	projectChoice, _ := req.GetArguments()["project"].(string)
+	_, explicitProjectProvided := req.GetArguments()["project"]
+	projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
+	recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
+	recoverySessionID := sessionID
+	if strings.TrimSpace(recoverySessionID) == "" {
+		recoverySessionID = defaultSessionID("")
+	}
+	validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
+		if strings.TrimSpace(recoveryToken) == "" {
+			return false, false
+		}
+		return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
+	}
+
+	detRes, err := resolveSaveWriteProjectWithProcessOverride(s, projectChoice, explicitProjectProvided, projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
+	if err != nil {
+		return detRes, "", "", writeProjectErrorResult(activity, recoverySessionID, detRes, err)
+	}
+	project, warning := store.NormalizeProject(detRes.Project)
+	return detRes, project, warning, nil
+}
+
 func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		timing := beginSaveTiming()
@@ -1565,9 +1612,6 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		scope, _ := req.GetArguments()["scope"].(string)
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
-		_, explicitProjectProvided := req.GetArguments()["project"]
-		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
-		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
 		var capturePrompt *bool
 		if value, present := req.GetArguments()["capture_prompt"]; present {
 			option, ok := value.(bool)
@@ -1576,33 +1620,16 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			}
 			capturePrompt = &option
 		}
-		recoverySessionID := sessionID
-		if strings.TrimSpace(recoverySessionID) == "" {
-			recoverySessionID = defaultSessionID("")
+		detRes, project, normWarning, projectError := prepareWriteProject(s, cfg, activity, req)
+		if projectError != nil {
+			return projectError, nil
 		}
-		validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
-			if strings.TrimSpace(recoveryToken) == "" {
-				return false, false
-			}
-			return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
-		}
-
-		// Resolve write project using the full MCP precedence: explicit request,
-		// existing session association, process override, repo config/directory detection, then cwd fallback.
-		detRes, err := resolveSaveWriteProjectWithProcessOverride(s, projectChoice, explicitProjectProvided, projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
-		if err != nil {
-			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
-		}
-		project := detRes.Project
-
-		// Normalize project name and capture warning
-		normalized, normWarning := store.NormalizeProject(project)
-		project = normalized
 
 		if typ == "" {
 			typ = "manual"
 		}
 		if sessionID == "" {
+			var err error
 			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
 			if err != nil {
 				return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
@@ -1613,20 +1640,23 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Check for similar existing projects (only when this project has no existing observations)
 		var similarWarning string
 		if project != "" {
-			existingNames, _ := s.ListProjectNames()
-			isNew := true
-			for _, e := range existingNames {
-				if e == project {
-					isNew = false
-					break
+			hasObservations, _ := hasSaveProjectObservations(s, project)
+			if !hasObservations {
+				existingNames, _ := listSaveProjectNames(s)
+				isNew := true
+				for _, e := range existingNames {
+					if e == project {
+						isNew = false
+						break
+					}
 				}
-			}
-			if isNew && len(existingNames) > 0 {
-				matches := projectpkg.FindSimilar(project, existingNames, 3)
-				if len(matches) > 0 {
-					bestMatch := matches[0].Name
-					obsCount, _ := s.CountObservationsForProject(bestMatch)
-					similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+				if isNew && len(existingNames) > 0 {
+					matches := projectpkg.FindSimilar(project, existingNames, 3)
+					if len(matches) > 0 {
+						bestMatch := matches[0].Name
+						obsCount, _ := s.CountObservationsForProject(bestMatch)
+						similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+					}
 				}
 			}
 		}
@@ -1692,7 +1722,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 
 		// Post-transaction conflict candidate detection (REQ-001).
-		// Errors are logged and swallowed — detection failure never fails the save.
+		// Detection failure does not fail the committed save, but must remain visible.
 		extra := map[string]any{"truncation": truncation}
 		// Build CandidateOptions, forwarding any MCPConfig overrides.
 		// nil fields mean "use store defaults"; explicit pointer values override.
@@ -1710,8 +1740,9 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 		candidates, candErr := s.FindCandidates(savedID, candOpts)
 		if candErr != nil {
-			// Log only — do not fail the save.
 			fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
+			extra["candidate_detection_status"] = "incomplete"
+			msg += "\nCONFLICT DETECTION INCOMPLETE — observation saved; pending relations may be partially persisted. Returned candidates include only confirmed pending judgments."
 		}
 
 		// Fetch the saved observation's sync_id for the envelope (REQ-001).
@@ -1747,7 +1778,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			extra["candidates"] = candList
 
 			msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
-		} else {
+		} else if candErr == nil {
 			extra["judgment_required"] = false
 		}
 
@@ -1911,17 +1942,16 @@ func handleReview(s *store.Store, cfg MCPConfig, activities ...*SessionActivity)
 			if id == 0 {
 				return mcp.NewToolResultError("observation_id is required for mark_reviewed"), nil
 			}
-			detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
+			project, _ := req.GetArguments()["project"].(string)
+			detRes, detErr := resolveMCPProjectWithDetector(s, project, cfg.DefaultProject, true, captureProjectDetector(s))
 			if detErr != nil {
-				return readProjectErrorResult(activity, detRes, detErr), nil
-			}
-			markReviewed := s.MarkReviewed
-			if detRes.Project != "" {
-				markReviewed = func(observationID int64) error {
-					return s.MarkReviewedForProject(observationID, detRes.Project)
+				result := readProjectErrorResult(activity, detRes, detErr)
+				if errors.Is(detErr, projectpkg.ErrAmbiguousProject) {
+					addErrorMetadata(result, map[string]any{"hint": "Ask the user to choose a project, then retry mem_review action=mark_reviewed with an explicit project."})
 				}
+				return result, nil
 			}
-			if err := markReviewed(id); err != nil {
+			if err := s.MarkReviewedForProject(id, detRes.Project); err != nil {
 				if detRes.Project != "" && errors.Is(err, store.ErrObservationNotFound) {
 					return mcp.NewToolResultError("Failed to mark reviewed: observation not found in resolved project"), nil
 				}
@@ -1971,6 +2001,10 @@ func handleDelete(s *store.Store) server.ToolHandlerFunc {
 func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
+		workspaceDir, workspaceErr := promptWorkspaceDirectory(req.GetArguments())
+		if workspaceErr != nil {
+			return mcp.NewToolResultError("Invalid workspace directory: " + workspaceErr.Error()), nil
+		}
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
@@ -2002,23 +2036,30 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 			}
 			detRes, err = resolveSaveWriteProjectWithProcessOverride(s, projectChoice, strings.TrimSpace(projectChoice) != "", projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
 		} else {
-			detRes, err = resolveWriteProjectWithChoiceAndProcessOverride(s, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
+			detRes, err = resolvePromptWorkspaceProject(s, workspaceDir, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
 		}
 		if err != nil {
 			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
+		provenance := captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject)
+		if workspaceDir != "" {
+			provenance.Directory = workspaceDir
+		}
 		if sessionID == "" {
-			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
+			sessionID, err = resolveFallbackSessionIDAtDirectory(s, project, workspaceDir, provenance)
 			if err != nil {
 				return mcp.NewToolResultError("Failed to save prompt: " + err.Error()), nil
 			}
 		}
 
 		// Capture before registration so a newly created implicit session retains evidence.
-		provenance := captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject)
-		_ = ensureImplicitSessionWithCWD(s, sessionID, project, provenance)
+		if workspaceDir == "" {
+			_ = ensureImplicitSessionWithCWD(s, sessionID, project, provenance)
+		} else {
+			_ = s.CreateSessionWithOwnershipMode(sessionID, project, workspaceDir, store.SessionOwnershipShared, provenance)
+		}
 
 		truncation := s.ContentTruncation(content)
 		_, err = s.AddPrompt(store.AddPromptParams{
@@ -2096,14 +2137,14 @@ const memContextMaxStatsProjects = 8
 // formatContextProjects renders the projects list for the mem_context stats
 // suffix: "none", the full join, or the first memContextMaxStatsProjects
 // names plus a "+N more" overflow marker.
-func formatContextProjects(names []string) string {
+func formatContextProjects(names []string, total int) string {
 	if len(names) == 0 {
 		return "none"
 	}
-	if len(names) <= memContextMaxStatsProjects {
+	if total <= memContextMaxStatsProjects {
 		return strings.Join(names, ", ")
 	}
-	return fmt.Sprintf("%s, +%d more", strings.Join(names[:memContextMaxStatsProjects], ", "), len(names)-memContextMaxStatsProjects)
+	return fmt.Sprintf("%s, +%d more", strings.Join(names[:memContextMaxStatsProjects], ", "), total-memContextMaxStatsProjects)
 }
 
 // clampMemContextResult caps the complete mem_context tool result — context
@@ -2173,17 +2214,17 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		maxBytes := memContextMaxBytes(req.GetArguments()["max_bytes"])
 
 		// #1039 (CodeRabbit major on PR #1074): the budget applies to the
-		// COMPLETE result. The stats suffix joins every project name in the
-		// store (unbounded) and the nudge is appended after the context block,
+		// COMPLETE result. The stats suffix lists bounded project names with
+		// an exact overflow count and the nudge is appended after the context block,
 		// so the suffix is rendered FIRST and its bytes are reserved from the
 		// context budget; a final clamp backstops the pathological case where
 		// the suffix alone meets or exceeds the budget.
-		stats, err := loadContextStats(s)
+		stats, totalProjects, err := loadContextStats(s, contextProject)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
 		}
 		suffix := fmt.Sprintf("\n---\nMemory stats: %d sessions, %d observations across projects: %s",
-			stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects))
+			stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects, totalProjects))
 		suffix += activity.NudgeIfNeededForProject(sessionID, project)
 
 		contextBudget := maxBytes - len(suffix)
@@ -2485,38 +2526,19 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
-		_, explicitProjectProvided := req.GetArguments()["project"]
-		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
-		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
 
 		// Reject empty/whitespace-only content before any project resolution (#393).
 		if strings.TrimSpace(content) == "" {
 			return mcp.NewToolResultError("content is required for mem_session_summary"), nil
 		}
 
-		recoverySessionID := sessionID
-		if strings.TrimSpace(recoverySessionID) == "" {
-			recoverySessionID = defaultSessionID("")
+		detRes, project, _, projectError := prepareWriteProject(s, cfg, activity, req)
+		if projectError != nil {
+			return projectError, nil
 		}
-		// validateRecoveryToken verifies if a recovery token matches the request.
-		validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
-			if strings.TrimSpace(recoveryToken) == "" {
-				return false, false
-			}
-			return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
-		}
-
-		// Resolve write project using the full MCP precedence: explicit request,
-		// existing session association, process override, repo config/directory detection, then cwd fallback.
-		detRes, err := resolveSaveWriteProjectWithProcessOverride(s, projectChoice, explicitProjectProvided, projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
-		if err != nil {
-			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
-		}
-		project := detRes.Project
-
-		project, _ = store.NormalizeProject(project)
 
 		if sessionID == "" {
+			var err error
 			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
 			if err != nil {
 				return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil
@@ -2991,11 +3013,18 @@ func captureProjectDetector(s *store.Store) func(string) projectpkg.DetectionRes
 // resolveWriteProject detects the current project from the process working
 // directory, requiring explicit designation for untracked HOME repository children.
 func resolveWriteProject(s *store.Store) (projectpkg.DetectionResult, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = "."
+	return resolveWriteProjectAtDirectory(s, "")
+}
+
+func resolveWriteProjectAtDirectory(s *store.Store, directory string) (projectpkg.DetectionResult, error) {
+	if directory == "" {
+		var err error
+		directory, err = os.Getwd()
+		if err != nil {
+			directory = "."
+		}
 	}
-	res := captureProjectDetector(s)(cwd)
+	res := captureProjectDetector(s)(directory)
 	if res.Error != nil {
 		return res, res.Error
 	}
@@ -3053,7 +3082,11 @@ func resolveWriteProjectWithChoiceAndProcessOverride(s *store.Store, projectChoi
 // resolveWriteProjectWithChoice preserves normal write resolution authority and
 // only uses an explicit project choice as a recovery path from ErrAmbiguousProject.
 func resolveWriteProjectWithChoice(s *store.Store, projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
-	res, err := resolveWriteProject(s)
+	return resolveWriteProjectWithChoiceAtDirectory(s, projectChoice, reason, validateToken, "")
+}
+
+func resolveWriteProjectWithChoiceAtDirectory(s *store.Store, projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator, directory string) (projectpkg.DetectionResult, error) {
+	res, err := resolveWriteProjectAtDirectory(s, directory)
 	if err == nil {
 		// Non-ambiguous config/git/autodetect remains authoritative. Ignore any
 		// supplied project choice so agents cannot drift writes to arbitrary buckets.
@@ -3845,15 +3878,22 @@ func resolveHostBoundSession(s *store.Store, project string) (string, error) {
 // between concurrent runtime sessions. The working directory only narrows
 // candidates; a persisted session ID remains the sole identity.
 func resolveFallbackSessionID(s *store.Store, project string, evidence ...*store.ProjectProvenance) (string, error) {
+	return resolveFallbackSessionIDAtDirectory(s, project, "", evidence...)
+}
+
+func resolveFallbackSessionIDAtDirectory(s *store.Store, project, directory string, evidence ...*store.ProjectProvenance) (string, error) {
 	if id, err := resolveHostBoundSession(s, project); err != nil || id != "" {
 		return id, err
 	}
+	if directory == "" {
+		directory = currentWorkingDirectory()
+	}
 	if s != nil {
-		ids, err := s.ActiveRuntimeSessions(project, runtimeSessionDirectory(""))
+		ids, err := s.ActiveRuntimeSessions(project, runtimeSessionDirectory(directory))
 		if err == nil {
 			switch len(ids) {
 			case 0:
-				return s.ResolveManualSession(project, currentWorkingDirectory(), evidence...)
+				return s.ResolveManualSession(project, directory, evidence...)
 			case 1:
 				return ids[0], nil
 			default:
@@ -3862,7 +3902,7 @@ func resolveFallbackSessionID(s *store.Store, project string, evidence ...*store
 		}
 	}
 	if s != nil {
-		return s.ResolveManualSession(project, currentWorkingDirectory(), evidence...)
+		return s.ResolveManualSession(project, directory, evidence...)
 	}
 	return defaultSessionID(project), nil
 }

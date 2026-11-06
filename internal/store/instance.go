@@ -14,15 +14,24 @@ import (
 )
 
 func EnsureInstanceID(dataDir string) (string, error) {
+	return EnsureInstanceIDContext(context.Background(), dataDir)
+}
+
+// EnsureInstanceIDContext reuses the shared identity authority with cancellable
+// lock admission. Filesystem operations themselves are synchronous OS calls.
+func EnsureInstanceIDContext(ctx context.Context, dataDir string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return "", fmt.Errorf("engram: create data dir: %w", err)
 	}
-	unlock, err := acquireMigrationLock(filepath.Join(dataDir, ".instance-id.lock"))
+	unlock, err := acquireMigrationLockContext(ctx, filepath.Join(dataDir, ".instance-id.lock"))
 	if err != nil {
 		return "", fmt.Errorf("engram: acquire instance identity lock: %w", err)
 	}
 	defer unlock()
-	return ensureInstanceIDLocked(context.Background(), dataDir)
+	return ensureInstanceIDLocked(ctx, dataDir)
 }
 
 // The caller holds .instance-id.lock; owned startup also holds .migrate.lock

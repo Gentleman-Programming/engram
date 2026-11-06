@@ -58,6 +58,7 @@ func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
 	})
 	id := "prompt-" + filepath.Base(root)
 	const project = "codex-prompt-probe"
+	codexFixtureProject(t, root, project)
 	if err := db.StartSession(id, project, root); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +103,7 @@ func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
 	defer fixture.Close()
 	bin := filepath.Join(root, "bin")
 	env := codexHandoffEnv(t, root, fixture.URL, buildCodexFixtureCLI(t))
-	if err := os.WriteFile(filepath.Join(bin, "touch"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "touch"), []byte("#!/bin/bash -p\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	const prompt = "capture only for an active host session"
@@ -202,6 +203,10 @@ func codexDeliveredBinderContract(t *testing.T, binary, prose string) {
 	root := t.TempDir()
 	var resolutions atomic.Int32
 	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/sessions/") {
+			http.NotFound(w, r) // Unknown host requires client inspection.
+			return
+		}
 		switch r.URL.Path {
 		case "/health":
 			_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
@@ -216,6 +221,7 @@ func codexDeliveredBinderContract(t *testing.T, binary, prose string) {
 		}
 	}))
 	defer fixture.Close()
+	codexFixtureProject(t, root, "binder-probe")
 	env := codexHandoffEnv(t, root, fixture.URL)
 	for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
 		for _, tc := range []struct {
@@ -319,6 +325,10 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 					cwd := t.TempDir()
 					requests := make(chan map[string]any, 4)
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/external/sessions/") {
+							http.NotFound(w, r) // Unknown host requires client inspection.
+							return
+						}
 						if r.URL.Path == "/external/sessions" || r.URL.Path == "/external/runtime-sessions/resolve" {
 							wantPath := "/external/sessions"
 							if event == "compact" {
@@ -402,7 +412,11 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 						}
 					}))
 					defer server.Close()
-					payload, err := json.Marshal(map[string]any{"session_id": tc.id, "cwd": cwd, "source": event, "secret": "raw-payload-secret"})
+					inputCWD := cwd
+					if tc.noProject {
+						inputCWD = filepath.Join(cwd, "absent-input")
+					}
+					payload, err := json.Marshal(map[string]any{"session_id": tc.id, "cwd": inputCWD, "source": event, "secret": "raw-payload-secret"})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -413,6 +427,9 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 					ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 					defer cancel()
 					cmd := exec.CommandContext(ctx, bashPath, filepath.Join(repoRoot(t), "plugin", "codex", "scripts", script))
+					if id, valid := tc.id.(string); !tc.noProject && valid && id != "" {
+						codexFixtureProject(t, cwd, "test-project")
+					}
 					cmd.Env = codexHandoffEnv(t, cwd, "  "+server.URL+"/external  ", binary)
 					cmd.Dir = cwd
 					cmd.Stdin = strings.NewReader(string(payload))
@@ -442,8 +459,9 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 								"The agent MUST follow this protocol without waiting for activation",
 								"tools actually exposed by Codex", "registered MCP names",
 								"mcp__engram__mem_*", "mcp__plugin_engram_engram__mem_*",
-								"User confirms", "User rejects", "Feature implemented with non-obvious approach",
-								"Configuration change or environment setup", "### PASSIVE CAPTURE",
+								"verified knowledge that is durable and costly to reconstruct",
+								"decisions with rationale", "Group related conclusions deliberately",
+								"not every task, response, or event", "### PASSIVE CAPTURE",
 								"Ordinary main-agent responses are not automatically captured",
 								"### SESSION BINDING", "Read-only tools are unchanged",
 								"mem_capture_passive(content)",
@@ -578,47 +596,104 @@ func buildCodexFixtureCLI(t *testing.T) string {
 	return codexFixturePath
 }
 
+func codexFixtureProject(t *testing.T, cwd, project string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(cwd, ".engram"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]string{"project_name": project})
+	if err := os.WriteFile(filepath.Join(cwd, ".engram", "config.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func codexHandoffToolGuard() string {
+	// MSYS pays for each command-substitution fork. Collect all lookups in one
+	// subprocess while retaining the exact type/path pair for every tool.
+	return `resolved=$(for name in engram curl cat dirname jq date touch bash; do
+  type -t "$name" && command -v "$name" || exit 92
+done) || exit 92
+expected=
+for name in engram curl cat dirname jq date touch bash; do
+  expected="${expected}file
+$bin/$name
+"
+done
+[ "$resolved" = "${expected%$'\n'}" ] || exit 92
+`
+}
+
 func codexHandoffEnv(t *testing.T, cwd, serverURL string, binary ...string) []string {
 	t.Helper()
 	target, err := url.Parse(strings.TrimSpace(serverURL))
 	if err != nil || target.Scheme != "http" || target.Hostname() != "127.0.0.1" || target.Port() == "" {
 		t.Fatalf("invalid loopback fixture URL: %q", serverURL)
 	}
+	f := newCodexIntentFixture(t)
 	bin := filepath.Join(cwd, "bin")
 	if err := os.Mkdir(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+	quote := codexIntentQuote
+	toolPaths := make(map[string]string)
+	paths := []string{f.bash, cwd, bin, filepath.ToSlash(filepath.Join(cwd, "guard-rejected"))}
+	for _, name := range []string{"cat", "dirname", "jq", "date", "touch", "bash", "curl"} {
+		toolPaths[name] = codexIntentTool(t, name, filepath.Dir(f.bash))
+		paths = append(paths, toolPaths[name])
+	}
+	if len(binary) >= 1 {
+		if _, owned := codexFixtureBinaries.Load(binary[0]); !owned || !filepath.IsAbs(binary[0]) {
+			t.Fatal("fixture CLI must be an absolute candidate-built executable")
+		}
+		binary[0] = codexIntentExecutable(t, binary[0])
+		paths = append(paths, binary[0])
+	}
+	converted := codexHandoffConvertPaths(t, f, paths)
+	posix := make(map[string]string, len(paths))
+	for i, path := range paths {
+		posix[path] = converted[i]
+	}
+	// Callers may convert dynamic command arguments through BASH_ENV. Keep
+	// that contract while preconverting the fixture's static paths above.
+	conversion := "converter=" + quote(f.cygpath) + "\n" + `convert() {
+  if [ -n "$converter" ]; then
+    "$converter" -u -- "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+`
 	writeTool := func(name, body string) {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!"+f.alias+" -p\n"+body+"\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	resolve := func(name string) string {
 		t.Helper()
-		path, err := exec.LookPath(name)
-		if err != nil || !filepath.IsAbs(path) {
-			t.Fatalf("required absolute tool path for %s: %q (%v)", name, path, err)
-		}
-		return quote(path)
+		return quote(posix[toolPaths[name]])
 	}
 	for _, name := range []string{"cat", "dirname", "jq", "date", "touch", "bash"} {
 		writeTool(name, "exec "+resolve(name)+` "$@"`)
 	}
-	reject := "printf '%s\\n' rejected >> " + quote(filepath.Join(cwd, "guard-rejected")) + "; exit 97"
+	reject := "printf '%s\\n' rejected >> " + quote(posix[filepath.ToSlash(filepath.Join(cwd, "guard-rejected"))]) + "; exit 97"
 	writeTool("engram", reject)
-	if len(binary) == 1 {
-		if _, owned := codexFixtureBinaries.Load(binary[0]); !owned || !filepath.IsAbs(binary[0]) {
-			t.Fatal("fixture CLI must be an absolute candidate-built executable")
-		}
-		writeTool("engram", `[ "$#" -eq 2 ] && [ "$1" = hook ] && [ "$ENGRAM_URL" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
+	if len(binary) >= 1 {
+		writeTool("engram", `if [ "${FIXTURE_LOCAL:-}" = 1 ] && [ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$#" = 1 ] && [ "$1" = instance-id ]; then
+  printf 'fixture-instance\n'
+  exit 0
+fi
+if [ "${FIXTURE_LOCAL:-}" = 1 ] && [ "$#" = 2 ] && [ "$1" = protocol-mode ] && [ "$2" = claude-code ]; then
+  [ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$ENGRAM_URL" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
+  exec `+quote(posix[binary[0]])+` "$@"
+fi
+[ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$#" -eq 2 ] && [ "$1" = hook ] && [ "${ENGRAM_URL:-http://127.0.0.1:$ENGRAM_PORT}" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
 case "$2" in
   codex-register|codex-resolve) [ "$ENGRAM_HOOK_OUTPUT" = json ] || { `+reject+`; } ;;
   codex-session-end) ;;
   *) `+reject+` ;;
 esac
-exec `+quote(binary[0])+` "$@"`)
+exec `+quote(posix[binary[0]])+` "$@"`)
 	}
 	writeTool("curl", "origin="+quote(target.Scheme+"://"+target.Host)+"\n"+`validate_request() {
   urls=0
@@ -631,7 +706,9 @@ exec `+quote(binary[0])+` "$@"`)
         shift 2 ;;
       -d)
         [ "$#" -ge 2 ] || return 1
-        printf '%s' "$2" | jq -e 'type == "object" and (.session_id | type) == "string"' >/dev/null || return 1
+        printf '%s' "$2" | jq -e 'type == "object" and (((.session_id | type) == "string") or
+          (env.FIXTURE_LOCAL == "1" and (.id | type) == "string" and (.project | type) == "string" and
+           (.directory | type) == "string" and .resume == true and (.ownership_mode == "shared" or .ownership_mode == "project_owned")))' >/dev/null || return 1
         shift 2 ;;
       -X|-H|--data-binary|-w)
         [ "$#" -ge 2 ] || return 1
@@ -648,12 +725,84 @@ exec `+quote(binary[0])+` "$@"`)
 }
 validate_request "$@" || { `+reject+`; }
 exec `+resolve("curl")+` --disable --noproxy '*' --proxy '' --proto '=http' --globoff --max-time 3 "$@"`)
-	return []string{
-		"PATH=" + bin, "HOME=" + cwd, "USERPROFILE=" + cwd,
-		"APPDATA=" + cwd, "LOCALAPPDATA=" + cwd, "XDG_CONFIG_HOME=" + cwd,
-		"CURL_HOME=" + cwd, "CODEX_HOME=" + cwd, "TMPDIR=" + cwd, "TMP=" + cwd, "TEMP=" + cwd,
-		"ENGRAM_DATA_DIR=" + cwd, "ENGRAM_PORT=" + target.Port(), "ENGRAM_URL=" + serverURL,
+	gate := filepath.Join(cwd, "private-startup.sh")
+	startup := "unset BASH_ENV\ntrusted_bash=" + quote(posix[f.bash]) + "\nbash_alias=" + quote(f.alias) + "\nroot=" + quote(posix[cwd]) + "\nbin=" + quote(posix[bin]) + "\n" + conversion + `
+[ "$bash_alias" -ef "$trusted_bash" ] && [ /bin/bash -ef "$trusted_bash" ] || exit 91
+[ -d "$root" ] || exit 91
+cd "$root" || exit 91
+export PATH="$bin"
+hash -r
+` + codexHandoffToolGuard() + `
+if command -v engram.exe >/dev/null || command -v curl.exe >/dev/null; then
+  exit 93
+fi
+`
+	if f.cygpath != "" {
+		// Runtime initialization used the parent-lived native temp. Only after
+		// all trusted startup checks restore private temps for hook children.
+		startup += "export TMP=\"$root/tmp\" TEMP=\"$root/tmp\"\n"
 	}
+	if err := os.WriteFile(gate, []byte(startup), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if len(binary) == 2 && binary[1] == "managed-local" {
+		serverURL = ""
+	}
+	env := []string{
+		"PATH=", "BASH_ENV=" + filepath.ToSlash(gate), "LC_ALL=C", "MSYS_NO_PATHCONV=1",
+		"FIXTURE_LOCAL=" + map[bool]string{true: "1"}[serverURL == ""],
+		"ENGRAM_PORT=" + target.Port(), "ENGRAM_URL=" + serverURL,
+	}
+	for subdir, keys := range map[string][]string{
+		"home":   {"HOME", "USERPROFILE"},
+		"config": {"APPDATA", "XDG_CONFIG_HOME", "ENGRAM_CONFIG_DIR", "CURL_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"},
+		"data":   {"LOCALAPPDATA", "XDG_DATA_HOME", "ENGRAM_DATA_DIR"},
+		"tmp":    {"TMPDIR", "TMP", "TEMP"},
+	} {
+		if err := os.Mkdir(filepath.Join(cwd, subdir), 0700); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range keys {
+			value := filepath.Join(cwd, subdir)
+			if key == "TMP" || key == "TEMP" {
+				value = codexBashStartupTemp(value)
+			}
+			env = append(env, key+"="+value)
+		}
+	}
+	if f.cygpath != "" {
+		env = append(env, "SystemRoot="+os.Getenv("SystemRoot"), "WINDIR="+os.Getenv("SystemRoot"), "OS=Windows_NT")
+	}
+	return env
+}
+
+func codexHandoffConvertPaths(t *testing.T, f codexIntentFixture, paths []string) []string {
+	t.Helper()
+	if f.cygpath == "" {
+		return paths
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, f.cygpath, append([]string{"-u", "--"}, paths...)...)
+	cmd.WaitDelay = time.Second
+	cmd.Env = []string{"PATH=", "MSYS_NO_PATHCONV=1", "SystemRoot=" + os.Getenv("SystemRoot"), "WINDIR=" + os.Getenv("SystemRoot"), "TMP=" + codexBashProcessTemp, "TEMP=" + codexBashProcessTemp}
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("%w: %v", ctx.Err(), err)
+		}
+		t.Fatalf("convert pinned fixture paths: %v", err)
+	}
+	converted := strings.Split(strings.TrimSuffix(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n"), "\n")
+	if len(converted) != len(paths) {
+		t.Fatal("fixture path conversion count mismatch")
+	}
+	for _, path := range converted {
+		if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "\r\n") {
+			t.Fatal("invalid converted fixture path")
+		}
+	}
+	return converted
 }
 
 func TestCodexHandoffTransportBoundary(t *testing.T) {
@@ -682,8 +831,8 @@ func TestCodexHandoffTransportBoundary(t *testing.T) {
 		}
 	}
 	guard := exec.Command(codexTestBash(t), filepath.Join(cwd, "bin", "engram"), "hook", "codex-resolve")
-	guard.Env = env
-	if err := guard.Run(); err == nil {
+	guard.Env, guard.Dir = env, cwd
+	if err := guard.Run(); err == nil || guard.ProcessState.ExitCode() != 97 {
 		t.Fatal("fixture selected an ambient CLI rather than its rejecting guard")
 	}
 	if len(requests) != 0 {
@@ -691,5 +840,18 @@ func TestCodexHandoffTransportBoundary(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cwd, "guard-rejected")); err != nil {
 		t.Fatalf("missing rejection evidence: %v", err)
+	}
+	positive := exec.Command(codexTestBash(t), "--noprofile", "--norc", "-c", `
+for name in engram curl cat dirname jq date touch bash; do
+  [ "$(type -t "$name")" = file ] && [ "$(command -v "$name")" = "$PATH/$name" ] || exit 92
+done
+curl -sf "$1/sessions" --max-time 1
+`, "private-preflight", server.URL)
+	positive.Env, positive.Dir = env, cwd
+	if output, err := positive.CombinedOutput(); err != nil {
+		t.Fatalf("owned endpoint rejected: %v: %s", err, output)
+	}
+	if len(requests) != 1 {
+		t.Fatal("owned endpoint must receive exactly one request")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -57,6 +58,11 @@ func CheckLatest(current string) CheckResult {
 		return checkFailed("Could not check for updates: development builds do not map to a release version.")
 	}
 
+	running := normalizeVersion(current)
+	if !isPlainRelease(running) {
+		return checkFailed("Could not check for updates: current version does not map to a plain release version.")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
 	defer cancel()
 
@@ -88,9 +94,8 @@ func CheckLatest(current string) CheckResult {
 	}
 
 	latest := normalizeVersion(release.TagName)
-	running := normalizeVersion(current)
 
-	if latest == "" {
+	if !isPlainRelease(latest) {
 		return checkFailed("Could not check for updates: GitHub did not return a release version.")
 	}
 
@@ -121,7 +126,31 @@ func normalizeVersion(v string) string {
 	return strings.TrimPrefix(strings.TrimSpace(v), "v")
 }
 
+// isPlainRelease accepts exactly three numeric components, without suffixes.
+// Bound each component to int so the numeric comparison cannot overflow.
+func isPlainRelease(v string) bool {
+	segments := strings.Split(v, ".")
+	if len(segments) != 3 {
+		return false
+	}
+	for _, segment := range segments {
+		if segment == "" || (len(segment) > 1 && segment[0] == '0') {
+			return false
+		}
+		for _, c := range segment {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		if _, err := strconv.Atoi(segment); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // isNewer returns true if latest > current using simple semver comparison.
+// Callers must validate both inputs with isPlainRelease first.
 func isNewer(latest, current string) bool {
 	latestParts := splitVersion(latest)
 	currentParts := splitVersion(current)

@@ -25,7 +25,7 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/health":
-					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"instance_id":"fixture-instance"}`))
 				case "/project/current":
 					requestedCWD = r.URL.Query().Get("cwd")
 					_, _ = w.Write([]byte(`{"project":"configured-project","project_source":"config"}`))
@@ -77,7 +77,7 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch r.URL.Path {
 					case "/health":
-						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(`{"instance_id":"fixture-instance"}`))
 					case "/project/current":
 						w.WriteHeader(response.status)
 						_, _ = w.Write([]byte(response.body))
@@ -104,7 +104,7 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/health":
-					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"instance_id":"fixture-instance"}`))
 				case "/project/current":
 					_, _ = w.Write([]byte(`{"project":"override-project","project_source":"process_override"}`))
 				case "/sessions":
@@ -150,16 +150,14 @@ func lifecycleProjectDirectory(t *testing.T) string {
 
 func runLifecycleSessionStart(t *testing.T, bashPath, agent, serverURL, binary, input string) {
 	t.Helper()
-	parsedURL, err := url.Parse(serverURL)
+	_, err := url.Parse(serverURL)
 	if err != nil {
 		t.Fatalf("parse server URL: %v", err)
 	}
 	adapterPath := filepath.Join(repoRoot(t), "plugin", agent, "scripts", "session-start.sh")
 	run := exec.Command(bashPath, adapterPath)
-	run.Env = append(os.Environ(), "ENGRAM_URL="+serverURL, "ENGRAM_PORT="+parsedURL.Port())
-	if agent == "codex" {
-		run.Env = codexHandoffEnv(t, t.TempDir(), serverURL, binary)
-	}
+	run.Dir = t.TempDir()
+	run.Env = codexHandoffEnv(t, run.Dir, serverURL, binary, "managed-local")
 	run.Stdin = strings.NewReader(input)
 	if output, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("run %s session start: %v: %s", agent, err, output)

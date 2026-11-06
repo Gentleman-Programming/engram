@@ -2,6 +2,14 @@
 
 Aliases map a candidate key or working directory to a project for **future derivation only**. They do not enroll projects, grant permissions, rename existing records, rewrite history, claim historical work, or backfill delivery. Existing routing is not switched to inbox routing by these commands; that integration is a later slice. `resolve` is a read-only preview, not a delivery operation.
 
+Doctor also exposes relevant aliases in directory/manual-name mismatch evidence.
+Its repair planner rereads aliases and vetoes contradictory historical moves,
+including conflicting key/cwd aliases, with
+`project_alias_contradicts_reclassification`. This is a safety veto, not alias
+ownership authority: aliases never create repair actions. Agreeing aliases do
+not replace existing repair evidence; absent aliases preserve existing behavior.
+See [Doctor](DOCTOR.md#project-alias-evidence-and-repair-veto).
+
 ## Commands
 
 ```text

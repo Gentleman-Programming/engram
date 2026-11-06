@@ -379,6 +379,11 @@ func TestDoctorDiscardEmptyPromptBackupErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Disable SQLite's busy wait only on this fixture connection; the real writer
+	// lock and production backup retry logic still exercise publication failure.
+	if _, err := s.DB().Exec(`PRAGMA busy_timeout=0`); err != nil {
+		t.Fatal(err)
+	}
 	old := storeNew
 	storeNew = func(store.Config) (*store.Store, error) { return s, nil }
 	defer func() { storeNew = old }()

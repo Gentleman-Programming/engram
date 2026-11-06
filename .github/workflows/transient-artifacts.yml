@@ -2,7 +2,7 @@ name: Transient Artifact Check
 
 on:
   pull_request_target:
-    types: [opened, edited, labeled, unlabeled, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened]
 
 permissions:
   contents: read
@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   check-transient-artifacts:
+    # Only base edits can change the diff or trusted policy; title/body edits cannot.
+    if: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
     name: Check PR Has No Transient Artifacts
     runs-on: ubuntu-latest
     steps:

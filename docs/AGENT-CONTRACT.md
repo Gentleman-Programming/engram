@@ -5,6 +5,10 @@ current 23-tool MCP `agent` profile and its semantic/projection metadata. Its
 status is **`mcp-foundation`**, not a claim that Pi already implements the same
 contract. Runtime negotiation and Pi alignment are not enabled by this artifact.
 
+The [behavioral evidence matrix](AGENT-BEHAVIOR-EVIDENCE.md) separates current
+operation/rule tests from execution results and remaining fault/host/release proof.
+It does not upgrade this artifact's status.
+
 ## Regenerate and check
 
 Run from the repository root:
@@ -28,6 +32,46 @@ go run ./tools/agent-contract -output docs/contracts/agent-contract-v1.json
 
 `-output` changes the destination. Help and argument rejection do not generate
 an artifact or open a data directory.
+
+## Verify a Pi model-input capture
+
+The existing command also supports an independent, read-only mode:
+
+```sh
+go run ./tools/agent-contract -verify-pi /path/to/capture.json
+node --test plugin/pi/test/pi-schema-projections.test.mjs
+```
+
+The input file is a nonempty JSON array of actual serialized registrations:
+`[{"name":"mem_...","parameters":{...JSON schema...}}]`. The Node regression
+captures registrations with the existing disposable sandbox and real pinned
+TypeBox 1.3.34 (Node.js 24 and existing plugin test dependencies required).
+It builds the existing Go command once in temporary storage; no server is needed.
+The repository-only Node test skips when the Go executable or repository contract
+artifact is genuinely absent (for example in a packaged copy). Failed toolchain
+commands, builds, artifact reads other than absence, and verification errors fail
+rather than skip; a complete checkout still runs every real-capture case.
+
+`-verify-pi` calls the [Go-owned projection verifier](PI-TOOL-PROJECTIONS.md#go-owned-input-projection-verification)
+against live Go authority, not a second inventory or the checked-in artifact.
+It never writes an artifact/capture or opens a store. The binary exits:
+
+- **0**, with empty stdout/stderr: scope-only projection match.
+- **1**, with empty stdout and the exact Go verifier error plus newline on stderr:
+  refused capture, including invalid JSON, duplicates, inventory/schema differences
+  or unsupported source projections.
+- **2**, with empty stdout: usage error or unavailable input file. Read failures
+  emit only `pi input: capture unavailable`, without private paths.
+
+Explicit blank/whitespace paths reject with `verify-pi path must not be blank`.
+Combining verification with explicitly supplied `-output` or `-check` rejects with
+`verify-pi cannot be combined with output or check`, even for `-check=false` or
+an output equal to its default. Diagnostics end with a newline. `-h` describes
+both modes; legacy generation and freshness checking remain independent.
+`go run` additionally reports a failing child's exit status.
+
+Success is not semantic parity, installed-host compatibility or release approval.
+The raw diagnostic, artifact digest/status/freshness and MCP ratchet are unchanged.
 
 ## Authority and digest
 
@@ -113,11 +157,11 @@ describes host-owned context separately from MCP model-visible parameters.
 Observation IDs, explicit session IDs, host runtime IDs, continuation IDs, and
 provenance are not interchangeable.
 
-`target_rule` is a proposed alignment rule, not existing behavior. In particular,
-the agreed `mem_review` target admits an explicit project for `mark_reviewed`,
-uses the resolved current project when omitted, and never marks globally. The
-current MCP branch still ignores that argument for this action; Pi accepts it.
-No review handler behavior is changed by exporting this foundation.
+`target_rule` records the review alignment rule now enforced by Go:
+`mem_review` accepts an explicit project for `mark_reviewed`, uses the resolved
+current project when omitted, and never marks globally. Explicit project outranks
+process/default context; unresolved write context is refused. List behavior
+remains global when project is omitted; the `id` alias remains supported.
 
 Known differences include save conflict-candidate output, native HTTP result/error
 envelopes, host-owned session attribution, and project/personal-scope selection.

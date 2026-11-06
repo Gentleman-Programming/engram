@@ -100,6 +100,13 @@ func TestServeOwnedRejectsBeforeStore(t *testing.T) {
 
 func TestServeOwnedStartupFailure(t *testing.T) {
 	cmd, dir := ownedCommand(t)
+	// Keep the parent alive: EOF requests successful shutdown and must not
+	// compete with the invalid-store startup failure asserted by this test.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stdin.Close() }()
 	if err := os.WriteFile(dir, []byte("not a store"), 0600); err != nil {
 		t.Fatal(err)
 	}

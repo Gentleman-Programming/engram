@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   pr-size-notice:
+    # The diff and size:exception are inputs; unrelated PR metadata is not.
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base != null) && ((github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'size:exception') }}
     name: PR Size Notice
     runs-on: ubuntu-latest
     concurrency:

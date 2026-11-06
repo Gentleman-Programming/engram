@@ -75,7 +75,7 @@ func TestReleaseStaging(t *testing.T) {
 		}
 	})
 	t.Run("build-and-package-evidence", func(t *testing.T) {
-		for _, want := range []string{"go-version: \"1.25.10\"", "GOTOOLCHAIN: local", "CGO_ENABLED: '0'", "linux darwin windows", "amd64 arm64", "-mod=readonly", "-trimpath", "-buildvcs=true", "-X main.version=", "go version -m", "vcs.revision=", "vcs.modified=false", "git status --porcelain", "--untracked-files=all", "npm pack --ignore-scripts --json --pack-destination", "sha256", "sha512", "workflow_sha", "candidate_sha", "run_attempt"} {
+		for _, want := range []string{"go-version: \"1.26.10\"", "GOTOOLCHAIN: local", "CGO_ENABLED: '0'", "linux darwin windows", "amd64 arm64", "-mod=readonly", "-trimpath", "-buildvcs=true", "-X main.version=", "go version -m", "vcs.revision=", "vcs.modified=false", "git status --porcelain", "--untracked-files=all", "npm pack --ignore-scripts --json --pack-destination", "sha256", "sha512", "workflow_sha", "candidate_sha", "run_attempt"} {
 			if !strings.Contains(w, want) {
 				t.Errorf("missing build/package evidence %q", want)
 			}

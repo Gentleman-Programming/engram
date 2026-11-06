@@ -21,6 +21,10 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+### Fixed
+
+- Claude's Windows native write/session hook can recover a refused default managed-local server, verify instance continuity, and retry the owner lookup once without weakening session attribution (#1956). Explicit endpoints, redirects and non-refusal failures remain fail-closed.
+
 ### Core release recovery (Engram 3.3.2)
 
 - **chore(deps):** classify the existing `modernc.org/libc v1.70.0` requirement as direct so the unchanged release module-tidy gate passes; dependency versions and runtime behavior are unchanged.

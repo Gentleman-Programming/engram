@@ -139,36 +139,77 @@ func TestClaudeCodeHooksAreNoOpUnderPi(t *testing.T) {
 		}
 
 		t.Run(tc.name+"/claude-pre-tool-use", func(t *testing.T) {
-			srv, requests := piGuardServer(t)
-			cmd := exec.Command(engramBin, "hook", "claude-pre-tool-use")
-			cmd.Stdin = strings.NewReader(hookInput)
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "ENGRAM_URL=" + srv.URL, "ENGRAM_DATA_DIR=" + t.TempDir()}
-			switch {
-			case piSet:
-				cmd.Env = append(cmd.Env, "PI_CODING_AGENT="+tc.env)
-			case tc.env == "empty":
-				cmd.Env = append(cmd.Env, "PI_CODING_AGENT=")
-			}
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &stdout, &stderr
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("engram hook claude-pre-tool-use must exit 0: %v\nstderr: %s", err, stderr.String())
-			}
-			got := requests.list()
-			if piSet {
-				if stdout.Len() != 0 {
-					t.Errorf("stdout = %q, want empty under Pi", stdout.String())
-				}
-				if len(got) != 0 {
-					t.Errorf("requests = %v, want none under Pi", got)
-				}
-				return
-			}
-			if !strings.Contains(stdout.String(), `"updatedInput"`) {
-				t.Errorf("stdout = %q, want bound updatedInput without PI_CODING_AGENT", stdout.String())
-			}
-			if len(got) == 0 {
-				t.Errorf("expected session registration without PI_CODING_AGENT")
+			for _, fixture := range []string{"plain", "unrelated-git-ancestor"} {
+				t.Run(fixture, func(t *testing.T) {
+					root := t.TempDir()
+					ancestor := filepath.Join(root, "ancestor")
+					cwd := filepath.Join(ancestor, "fixture")
+					if err := os.MkdirAll(cwd, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if fixture == "unrelated-git-ancestor" {
+						// Model a snapshot below a broken worktree without relying on WSL.
+						if err := os.WriteFile(filepath.Join(ancestor, ".git"), []byte("gitdir: "+filepath.Join(root, "missing-gitdir")+"\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					// Bound discovery above this non-Git cwd, not package-wide or in
+					// production. Explicit repositories inside the fixture stay visible.
+					ceiling := ancestor
+					if inherited := os.Getenv("GIT_CEILING_DIRECTORIES"); inherited != "" {
+						ceiling += string(os.PathListSeparator) + inherited
+					}
+					srv, requests := piGuardServer(t)
+					cmd := exec.Command(engramBin, "hook", "claude-pre-tool-use")
+					cmd.Stdin = strings.NewReader(piGuardHookInput(t, map[string]any{
+						"session_id": "pi-guard-session",
+						"cwd":        cwd,
+						"tool_name":  "mcp__engram__mem_save",
+						"tool_input": map[string]string{"title": "x"},
+					}))
+					cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "ENGRAM_URL=" + srv.URL, "ENGRAM_DATA_DIR=" + t.TempDir(), "GIT_CEILING_DIRECTORIES=" + ceiling}
+					switch {
+					case piSet:
+						cmd.Env = append(cmd.Env, "PI_CODING_AGENT="+tc.env)
+					case tc.env == "empty":
+						cmd.Env = append(cmd.Env, "PI_CODING_AGENT=")
+					}
+					var stdout, stderr bytes.Buffer
+					cmd.Stdout, cmd.Stderr = &stdout, &stderr
+					if err := cmd.Run(); err != nil {
+						t.Fatalf("engram hook claude-pre-tool-use must exit 0: %v\nstderr: %s", err, stderr.String())
+					}
+					if stderr.Len() != 0 {
+						t.Errorf("stderr = %q, want empty", stderr.String())
+					}
+					got := requests.list()
+					if piSet {
+						if stdout.Len() != 0 {
+							t.Errorf("stdout = %q, want empty under Pi", stdout.String())
+						}
+						if len(got) != 0 {
+							t.Errorf("requests = %v, want none under Pi", got)
+						}
+						return
+					}
+					var response struct {
+						HookSpecificOutput struct {
+							HookEventName      string            `json:"hookEventName"`
+							PermissionDecision string            `json:"permissionDecision"`
+							UpdatedInput       map[string]string `json:"updatedInput"`
+						} `json:"hookSpecificOutput"`
+					}
+					if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+						t.Fatalf("decode hook response %q: %v", stdout.String(), err)
+					}
+					output := response.HookSpecificOutput
+					if output.HookEventName != "PreToolUse" || output.PermissionDecision != "" || len(output.UpdatedInput) != 2 || output.UpdatedInput["title"] != "x" || output.UpdatedInput["session_id"] != "pi-guard-session" {
+						t.Errorf("stdout = %q, want bound updatedInput without PI_CODING_AGENT", stdout.String())
+					}
+					if want := "GET /sessions/pi-guard-session,POST /sessions"; strings.Join(got, ",") != want {
+						t.Errorf("requests = %v, want %s", got, want)
+					}
+				})
 			}
 		})
 	}

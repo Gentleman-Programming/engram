@@ -2085,7 +2085,7 @@ func TestExportErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("store export: %v", err)
 		}
-		chunk := sy.filterNewData(data, "")
+		chunk := filterNewData(data, "")
 		chunk.Prompts = nil // Match the default Git policy in this known-hash fixture.
 		chunkJSON, err := json.Marshal(chunk)
 		if err != nil {
@@ -4692,12 +4692,12 @@ func TestFilterFunctionsAndTimeNormalization(t *testing.T) {
 	}
 
 	sy := New(nil, t.TempDir())
-	all := sy.filterNewData(data, "")
+	all := filterNewData(data, "")
 	if len(all.Sessions) != 2 || len(all.Observations) != 2 || len(all.Prompts) != 2 {
 		t.Fatalf("expected first sync to include all data, got %+v", all)
 	}
 
-	newOnly := sy.filterNewData(data, "2025-01-01T10:30:00Z")
+	newOnly := filterNewData(data, "2025-01-01T10:30:00Z")
 	if len(newOnly.Sessions) != 1 || newOnly.Sessions[0].ID != "s2" {
 		t.Fatalf("unexpected new sessions: %+v", newOnly.Sessions)
 	}
@@ -4739,8 +4739,7 @@ func TestFilterNewDataIncludesEditedObservations(t *testing.T) {
 	}
 
 	cutoff := "2025-01-01T10:30:00Z"
-	sy := New(nil, t.TempDir())
-	filtered := sy.filterNewData(data, cutoff)
+	filtered := filterNewData(data, cutoff)
 
 	ids := make([]int64, 0, len(filtered.Observations))
 	for _, o := range filtered.Observations {

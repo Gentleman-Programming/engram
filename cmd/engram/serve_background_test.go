@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,9 +45,12 @@ func TestServeBackground(t *testing.T) {
 		t.Setenv("ENGRAM_BACKGROUND_TEST_CHILD", "1")
 		t.Setenv("ENGRAM_BACKGROUND_TEST_MARKER", marker)
 		start := time.Now()
-		if err := launchServeBackground(executable, logPath); err != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := launchServeBackgroundContext(ctx, executable, logPath, nil); err != nil {
 			t.Fatal(err)
 		}
+		cancel() // A shared child must survive its launch caller's cancellation.
 		if elapsed := time.Since(start); elapsed > 2*time.Second {
 			t.Fatalf("launch took %s", elapsed)
 		}

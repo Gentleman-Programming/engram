@@ -763,6 +763,15 @@ func main() {
 		}
 	}
 
+	// Reject unsupported export limits before any startup side effects.
+	if os.Args[1] == "obsidian-export" {
+		if err := validateObsidianExportLimit(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s\n", err)
+			exitFunc(1)
+			return
+		}
+	}
+
 	if shouldCheckForUpdates(os.Args[1:]) {
 		printUpdateCheckResult(checkForUpdates(version))
 	}
@@ -1284,8 +1293,15 @@ func runMCPStdio(server *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error 
 	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals(sigCh)
 	done := make(chan struct{})
-	defer close(done)
+	watcherDone := make(chan struct{})
+	defer func() {
+		close(done)
+		// Closing done requests exit; join the watcher before returning so
+		// neither shutdown nor test cleanup can outlive its lifecycle owner.
+		<-watcherDone
+	}()
 	go func() {
+		defer close(watcherDone)
 		select {
 		case <-sigCh:
 			log.Println("[engram] shutting down...")
@@ -2546,12 +2562,36 @@ func (a *storeAdapter) Stats() *store.Stats {
 	return st
 }
 
+// validateObsidianExportLimit follows the command's value consumption and stops
+// at unknown flags so preflight does not reorder existing parser errors.
+func validateObsidianExportLimit(args []string) error {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--limit" || strings.HasPrefix(args[i], "--limit=") {
+			return errors.New("--limit is not supported by obsidian-export; omit it to export all matching observations")
+		}
+		switch args[i] {
+		case "--vault", "--project", "--since", "--graph-config", "--interval":
+			if i+1 < len(args) {
+				i++
+			}
+		case "--all", "--force", "--watch":
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 func cmdObsidianExport(cfg store.Config) {
+	if err := validateObsidianExportLimit(os.Args[2:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		exitFunc(1)
+		return
+	}
 	// Parse flags
 	var (
 		vault       string
 		project     string
-		limit       int
 		since       string
 		force       bool
 		graphConfig string
@@ -2574,13 +2614,6 @@ func cmdObsidianExport(cfg store.Config) {
 			}
 		case "--all":
 			allProjects = true
-		case "--limit":
-			if i+1 < len(os.Args) {
-				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
-					limit = n
-				}
-				i++
-			}
 		case "--since":
 			if i+1 < len(os.Args) {
 				since = os.Args[i+1]
@@ -2650,7 +2683,6 @@ func cmdObsidianExport(cfg store.Config) {
 	exportCfg := obsidian.ExportConfig{
 		VaultPath:   vault,
 		Project:     project,
-		Limit:       limit,
 		Force:       force,
 		GraphConfig: graphMode,
 	}
@@ -3143,27 +3175,15 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			return
 		}
 
-		var sources []string
-		if answer == "all" || answer == "a" {
-			for _, sm := range similar {
-				sources = append(sources, sm.Name)
+		plan := planDetectedProjectConsolidation(canonical, similar, answer)
+		if len(plan.invalidSelections) > 0 {
+			fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", plan.invalidSelections[0], len(similar))
+			if dryRun {
+				exitFunc(1)
 			}
-		} else {
-			// Parse comma-separated indices
-			for _, part := range strings.Split(answer, ",") {
-				part = strings.TrimSpace(part)
-				idx := 0
-				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(similar) {
-					fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", part, len(similar))
-					if dryRun {
-						exitFunc(1)
-					}
-					return
-				}
-				sources = append(sources, similar[idx-1].Name)
-			}
+			return
 		}
-
+		sources := plan.sources
 		if len(sources) == 0 {
 			fmt.Println("Nothing selected.")
 			return
@@ -3244,8 +3264,6 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		scanInputLine(&answer)
 		answer = strings.TrimSpace(strings.ToLower(answer))
 
-		canonical := g.Canonical
-
 		if answer == "skip" || answer == "s" || answer == "n" || answer == "" {
 			fmt.Println("  Skipped.")
 			fmt.Println()
@@ -3269,31 +3287,11 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			renameTarget, _ = store.NormalizeProject(input)
 			answer = "all" // after rename, merge everything then migrate
 		}
-		mergeCanonical, _ := store.NormalizeProject(canonical)
-
-		// Determine which sources to merge
-		var sources []string
-		if answer == "all" || answer == "a" || answer == "y" || answer == "yes" {
-			for _, name := range g.Names {
-				if name != mergeCanonical {
-					sources = append(sources, name)
-				}
-			}
-		} else {
-			// Parse comma-separated indices
-			for _, part := range strings.Split(answer, ",") {
-				part = strings.TrimSpace(part)
-				idx := 0
-				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(g.Names) {
-					fmt.Fprintf(os.Stderr, "  Invalid selection: %q (expected 1-%d)\n", part, len(g.Names))
-					fmt.Println()
-					continue
-				}
-				selected := g.Names[idx-1]
-				if selected != mergeCanonical {
-					sources = append(sources, selected)
-				}
-			}
+		plan := planGroupedProjectConsolidation(g, answer, renameTarget)
+		mergeCanonical, sources := plan.canonical, plan.sources
+		for _, part := range plan.invalidSelections {
+			fmt.Fprintf(os.Stderr, "  Invalid selection: %q (expected 1-%d)\n", part, len(g.Names))
+			fmt.Println()
 		}
 		if len(sources) == 0 {
 			fmt.Println("  Nothing to merge.")
@@ -3316,15 +3314,15 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			reportUnmergedSources(sources, result)
 		}
 
-		if renameTarget != "" && renameTarget != mergeCanonical {
-			migrateResult, err := s.MigrateProject(mergeCanonical, renameTarget)
+		if plan.renameTarget != "" && plan.renameTarget != mergeCanonical {
+			migrateResult, err := s.MigrateProject(mergeCanonical, plan.renameTarget)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error renaming %q → %q: %v\n", mergeCanonical, renameTarget, err)
+				fmt.Fprintf(os.Stderr, "  Error renaming %q → %q: %v\n", mergeCanonical, plan.renameTarget, err)
 				fmt.Println()
 				continue
 			}
 			fmt.Printf("  Renamed %q → %q: %d obs, %d sessions, %d prompts\n",
-				mergeCanonical, renameTarget,
+				mergeCanonical, plan.renameTarget,
 				migrateResult.ObservationsUpdated, migrateResult.SessionsUpdated, migrateResult.PromptsUpdated)
 		}
 		fmt.Println()
@@ -3969,7 +3967,7 @@ Commands:
                        --vault         Path to Obsidian vault root (required)
                         --project       Filter export to a single project (optional; cannot combine with --all)
                         --all           Export every project
-                       --limit         Cap exported observations at N (optional)
+                       --limit         Unsupported; rejected to protect complete reconciliation
                        --since         Export only observations after this date, e.g. 2026-01-01 (optional)
                        --force         Ignore incremental state, full re-export (optional)
                        --graph-config  Graph layout mode: preserve|force|skip (default: preserve)
@@ -4001,8 +3999,12 @@ Environment:
   ENGRAM_TIMEZONE    Timezone for timestamp display in TUI and cloud dashboard.
                      Accepts any IANA zone name (e.g. America/New_York, Europe/Berlin).
                      Falls back to system local time when unset or invalid.
+  ENGRAM_URL         Explicit nonblank URL selects client-local project inspection in native
+                     Claude/Codex hooks, including loopback SSH tunnel URLs. Unset/blank
+                     retains server resolution over local port/socket defaults. Registered
+                     owners and server permission checks remain authoritative.
   ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT
-                     Total HTTP confirmation budget for Claude/Codex PreToolUse (default: 4s).
+                     Total inspection/HTTP budget for Claude/Codex PreToolUse (default: 4s).
                      Accepts a positive Go duration, e.g. 8s or 500ms; unset, blank,
                      invalid, or nonpositive values use 4s. Increase the host hook timeout
                      too, leaving time for process startup and verdict output.

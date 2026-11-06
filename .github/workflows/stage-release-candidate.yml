@@ -50,7 +50,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
           cache: false
 
       - name: Build unsigned binaries
@@ -60,7 +60,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
-          test "$(go env GOVERSION)" = go1.25.10
+          test "$(go env GOVERSION)" = go1.26.10
           mkdir -p "$OUT"
           for os in linux darwin windows; do
             for arch in amd64 arm64; do

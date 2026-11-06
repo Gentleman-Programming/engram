@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/autosync"
@@ -154,8 +155,8 @@ func TestAutosyncPushPullRoundTrip(t *testing.T) {
 	mgr := autosync.New(fakeStore, adapter, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go mgr.Run(ctx)
+	stop := startAutosyncTestRunner(ctx, cancel, mgr.Run)
+	defer stop()
 
 	// Trigger a push cycle.
 	mgr.NotifyDirty()
@@ -198,8 +199,8 @@ func TestLocalWriteDuringTransport500(t *testing.T) {
 	mgr := autosync.New(fakeStore, adapter, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go mgr.Run(ctx)
+	stop := startAutosyncTestRunner(ctx, cancel, mgr.Run)
+	defer stop()
 
 	// Local writes should succeed even with cloud 500s.
 	const writes = 50
@@ -257,8 +258,8 @@ func TestGoroutineIsolationConcurrentWrites(t *testing.T) {
 	mgr := autosync.New(fakeStore, adapter, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go mgr.Run(ctx)
+	stop := startAutosyncTestRunner(ctx, cancel, mgr.Run)
+	defer stop()
 
 	const concurrentWrites = 1000
 	var completed int64
@@ -290,6 +291,51 @@ func TestGoroutineIsolationConcurrentWrites(t *testing.T) {
 	}
 }
 
+// Stop must join the runner before deferred server and global TLS cleanup.
+func startAutosyncTestRunner(ctx context.Context, cancel context.CancelFunc, run func(context.Context)) func() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		run(ctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func TestAutosyncTestRunnerWaitsForCompletion(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		release := make(chan struct{})
+		canceled, exited, returned := false, false, false
+
+		stop := startAutosyncTestRunner(ctx, cancel, func(ctx context.Context) {
+			<-ctx.Done()
+			canceled = true
+			<-release
+			exited = true
+		})
+		go func() {
+			stop()
+			returned = true
+		}()
+		synctest.Wait()
+		if !canceled {
+			t.Error("stop did not cancel runner")
+		}
+		if returned {
+			t.Error("stop returned before runner exit")
+		}
+		close(release)
+		synctest.Wait()
+		if !exited || !returned {
+			t.Errorf("after release: exited=%v returned=%v; want both true", exited, returned)
+		}
+	})
+}
+
 // ─── Fake store for E2E tests ─────────────────────────────────────────────────
 
 // autosyncFakeStore implements autosync.LocalStore with no DB dependency.
@@ -297,6 +343,9 @@ type autosyncFakeStore struct {
 	mu        sync.Mutex
 	mutations []fakeStoredMutation
 	pullSeq   int64
+
+	// Instance-local scheduling seam for the concurrent pagination regression.
+	beforeAppend func()
 }
 
 type fakeStoredMutation struct {
@@ -311,6 +360,9 @@ func newAutosyncFakeStore() *autosyncFakeStore {
 func (s *autosyncFakeStore) addMutation(entityKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.beforeAppend != nil {
+		s.beforeAppend()
+	}
 	s.mutations = append(s.mutations, fakeStoredMutation{
 		seq:       int64(len(s.mutations) + 1),
 		entityKey: entityKey,
@@ -360,7 +412,7 @@ func (s *autosyncFakeStore) MaxPendingSyncMutationSeq(string) (int64, error) {
 }
 
 func (s *autosyncFakeStore) ListPendingSyncMutationsAfterSeq(target string, after int64, limit int) ([]store.SyncMutation, error) {
-	pending, err := s.ListPendingSyncMutations(target, len(s.mutations))
+	pending, err := s.ListPendingSyncMutations(target, 0)
 	if err != nil {
 		return nil, err
 	}

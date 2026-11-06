@@ -63,6 +63,7 @@ func TestCandidateMemoryBenchmarkStartup(t *testing.T) {
 	}{
 		{"default", "", "^TestCandidateQueryBenchmarkMatchesPublicLookup$", "", "", nil, 0, "PASS\n", ""},
 		{"unopted benchmark", "", "^$", "^BenchmarkCandidateQuerySQLiteMemory$/^Rows1000$/^Repeat20$/^SingleProject$/^BaselineFirst$", "", []string{"-test.benchtime=1x", "-test.v"}, 0, "", ""},
+		{"valid memory startup", "1", "^$", "^BenchmarkCandidateQuerySQLiteMemory$", "", nil, 0, "", ""},
 		{"invalid value", "true", "^$", "^$", "", nil, 2, "", "candidate memory startup: ENGRAM_TEST_SQLITE_MEMORY_COUNTERS accepts only 1\n"},
 		{"wrong selector", "1", "^$", "^$", "", nil, 2, "", candidateMemorySelectorError},
 		{"tests selected", "1", "^TestCandidateQueryBenchmarkMatchesPublicLookup$", "^BenchmarkCandidateQuerySQLiteMemory$", "", nil, 2, "", candidateMemorySelectorError},

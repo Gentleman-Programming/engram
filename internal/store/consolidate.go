@@ -376,17 +376,17 @@ func (s *Store) executeConsolidationTx(tx *sql.Tx, plan *ConsolidatePlan) (*Obse
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
 	for i := range ordered {
 		src := ordered[i]
+		deletedAt := Now()
 		if _, err := s.execHook(tx,
 			`UPDATE observations
-			 SET deleted_at = datetime('now'),
+			 SET deleted_at = ?,
 			     superseded_by_sync_id = ?,
-			     updated_at = datetime('now')
+			     updated_at = ?
 			 WHERE id = ? AND deleted_at IS NULL`,
-			syncID, src.ID,
+			deletedAt, syncID, deletedAt, src.ID,
 		); err != nil {
 			return nil, err
 		}
-		var deletedAt string
 		if err := tx.QueryRow(`SELECT deleted_at FROM observations WHERE id = ?`, src.ID).Scan(&deletedAt); err != nil {
 			return nil, err
 		}

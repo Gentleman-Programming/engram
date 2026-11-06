@@ -46,6 +46,7 @@ func printConflictsUsage() {
 	fmt.Fprintln(os.Stderr, "  list       [--project P|--all]  [--status S]  [--since RFC3339]  [--limit N]")
 	fmt.Fprintln(os.Stderr, "  show       <relation_id>")
 	fmt.Fprintln(os.Stderr, "  stats      [--project P|--all]")
+	fmt.Fprintln(os.Stderr, "             list/stats omit known cross-project pending pairs; show retains evidence.")
 	fmt.Fprintln(os.Stderr, "  scan       [--project P|--all]  [--since RFC3339]  [--limit N]  [--cursor ID]  [--dry-run]  [--apply]  [--max-insert N]")
 	fmt.Fprintln(os.Stderr, "             [--semantic]  [--concurrency N]  [--timeout-per-call SECONDS]")
 	fmt.Fprintln(os.Stderr, "             [--max-semantic N]  [--yes]")
@@ -133,6 +134,7 @@ func cmdConflictsList(cfg store.Config) {
 		SinceTime:          sinceTime,
 		Limit:              limit,
 		ExcludeNotConflict: true,
+		ActionableOnly:     true,
 	}
 
 	items, err := s.ListRelations(opts)
@@ -255,7 +257,7 @@ func cmdConflictsStats(cfg store.Config) {
 	defer s.Close()
 	proj := resolveConflictsProject(s, projectFlag, allProjects)
 
-	stats, err := s.GetRelationStats(proj)
+	stats, err := s.GetActionableRelationStats(proj)
 	if err != nil {
 		fatal(err)
 		return

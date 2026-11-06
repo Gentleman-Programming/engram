@@ -1,13 +1,47 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
+
+func TestEnsureInstanceIDContextCancellationAndContinuity(t *testing.T) {
+	dir := t.TempDir()
+	want, err := EnsureInstanceID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireMigrationLock(filepath.Join(dir, ".instance-id.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err = EnsureInstanceIDContext(ctx, dir)
+	unlock()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("contended identity: %v", err)
+	}
+	got, err := EnsureInstanceIDContext(context.Background(), dir)
+	if err != nil || got != want {
+		t.Fatalf("identity continuity: %q, %v", got, err)
+	}
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	if _, err := EnsureInstanceIDContext(canceled, filepath.Join(dir, "absent")); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "absent")); !os.IsNotExist(err) {
+		t.Fatalf("expired context created directory: %v", err)
+	}
+}
 
 func TestEnsureInstanceIDRecoversMalformedAndTruncatedFiles(t *testing.T) {
 	for name, contents := range map[string]string{

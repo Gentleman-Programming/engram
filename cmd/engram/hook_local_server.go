@@ -1,0 +1,171 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+)
+
+// Eligibility describes the original lookup only; readiness is never an excuse
+// to recover from a received HTTP response or a redirected request.
+func hookLocalRecoveryEligible(platform, base, endpoint string, err error) bool {
+	if platform != "windows" || strings.TrimSpace(os.Getenv("ENGRAM_URL")) != "" || strings.TrimSpace(os.Getenv("ENGRAM_SOCKET")) != "" || base != codexHookURL() {
+		return false
+	}
+	u, parseErr := url.Parse(base)
+	if parseErr != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Path != "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	port, parseErr := strconv.Atoi(u.Port())
+	if parseErr != nil || port < 1 || port > 65535 {
+		return false
+	}
+	var denial *hookDenialError
+	if errors.As(err, &denial) && denial.redirected {
+		return false
+	}
+	var transport *url.Error
+	var operation *net.OpError
+	if !errors.As(err, &transport) || transport.Op != "Get" || transport.URL != endpoint ||
+		!errors.As(transport.Err, &operation) || operation.Op != "dial" || operation.Net != "tcp" ||
+		operation.Timeout() || !errors.Is(operation.Err, hookConnectionRefused) {
+		return false
+	}
+	target, ok := operation.Addr.(*net.TCPAddr)
+	return ok && target.IP.Equal(net.ParseIP("127.0.0.1")) && target.Port == port
+}
+
+// Test seam for launch admission; production always uses the existing launcher.
+var hookLocalServerLaunch = launchServeBackgroundContext
+
+// Match serve's home fallback without changing best-effort host binding policy.
+func hookLocalDataDir() string {
+	if dir := hostBindingDataDirFromEnvOrConfig(); dir != "" {
+		return dir
+	}
+	if home := resolveHomeFallback(); home != "" {
+		return filepath.Join(home, ".engram")
+	}
+	return ""
+}
+
+// A reachable loopback listener may belong to another data directory or OS
+// account. Confirm identity before disclosing any session or cwd to it.
+func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base string) error {
+	dir := hookLocalDataDir()
+	if dir == "" {
+		return &hookDenialError{message: "managed local server identity unconfirmed"}
+	}
+	expected, err := store.EnsureInstanceIDContext(ctx, dir)
+	if err != nil {
+		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health", nil)
+	if err != nil {
+		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
+	}
+	healthClient := *client
+	healthClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := healthClient.Do(request)
+	if err != nil {
+		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
+	}
+	defer func() { _ = response.Body.Close() }()
+	if !hookLocalHealthMatches(response, expected) {
+		return &hookDenialError{message: "managed local server identity unconfirmed: expected current data directory instance"}
+	}
+	return nil
+}
+
+func recoverHookLocalServer(ctx context.Context, client *http.Client, base string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dir := hookLocalDataDir()
+	if dir == "" {
+		return errHookSessionUnconfirmed
+	}
+	expected, err := store.EnsureInstanceIDContext(ctx, dir)
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	// SessionStart enables automatic sync for shared serve. Pass this intent to
+	// the child only; never mutate the hook's environment or cloud configuration.
+	env := os.Environ()
+	env = append(env, "ENGRAM_DATA_DIR="+dir, "ENGRAM_CLOUD_AUTOSYNC=1")
+	if err = hookLocalServerLaunch(ctx, executable, filepath.Join(dir, "serve.err.log"), env); err != nil {
+		return err
+	}
+	return hookLocalServerReady(ctx, client, base, expected)
+}
+
+func hookLocalServerReady(ctx context.Context, client *http.Client, base, expected string) error {
+	// Do not follow health redirects or accept another listener's identity.
+	healthClient := *client
+	healthClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health", nil)
+		if err != nil {
+			return err
+		}
+		response, err := healthClient.Do(request)
+		if err == nil && response.StatusCode == http.StatusInternalServerError {
+			// Startup stats can fail transiently; this is readiness polling,
+			// never permission to launch again or accept an unknown identity.
+			_ = response.Body.Close()
+		} else if err == nil {
+			matches := hookLocalHealthMatches(response, expected)
+			_ = response.Body.Close()
+			if !matches {
+				return errors.New("managed local server identity unconfirmed")
+			}
+			return ctx.Err()
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// Validate the complete bounded response, not just a valid JSON prefix. Both
+// initial admission and managed recovery enforce the same identity contract.
+func hookLocalHealthMatches(response *http.Response, expected string) bool {
+	if response.StatusCode != http.StatusOK || expected == "" {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, hookDenialBodyLimit+1))
+	if err != nil || len(body) > hookDenialBodyLimit {
+		return false
+	}
+	var health struct {
+		Status     string `json:"status"`
+		Service    string `json:"service"`
+		InstanceID string `json:"instance_id"`
+	}
+	return json.Unmarshal(body, &health) == nil && health.Status == "ok" && health.Service == "engram" && health.InstanceID == expected
+}

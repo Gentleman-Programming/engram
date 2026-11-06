@@ -42,7 +42,15 @@ func codexTestHookBinary(t *testing.T, root string) {
 	if err := os.Mkdir(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	wrapper := "#!/bin/sh\nENGRAM_TEST_HOOK_PROCESS=1 exec '" + filepath.ToSlash(executable) + "' -test.run=^TestCodexHookProcess$ -- \"$2\"\n"
+	// These pre-existing shell lifecycle fixtures exercise legacy-local native
+	// confirmation. The shell's explicit mock URL avoids its unrelated managed
+	// server startup; its native test wrapper must not reinterpret that harness
+	// URL as external-client inspection. Keep the actual endpoint via its port.
+	port := os.Getenv("ENGRAM_PORT")
+	if port == "" {
+		t.Fatal("legacy native wrapper requires configured local port")
+	}
+	wrapper := "#!/bin/sh\nENGRAM_TEST_HOOK_PROCESS=1 ENGRAM_URL= ENGRAM_SOCKET= ENGRAM_PORT='" + port + "' exec '" + filepath.ToSlash(executable) + "' -test.run=^TestCodexHookProcess$ -- \"$2\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "engram"), []byte(wrapper), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -67,8 +75,9 @@ func TestCodexLifecycleJSONPreservesOpaqueIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	useLegacyLocalHookEndpoint(t, endpoint.URL)
 	cmd := exec.Command(executable, "-test.run=^TestCodexHookProcess$", "--", "codex-register")
-	cmd.Env = append(os.Environ(), "ENGRAM_TEST_HOOK_PROCESS=1", "ENGRAM_URL="+endpoint.URL, "ENGRAM_HOOK_OUTPUT=json")
+	cmd.Env = append(os.Environ(), "ENGRAM_TEST_HOOK_PROCESS=1", "ENGRAM_HOOK_OUTPUT=json")
 	payload, _ := json.Marshal(codexPromptInput{SessionID: id, CWD: t.TempDir()})
 	cmd.Stdin = bytes.NewReader(payload)
 	output, err := cmd.Output()
@@ -105,7 +114,7 @@ func TestCodexResumeBindsEndedHostContinuation(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("end status = %d", response.StatusCode)
 	}
-	t.Setenv("ENGRAM_URL", endpoint.URL)
+	useLegacyLocalHookEndpoint(t, endpoint.URL)
 	startup, _ := json.Marshal(codexPromptInput{SessionID: "ended-host", CWD: root})
 	if id := runCodexLifecycle("codex-register", startup, endpoint.URL); id != "ended-host:resume:2" {
 		t.Fatalf("startup = %q", id)
@@ -271,7 +280,7 @@ func TestCodexAdapterPersistsWritesForDistinctSameWorktreeHosts(t *testing.T) {
 		production.ServeHTTP(w, r)
 	}))
 	defer endpoint.Close()
-	t.Setenv("ENGRAM_URL", endpoint.URL)
+	useLegacyLocalHookEndpoint(t, endpoint.URL)
 	oldStdin, oldOutput := os.Stdin, claudeHookOutput
 	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
 	mcpServer := mcp.NewServerWithConfig(db, mcp.MCPConfig{DefaultProject: project}, nil)
@@ -383,7 +392,7 @@ func TestCodexSessionStartInterleavedHostWritesAndUnconfirmedRegistration(t *tes
 		}
 	}))
 	defer endpoint.Close()
-	t.Setenv("ENGRAM_URL", endpoint.URL)
+	useLegacyLocalHookEndpoint(t, endpoint.URL)
 	t.Setenv("HOME", root)
 	t.Setenv("ENGRAM_DATA_DIR", filepath.Join(root, "data"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))

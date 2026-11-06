@@ -130,30 +130,11 @@ A memory is an evolving topic, not a log entry. Follow this workflow for every l
 5. **Ambiguous identity or failed lookup?** Do not blindly overwrite and do not fall back to a duplicate save. A failed read is not evidence of absence.
 6. **Never merge across projects or scopes.** A matching suggested \`topic_key\` or a similar title is a hint, not proof of identity.
 
-Save when one of these happens:
-- Bug fix completed
-- Architecture or design decision made
-- Non-obvious discovery about the codebase
-- Configuration change or environment setup
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
-- Feature implemented with a non-obvious approach
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Team convention documented or established
-- Workflow change agreed upon
-- Tool or library choice made with tradeoffs
-- Gotcha, edge case, or unexpected behavior found
-- User confirms or rejects a recommendation or approach
-- User expresses a preference or makes a decision after presented options
-- Discussion concludes with a clear direction chosen
-
-For completed bug fixes, include the root cause in the persisted content.
-After EVERY task, self-check: "Did I or the user make a decision, confirm or reject
-an approach, express a preference, fix a bug, learn something non-obvious, or
-establish a convention?" If yes, follow the canonical topic workflow now:
-update an existing topic, save a genuinely new topic, or write nothing if covered.
-Save verified, significant conclusions rather than routine progress, source dumps,
-or speculation. Never save secrets, credentials, private content, or personal data.
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
+Never save credentials, private content, or personal data.
 
 Format for \`mem_save\`:
 - **title**: Verb + what — short, searchable
@@ -191,10 +172,15 @@ a final \`## Key Learnings:\` section alone is not a persistence guarantee.
 
 ### DELIVERY GUARANTEE
 
+Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
+
 Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 
 ### WHEN TO SEARCH MEMORY
 
+Search when materially useful for recall or related work; mere project mentions do not require a search.
 When the user asks to recall past work:
 1. Start with \`mem_context\`, then search with 1–2 distinctive keywords.
 2. Ordinary \`mem_search\` is scoped to the detected active project; its default
@@ -206,7 +192,7 @@ When the user asks to recall past work:
 
 ### SESSION CLOSE PROTOCOL
 
-Before explicitly closing or handing off the session, call \`mem_session_summary\`
+At significant explicit closure or handoff, call \`mem_session_summary\`
 with Goal, Instructions, Discoveries, Accomplished, Next Steps, and Relevant Files.
 Ordinary task completion or merely saying "done" does not require a session summary.
 If \`mem_session_summary\` fails because Engram cannot detect a project, ask the user
@@ -1199,6 +1185,29 @@ function stopAbandonedChild(proc: ChildProcess | undefined): void {
   proc.unref();
 }
 
+// Gentle Shell's session scratch (extensions/session-scratch.ts) points the
+// session's TMPDIR/TMP/TEMP at a `gpXXXXXX` directory it removes when the
+// session ends, and a subagent's TMPDIR at a `gaXXXXXX` under it. A server
+// spawned detached from the Pi process outlives that session, and a temp
+// directory deleted under it breaks its SQLite temporary storage on Windows:
+// every write then fails with SQLITE_CANTOPEN (14) while reads stay healthy
+// (gentle-shell#2468). The detached serve spawn therefore drops the temp
+// variables named as a session scratch: without them the server resolves its
+// OS default temp, which nothing removes. Any other value — such as a temp the
+// user chose — is kept.
+const SESSION_SCRATCH_NAME = /^(?:gp|ga)[A-Za-z0-9]{6}$/;
+
+export function detachedServeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  // Opt into cloud autosync like the Claude Code and Codex launchers; the
+  // server skips it on its own when no cloud server or token is configured.
+  const result = { ...env, ENGRAM_CLOUD_AUTOSYNC: "1" };
+  for (const key of ["TMPDIR", "TMP", "TEMP"]) {
+    const value = result[key];
+    if (typeof value === "string" && SESSION_SCRATCH_NAME.test(basename(value))) delete result[key];
+  }
+  return result;
+}
+
 function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void> {
   return new Promise((resolvePromise, rejectPromise) => {
     let proc: ChildProcess | undefined;
@@ -1232,9 +1241,9 @@ function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void>
 
     try {
       proc = spawn(ENGRAM_BIN, ["serve"], {
-        // Opt into cloud autosync like the Claude Code and Codex launchers; the
-        // server skips it on its own when no cloud server or token is configured.
-        env: { ...process.env, ENGRAM_CLOUD_AUTOSYNC: "1" },
+        // The detached server outlives the session: detachedServeEnv drops the
+        // session-scratch temp variables a deleted scratch would break (#2468).
+        env: detachedServeEnv(process.env),
         windowsHide: true,
         detached: true,
         stdio: "ignore",
@@ -1621,7 +1630,7 @@ function supportsRootSessionResume(health: unknown): boolean {
 function rootResumeCompatibilityError(health: unknown): Error {
   const version = health && typeof health === "object" && typeof (health as { version?: unknown }).version === "string"
     ? (health as { version: string }).version : "unknown";
-  return new Error(`gentle-engram 0.5.0 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
+  return new Error(`gentle-engram 0.5.1 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
 }
 
 async function registerEffectiveSession(ctx: SessionContext, sessionProject: string, appendEntry: ExtensionAPI["appendEntry"] | undefined, fetch: EngramFetcher = engramFetch): Promise<string> {

@@ -29,11 +29,17 @@ resolve_project() {
   ' 2>/dev/null
 }
 
+# Only native dispatch uses the original URL intent; curl keeps its transport URL.
+# Unsnapshotted callers retain their existing environment contract.
+engram_native_hook() {
+  ENGRAM_URL="${ENGRAM_NATIVE_URL-${ENGRAM_URL:-}}" ENGRAM_HOOK_OUTPUT=json engram hook "$@"
+}
+
 # Transport the server-confirmed runtime identity; never choose a session here.
 engram_session_handoff() {
   local input="$1" project="$2" dir="$3" action="$4" effective identity=""
   if [ -n "$project" ]; then
-    effective=$(printf '%s' "$input" | ENGRAM_URL="$ENGRAM_URL" ENGRAM_HOOK_OUTPUT=json engram hook "$action" 2>/dev/null) || effective=""
+    effective=$(printf '%s' "$input" | engram_native_hook "$action" 2>/dev/null) || effective=""
     identity=$(printf '%s' "$effective" | jq -esc '
       if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
       then {session_id: .[0].session_id} else error("invalid identity") end

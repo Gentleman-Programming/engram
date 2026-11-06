@@ -38,6 +38,52 @@ capability changes or publication actions. Tests assert the diagnostic behavior;
 they do not require current schemas to match. The rejection-only release checker
 and candidate publisher safeguards remain independent and unchanged.
 
+## Go-owned input projection verification
+
+`internal/mcp.VerifyPiInputSchemas(capture []byte) error` accepts serialized
+`[{"name":"mem_...","parameters":{...}}]` registrations. Inventory and base
+schemas come from live `AgentContractJSON`/`ProfileAgent`, not another registry or
+expected-schema fixture. The pure API never writes files or opens a store.
+Nil means **scope-only shape acceptance**, not semantic parity, installed-host
+compatibility or release eligibility; status remains `mcp-foundation`.
+
+Descriptions at schema nodes and tool annotations are outside this comparison,
+not declared semantically benign. A property named `description` remains a field.
+Only required-set order and absent/empty `required` are normalized; other keywords,
+constraints and array orders remain compared. Numbers retain `json.Number` tokens.
+Actual capture schemas are never projected. Expected-only policy is bounded by:
+
+- `internal/mcp/agent_contract.go:199-230`, `session_finalize.go:24-28,44-46`:
+  host-owned session identity, optional destination/assertion cwd instead of MCP
+  recovery inputs, and required canonical content after legacy-alias omission.
+- `internal/mcp/agent_contract.go:172-182`: omit ID-lookup response-context project
+  and current-project directory alias, retaining canonical cwd only.
+- `internal/agentops/consolidate.go:24-42`, `internal/store/consolidate.go:24-26`:
+  nonempty strings and at least two distinct positive exact JSON integer IDs.
+- `internal/agentops/judgments.go:12-14,40-43`: batch size 1..32 and confidence [0,1].
+- `internal/mcp/mcp.go:2064-2067`: positive-integer max_bytes is a **model domain**,
+  not equivalence with MCP's nonpositive/fractional fallback or global coercion.
+
+Source preconditions reject incompatible types, newly present bounds (even null),
+changed omitted-field shapes and pre-existing cwd instead of overwriting them.
+Errors are `pi input: invalid capture`, `pi input: duplicate registration`,
+`pi input: inventory differs`, `pi input: NAME schema differs` (sorted first tool),
+or `pi input: unsupported source for NAME`; authority-generation errors propagate.
+
+Run from the repository root with Node.js 24 and existing TypeBox 1.3.34:
+`ENGRAM_PI_SCHEMA_REQUIRE_REAL=1 GOPROXY=off GOSUMDB=off go test ./internal/mcp -run '^TestPiInput' -count=1 -v`.
+Tests capture actual registrations twice through the existing disposable sandbox,
+then independently mutate fields/constraints/inventory and check immutability.
+Default Go-only runs skip integration only for missing Node or the fixed local
+TypeBox package used by `plugin-sandbox.mjs`; required mode turns absence into failure.
+Wrong versions, broken imports, stderr, capture/cleanup exceptions, malformed output,
+expired contexts and verifier mismatches fail, never skip. Isolated source-copy
+probes without node_modules exercise default-skip versus required-failure behavior.
+The raw diagnostic, artifact freshness and historical MCP ratchet remain separate.
+The existing CLI adds the read-only `-verify-pi` mode documented in
+[AGENT-CONTRACT.md](AGENT-CONTRACT.md#verify-a-pi-model-input-capture); no runtime
+schema behavior is introduced.
+
 ## Field audit
 
 Fields listed below record the Pi input surface and its current MCP/HTTP differences. They do not assert identical schemas, defaults or response envelopes across transports. “Runtime-injected” means the host owns the value; it must not be recovered from a model-supplied session ID. “Transport-specific” describes a deliberately different adapter envelope. “Semantic” identifies a restriction or canonical-input choice. “Accidental loss” is an outstanding capability gap, not an approved design exemption.
@@ -60,7 +106,7 @@ Fields listed below record the Pi input surface and its current MCP/HTTP differe
 | `mem_current_project` | `cwd` | **Intentional canonical-input projection:** maintainer-approved Pi `cwd` only avoids duplicating MCP transport aliases while supplying host detector input because the HTTP server can run elsewhere. MCP selects trimmed nonblank `directory`, then `cwd`, then process cwd as detector input; its configured process project may prevail before detection. Pi stringifies a truthy supplied `cwd`, otherwise host `ctx.cwd`: omitted/empty means host cwd, whitespace is forwarded; HTTP trims blank cwd to server process cwd. A supplied path does not guarantee precedence over a configured project. HTTP 404 retains the local-configuration fallback. No `directory` input or runtime behavior is added. |
 | `mem_doctor` | `check`, `project` | Shared selectors and HTTP diagnostics; Pi supplies resolved project when omitted. **Runtime/result projection:** Pi adds `caller_binding` from per-invocation host evidence; it does not register a session or mutate ownership to diagnose it. |
 | `mem_capture_passive` | `content` (required); `source` | **Runtime-injected:** effective `session_id` and resolved project. Missing source becomes `pi-tool`; content is sent through the common redaction policy. MCP's model-visible `session_id` is deliberately absent from Pi. |
-| `mem_review` | `action` (required); `project`, `limit`, `observation_id`, `id` | Shared action and ID alias. Pi lists globally when project is omitted (`all_projects=true`); mark-reviewed supplies the explicit or resolved project to the HTTP endpoint. Project-resolution failures remain errors, not implicit global writes. |
+| `mem_review` | `action` (required); `project`, `limit`, `observation_id`, `id` | Shared action and ID alias. Pi lists globally when project is omitted (`all_projects=true`); mark-reviewed supplies the explicit or resolved project to the HTTP endpoint. Project-resolution failures remain errors, not implicit global writes. On an ambiguous MCP review refusal, ask the user to choose a project, then retry `mem_review action=mark_reviewed` with that explicit project. |
 | `mem_judge` | `judgment_id`, `relation` (required); `reason`, `evidence`, `confidence`, `session_id` | Shared fields. Omitted provenance `session_id` falls back to the host ID; this existing provenance field is not the session-registration identity used by observation/prompt/summary/passive writes. |
 | `mem_judge_many` | `judgments` (required, 1–32 objects with `judgment_id`/`relation`; optional `reason`, `evidence`, `confidence`); shared `session_id` | One HTTP POST; Go validates the batch before writes and returns ordered success/error outcomes with independent item transactions. Shared provenance replaces per-item provenance. Unlike legacy Pi `mem_judge`, omission stays empty as in MCP instead of injecting the host ID. HTTP errors/partial outcomes are preserved; no client loop, rollback, exactly-once claim or uncertain-POST replay. |
 | `mem_compare` | `memory_id_a`, `memory_id_b`, `relation`, `confidence`, `reasoning` (required); `model` | Shared fields forwarded to HTTP. Required-field order has no semantic significance. |
@@ -69,6 +115,10 @@ Fields listed below record the Pi input surface and its current MCP/HTTP differe
 | `mem_unpin` | `id` (required) | Shared ID; Pi maps it to HTTP DELETE on the observation pin resource. This removes a pin, not an observation. |
 
 ## Verification and remaining work
+
+See the [behavioral evidence matrix](AGENT-BEHAVIOR-EVIDENCE.md) for named
+operation/rule coverage, real public judgment vectors, execution provenance and
+remaining write-outcome proof. Source presence is not candidate qualification.
 
 ### Metadata reconciliation evidence (#1983)
 
@@ -79,7 +129,7 @@ Fields listed below record the Pi input surface and its current MCP/HTTP differe
 | Topic keys use Go, not local slugs | `dispatchTool` calls `/topic-keys/suggest`; `topic-key-contract.test.mjs` and `native-tool-contract.test.mjs` |
 | Literal update fields are present | `mem_update` schema/PATCH body; `mem-update.test.mjs` (#1981) |
 | Canonical `cwd` is intentional | `mem_current_project` schema/dispatch, MCP alias selection and HTTP current-project handler; accepted maintainer decision above |
-| Review target is still future | MCP `mark_reviewed` resolves current/process project, ignoring explicit project; Pi forwards explicit/resolved project. `target_rule` is not implemented MCP behavior |
+| Review project ownership | Go confines `mark_reviewed` to explicit project or resolved current project and refuses unresolved write context; Pi forwards explicit/resolved project. Omitted-project list remains global; the `id` alias is preserved |
 | History is already present | `mem_get_observation` and `mem_context` schemas/GET forwarding; `observation-history.test.mjs` and #1982 context regressions |
 
 The Go metadata/public generator regression records these six corrected projections

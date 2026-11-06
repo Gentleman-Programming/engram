@@ -30,13 +30,41 @@ jobs:
               github.event.pull_request.base.repo.id, toJSON(github.event.pull_request.base.ref)) }}
         run: ':'
       - name: Evaluate issue reference
+        env:
+          ENGRAM_CI_PROOF_MANIFEST: ${{ vars.ENGRAM_CI_PROOF_MANIFEST }}
+          CI_PROOF_ADAPTER_SHA: 3a0726226a01a7756ab48e1df16a51b89829fda4f2f87214ff2cebbd519d6f4a
+          CI_PROOF_CORE_SHA: 1be88a7a4874f54d0efcfd05a19a812381e216b70c8a0a71f1217579a6a74740
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           retries: 0
           script: |
             try {
               const { evaluateNativeIssuePolicy } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-native-policy.mjs`);
-              const verdict = await evaluateNativeIssuePolicy(github, context, 'reference');
+              let proof;
+              if (process.env.ENGRAM_CI_PROOF_MANIFEST) {
+                let proofConfig;
+                try { proofConfig = JSON.parse(process.env.ENGRAM_CI_PROOF_MANIFEST); }
+                catch { throw new Error('proof-adapter: configuration'); }
+                if (proofConfig?.enabled !== false) {
+                  if (proofConfig?.enabled !== true || !proofConfig.target) throw new Error('proof-adapter: configuration');
+                    try {
+                      const { readFile } = await import('node:fs/promises');
+                      const { createHash } = await import('node:crypto');
+                      for (const [name, digest] of [['adapter', process.env.CI_PROOF_ADAPTER_SHA], ['controls', process.env.CI_PROOF_CORE_SHA]]) {
+                        const path = `${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-ci-proof-${name}.mjs`;
+                        const text = (await readFile(path.startsWith('file:') ? new URL(path) : path, 'utf8')).replaceAll('\r\n', '\n');
+                        if (createHash('sha256').update(text).digest('hex') !== digest) throw new Error();
+                      }
+                    } catch { throw new Error('proof-adapter: source'); }
+                  const { createGitHubProof } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-ci-proof-adapter.mjs`);
+                  proof = createGitHubProof({ github, context, raw: process.env.ENGRAM_CI_PROOF_MANIFEST, environment: process.env,
+                    phase: 'native-read:reference', checkout: process.env.GITHUB_WORKFLOW_SHA,
+                    emit: (record) => core.info(JSON.stringify(record)),
+                  });
+                }
+              }
+              const verdict = await evaluateNativeIssuePolicy(proof?.client ?? github, context, 'reference');
+              proof?.assert();
               core.info(`reference: ${verdict.conclusion} (${verdict.headSha})`);
               if (verdict.conclusion !== 'success') core.setFailed(verdict.summary);
             } catch (error) {
@@ -65,13 +93,41 @@ jobs:
               github.event.pull_request.base.repo.id, toJSON(github.event.pull_request.base.ref)) }}
         run: ':'
       - name: Evaluate issue approval
+        env:
+          ENGRAM_CI_PROOF_MANIFEST: ${{ vars.ENGRAM_CI_PROOF_MANIFEST }}
+          CI_PROOF_ADAPTER_SHA: 3a0726226a01a7756ab48e1df16a51b89829fda4f2f87214ff2cebbd519d6f4a
+          CI_PROOF_CORE_SHA: 1be88a7a4874f54d0efcfd05a19a812381e216b70c8a0a71f1217579a6a74740
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           retries: 0
           script: |
             try {
               const { evaluateNativeIssuePolicy } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-native-policy.mjs`);
-              const verdict = await evaluateNativeIssuePolicy(github, context, 'approved');
+              let proof;
+              if (process.env.ENGRAM_CI_PROOF_MANIFEST) {
+                let proofConfig;
+                try { proofConfig = JSON.parse(process.env.ENGRAM_CI_PROOF_MANIFEST); }
+                catch { throw new Error('proof-adapter: configuration'); }
+                if (proofConfig?.enabled !== false) {
+                  if (proofConfig?.enabled !== true || !proofConfig.target) throw new Error('proof-adapter: configuration');
+                    try {
+                      const { readFile } = await import('node:fs/promises');
+                      const { createHash } = await import('node:crypto');
+                      for (const [name, digest] of [['adapter', process.env.CI_PROOF_ADAPTER_SHA], ['controls', process.env.CI_PROOF_CORE_SHA]]) {
+                        const path = `${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-ci-proof-${name}.mjs`;
+                        const text = (await readFile(path.startsWith('file:') ? new URL(path) : path, 'utf8')).replaceAll('\r\n', '\n');
+                        if (createHash('sha256').update(text).digest('hex') !== digest) throw new Error();
+                      }
+                    } catch { throw new Error('proof-adapter: source'); }
+                  const { createGitHubProof } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-ci-proof-adapter.mjs`);
+                  proof = createGitHubProof({ github, context, raw: process.env.ENGRAM_CI_PROOF_MANIFEST, environment: process.env,
+                    phase: 'native-read:approved', checkout: process.env.GITHUB_WORKFLOW_SHA,
+                    emit: (record) => core.info(JSON.stringify(record)),
+                  });
+                }
+              }
+              const verdict = await evaluateNativeIssuePolicy(proof?.client ?? github, context, 'approved');
+              proof?.assert();
               core.info(`approved: ${verdict.conclusion} (${verdict.headSha})`);
               if (verdict.conclusion !== 'success') core.setFailed(verdict.summary);
             } catch (error) {

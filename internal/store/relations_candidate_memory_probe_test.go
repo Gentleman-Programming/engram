@@ -7,11 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"modernc.org/libc"
 	sqlitelib "modernc.org/sqlite/lib"
@@ -119,16 +117,14 @@ func runCandidateCounterProbe(t *testing.T, mode string) {
 
 // Call only in a fresh test process before any SQLite connection is opened.
 func configureCandidateSQLiteMemstatus(tls *libc.TLS, enabled bool) int32 {
-	// The generated va adapter reads one promoted C int from an eight-byte slot.
-	args := new([2]int32)
+	// The generated varargs adapter requires an eight-byte slot in libc memory;
+	// pinning Go-managed memory does not make its uintptr round trip checkptr-safe.
+	args := tls.Alloc(8)
+	defer tls.Free(8)
+	var value int32
 	if enabled {
-		args[0] = 1
+		value = 1
 	}
-	var pin runtime.Pinner
-	pin.Pin(args)
 	const sqliteConfigMemstatus = 9
-	rc := sqlitelib.Xsqlite3_config(tls, sqliteConfigMemstatus, uintptr(unsafe.Pointer(args)))
-	runtime.KeepAlive(args)
-	pin.Unpin()
-	return rc
+	return sqlitelib.Xsqlite3_config(tls, sqliteConfigMemstatus, libc.VaList(args, value))
 }

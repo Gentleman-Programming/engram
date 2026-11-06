@@ -36,9 +36,12 @@ func TestGenerationInvalidationRequestsOneShutdown(t *testing.T) {
 			if !ok {
 				t.Fatal("server lacks generation shutdown notification")
 			}
-			oldObserved, oldStats := observedGenerationError, loadServerStats
-			t.Cleanup(func() { observedGenerationError, loadServerStats = oldObserved, oldStats })
+			oldObserved, oldStats, oldReadiness := observedGenerationError, loadServerStats, checkServerReadiness
+			t.Cleanup(func() {
+				observedGenerationError, loadServerStats, checkServerReadiness = oldObserved, oldStats, oldReadiness
+			})
 			observedGenerationError = func(*store.Store) error { return store.ErrDatabaseGenerationChanged }
+			checkServerReadiness = func(*store.Store) error { return store.ErrDatabaseGenerationChanged }
 			loadServerStats = func(*store.Store) (*store.Stats, error) { return nil, store.ErrDatabaseGenerationChanged }
 			var requests sync.WaitGroup
 			for i := 0; i < 32; i++ {
@@ -78,9 +81,9 @@ func TestTransientHealthFailureDoesNotRequestShutdown(t *testing.T) {
 	if !ok {
 		t.Fatal("server lacks generation shutdown notification")
 	}
-	old := loadServerStats
-	t.Cleanup(func() { loadServerStats = old })
-	loadServerStats = func(*store.Store) (*store.Stats, error) { return nil, errors.New("transient") }
+	old := checkServerReadiness
+	t.Cleanup(func() { checkServerReadiness = old })
+	checkServerReadiness = func(*store.Store) error { return errors.New("transient") }
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
 	if rec.Code != 500 || strings.Contains(rec.Body.String(), "transient") {
@@ -91,7 +94,7 @@ func TestTransientHealthFailureDoesNotRequestShutdown(t *testing.T) {
 		t.Fatal("transient failure notified shutdown")
 	default:
 	}
-	loadServerStats = old
+	checkServerReadiness = old
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
 	if rec.Code != 200 {
@@ -2025,7 +2028,7 @@ func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 		t.Fatalf("expected needs_review state, got %v", entry["state"])
 	}
 
-	markReq := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, id)))
+	markReq := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed?project=engram", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, id)))
 	markReq.Header.Set("Content-Type", "application/json")
 	markRec := httptest.NewRecorder()
 	h.ServeHTTP(markRec, markReq)
@@ -2090,7 +2093,7 @@ func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 		t.Fatalf("backdate review_after: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"id":%d}`, id)))
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed?project=engram", strings.NewReader(fmt.Sprintf(`{"id":%d}`, id)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

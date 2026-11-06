@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 const repo = { owner: 'upstream', repo: 'project' };
 const head = 'a'.repeat(40), source = 'b'.repeat(40), trusted = 'c'.repeat(40);
@@ -12,7 +13,7 @@ function fixture() {
   const state = { pages: [[pull()]], pulls: new Map([[7, pull()]]), calls: [], reads: new Map() };
   const github = { request: async (route, params) => {
     state.calls.push({ route, params });
-    if (state.reject === route) throw new Error('API denied');
+    if (state.reject === route) throw state.error ?? new Error('API denied');
     if (route === 'GET /repos/{owner}/{repo}/pulls') return { data: state.pages[params.page - 1] ?? [] };
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
       const count = (state.reads.get(params.pull_number) ?? 0) + 1;
@@ -38,6 +39,19 @@ function fixture() {
   return { github, state };
 }
 const writes = (state) => state.calls.filter(({ route }) => !route.startsWith('GET '));
+const diagnostics = (message) => JSON.parse(message.split('\nIssue refresh diagnostics: ')[1]);
+async function runWorkflow(github) {
+  const yaml = readFileSync(new URL('../workflows/issue-refresh-router.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const script = yaml.split('          script: |\n')[1];
+  const bootstrap = script.replace(/await import\([^\n]+\)/, 'await loadDispatcher()');
+  assert.notEqual(bootstrap, script);
+  const failures = [];
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  await new AsyncFunction('github', 'context', 'core', 'process', 'loadDispatcher', bootstrap)(
+    github, context(), { setFailed: (message) => failures.push(message) },
+    { env: { TRUSTED_SHA: trusted } }, () => import('./issue-refresh-dispatch.mjs'));
+  return failures;
+}
 for (const action of ['labeled', 'unlabeled']) test(`${action} requests the real admitted helper once for multiple closing refs`, async () => {
   const { github, state } = fixture();
   assert.deepEqual(await (await load())(github, context(action), trusted), [{ status: 'requested', runId: 90, headSha: head, sourceSha: source, trustedSha: trusted, attempt: 2 }]);
@@ -123,6 +137,10 @@ test('each affected target is attempted despite rejection; partial results are e
     assert.equal(error.results.length, 1);
     assert.deepEqual(error.failures.map((f) => f.pullNumber), [10]);
     assert.match(error.failures[0].error.message, /PR\/event binding/);
+    assert.deepEqual(diagnostics(error.message), { outcomes: [
+      { pullNumber: 7, outcome: 'requested', runId: 90, fromAttempt: 2 },
+      { pullNumber: 10, outcome: 'failed', reason: 'guard', message: 'native run PR/event binding unavailable' },
+    ], omitted: 0 });
     return true;
   });
   assert.equal(writes(state).length, 1);
@@ -134,6 +152,10 @@ test('a rejected first target does not suppress a later admitted target', async 
   await assert.rejects((await load())(github, context(), trusted), (error) => {
     assert.equal(error.results.length, 1);
     assert.deepEqual(error.failures.map((f) => f.pullNumber), [7]);
+    assert.deepEqual(diagnostics(error.message), { outcomes: [
+      { pullNumber: 7, outcome: 'failed', reason: 'guard', message: 'native run PR/event binding unavailable' },
+      { pullNumber: 10, outcome: 'requested', runId: 90, fromAttempt: 2 },
+    ], omitted: 0 });
     return true;
   });
   assert.deepEqual(writes(state), [{ route: 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun', params: { ...repo, run_id: 90 } }]);
@@ -153,4 +175,57 @@ for (const failure of ['denied', 'unacknowledged']) test(`POST ${failure} remain
   else state.postStatus = 202;
   await assert.rejects((await load())(github, context(), trusted), (error) => error.results.length === 0 && error.failures.length === 1);
   assert.equal(writes(state).length, 1);
+});
+
+test('workflow diagnostic preserves successful admission with no failure annotation', async () => {
+  const { github, state } = fixture();
+  assert.deepEqual(await runWorkflow(github), []);
+  assert.deepEqual(writes(state), [{ route: 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun', params: { ...repo, run_id: 90 } }]);
+});
+
+test('workflow diagnostic exposes the owned guard cause and preserves fail-closed reads', async () => {
+  const { github, state } = fixture(); state.noRuns = true;
+  const before = clone({ pages: state.pages, pulls: [...state.pulls] });
+  assert.deepEqual(await runWorkflow(github), [
+    'Issue refresh blocked for PRs: 7\nIssue refresh diagnostics: {"outcomes":[{"pullNumber":7,"outcome":"failed","reason":"guard","message":"no eligible native metadata run"}],"omitted":0}',
+  ]);
+  assert.deepEqual(state.calls.map(c => c.route), [
+    'GET /repos/{owner}/{repo}/pulls', 'GET /repos/{owner}/{repo}/pulls/{pull_number}',
+    'GET /repos/{owner}/{repo}/pulls/{pull_number}', 'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}',
+    'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
+  ]);
+  assert.deepEqual(writes(state), []);
+  assert.deepEqual({ pages: state.pages, pulls: [...state.pulls] }, before);
+});
+
+for (const status of [400, 503, 599, 399, 600, '503', undefined]) test('workflow diagnostic allowlists HTTP evidence without leaking raw error data: ' + status, async () => {
+  const { github, state } = fixture();
+  const secret = 'private-credential-and-provider-body';
+  state.reject = 'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}';
+  state.error = Object.assign(new Error(secret), { status, request: { method: 'GET', headers: { authorization: secret } }, response: { data: secret } });
+  state.error.cause = state.error;
+  const failures = await runWorkflow(github);
+  const evidence = Number.isInteger(status) && status >= 400 && status <= 599
+    ? { reason: 'api', httpStatus: status, method: 'GET' } : { reason: 'unknown' };
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].split('\n')[0], 'Issue refresh blocked for PRs: 7');
+  assert.deepEqual(diagnostics(failures[0]), { outcomes: [{ pullNumber: 7, outcome: 'failed', ...evidence }], omitted: 0 });
+  assert.ok(!failures[0].includes(secret));
+  assert.deepEqual(writes(state), []);
+  assert.equal(state.calls.length, 4);
+});
+
+test('workflow diagnostic bounds records without hiding retained target failures', async () => {
+  const { github, state } = fixture(); state.noRuns = true;
+  state.pages = [Array.from({ length: 21 }, (_, i) => pull(i + 1))];
+  state.pulls = new Map(state.pages[0].map(p => [p.number, p]));
+  const failures = await runWorkflow(github);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].split('\n')[0], 'Issue refresh blocked for PRs: ' + state.pages[0].map(p => p.number).join(', '));
+  assert.deepEqual(diagnostics(failures[0]), {
+    outcomes: Array.from({ length: 20 }, (_, i) => ({ pullNumber: i + 1, outcome: 'failed', reason: 'guard', message: 'no eligible native metadata run' })),
+    omitted: 1,
+  });
+  assert.deepEqual(writes(state), []);
+  assert.equal(state.calls.length, 85);
 });

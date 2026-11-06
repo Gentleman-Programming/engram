@@ -284,20 +284,14 @@ func TestMigrateCopyRejects(t *testing.T) {
 			case "inside":
 				dst = filepath.Join(src, "copy")
 			case "symlink":
-				if e := os.Symlink("config.json", filepath.Join(src, "link")); e != nil {
-					t.Fatal(e)
-				}
+				requireFixtureSymlink(t, "config.json", filepath.Join(src, "link"))
 			case "source-alias":
 				alias := filepath.Join(copyTempDir(t), "alias")
-				if e := os.Symlink(src, alias); e != nil {
-					t.Fatal(e)
-				}
+				requireFixtureSymlink(t, src, alias)
 				src = alias
 			case "output-alias":
 				parent := filepath.Join(copyTempDir(t), "alias")
-				if e := os.Symlink(copyTempDir(t), parent); e != nil {
-					t.Fatal(e)
-				}
+				requireFixtureSymlink(t, copyTempDir(t), parent)
 				dst = filepath.Join(parent, "copy")
 			case "existing-file":
 				if e := os.WriteFile(dst, []byte("caller-owned"), 0600); e != nil {

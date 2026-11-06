@@ -51,6 +51,126 @@ semantic equivalence and do not change the rejection-only outcome.
 The Go contract remains `mcp-foundation` with declared Pi differences. These are
 honest source rejection reasons, not failures to be bypassed for a release.
 
+## Opt-in Go assessment (non-approving)
+
+The Go CLI separately supports `-assess`; the Node checker above does not accept
+this option and retains its rejection-only behavior:
+
+```sh
+go run ./tools/release-candidate -assess -core-ref refs/tags/v3.0.0 -pi-ref refs/tags/pi-v0.5.0
+```
+
+For a valid independent metadata pair with a matching installer pin, stdout is:
+
+```json
+{"schemaVersion":1,"version":"3.0.0","piVersion":"0.5.0","outcome":"blocked","reason":{"code":"positive-proof-unavailable","message":"live Go contract does not establish Pi parity or release approval"}}
+```
+
+This is illustrative, not a claim that current metadata matches those refs.
+Assessment emits one deterministic JSON object plus newline, without source
+writes. Readable invalid metadata yields `rejected`, `invalid-metadata`, and
+exit 1; unavailable/unreadable metadata yields `blocked`, `metadata-unavailable`,
+and exit 2. A live contract export failure yields `blocked`,
+`contract-unavailable`, and exit 2. Reason messages are fixed safe diagnostics.
+Structured results have empty stderr. The compiled executable preserves these
+exit codes; `go run` adds its own exit-status stderr and wrapper exit code.
+There is no `eligible` outcome or assessment success/exit 0: `mcp-foundation`
+is not Pi parity, and no trusted positive producer/binding is available.
+
+Flag/ref invocation errors instead retain plain stderr, empty stdout and exit 1.
+Help retains exit 0. Caller-authored evidence, passed JSON and status/contract
+overrides are unsupported. `-assess` refuses any `-pi-tarball` presence, even an
+empty argument, before reading metadata or validating archives. Omit `-assess`
+or use `-assess=false` for unchanged legacy export/standalone tarball behavior.
+Assessment does not run suites, schema diagnostics, npm or the Node guard; it
+cannot authorize publication or promotion to `latest`.
+
+## Trusted source observation (partial evidence only)
+
+The Go CLI also supports `-observe-contract` with `-core-source` and
+`-pi-source`: explicit full lowercase 40/64-hex commit IDs available in the
+local Git repository selected by `-root`. Existing `-core-ref`/`-pi-ref`
+remain independent SemVer intents, not verified remote tags. Missing prospective
+tags are allowed; existing local tag bindings must agree with selected commits.
+Sources must already be reviewed and trusted by the operator. This executes Go
+from the selected core commit; a temporary copy is **not a security sandbox**,
+and a malicious checker can forge success or perform arbitrary side effects.
+Never use this mode for untrusted sources or with privileged secrets.
+
+Git replacement objects are disabled for all source, tag and object reads.
+The collector copies raw committed Git objects (no export filters, symlinks or
+submodule materialization), reads the selected Pi manifest and core installer
+pin, and runs the fixed `go run ./tools/agent-contract -check` in the core copy.
+Go uses local toolchain/cached dependencies, readonly modules and no work file.
+The report binds verified source IDs and the artifact's actual SHA-256 to the
+observed process result. It does not import caller-authored proof or commands.
+A nonzero checker result is `not-established`, not automatically a semantic
+regression. Cancellation/deadline expiry is `unavailable`, without a checker
+exit outcome. Null-device outputs prevent waiting for inherited output pipes;
+this does not terminate or sandbox the entire child process tree.
+Missing objects/tools, unsupported sources, persistent source
+mutation or cleanup failure cannot produce a passing check.
+Output is partial source-evidence JSON with `outcome: "blocked"`, exit 2 and
+empty stderr even when the check passes. The observed `go run` exit is a wrapper
+exit, not an inferred inner-program exit. No package execution, installed-host
+compatibility, eligibility or publication is established. Invocation errors
+retain stderr/exit 1. Source flags require observation, which refuses active
+`-assess`. Without the explicit package opt-in below, any `-pi-tarball` presence
+is also rejected before repository access. Legacy modes
+are otherwise unchanged. The report is a view, not an approval credential.
+
+### Opt-in selected-Pi input projections
+
+Add `-observe-pi-inputs` to the Go `-observe-contract` invocation to capture
+actual selected-Pi schemas with the existing helper and real TypeBox, then run
+`go run ./tools/agent-contract -verify-pi <owned-capture>` from the selected Core.
+The independently selected Pi must carry the existing real-TypeBox helper.
+Node.js 24 and the already authorized `plugin/pi/node_modules/typebox` 1.3.34
+in the repository selected by `-root` are required. The collector only copies
+that fixed dependency into its owned workspace; it never installs/downloads,
+uses an ancestor/global dependency, or falls back to the schema stub.
+Trust must cover the executed selected-Pi/helper code and installed dependency,
+not just Core. A package version is not an authenticity attestation.
+
+The optional `piInputs` view records both source identities, contract/capture
+SHA-256, TypeBox version, Node capture exit and actual Go-wrapper verification
+exit when established. Missing prerequisites, cancellation, mutation or cleanup
+uncertainty cannot pass. Capture pipes have bounded EOF waits; descendants are
+not universally terminated. Raw captures/diagnostics are not emitted.
+Without this flag (or with `-observe-pi-inputs=false`), the old observation
+JSON and Go-only behavior remain unchanged. The flag requires active
+`-observe-contract`; other modes and the Node sibling remain unchanged.
+Even passing projections only prove Go-owned input-shape acceptance using a
+stub UI host—not semantic parity, artifact execution, installed-host behavior
+or release eligibility. The overall observation remains blocked/exit2/empty stderr.
+For mandatory local functional coverage, use
+`ENGRAM_PI_SCHEMA_REQUIRE_REAL=1 go test ./tools/release-candidate`;
+without prerequisites the real-capture test may skip, never proving this check.
+CI's Plugin Tests job runs that focused test with the mandatory flag after its
+existing Node24, locked TypeBox install and Go build. A missing prerequisite or
+skipped positive capture therefore cannot satisfy that CI evidence. Hosted
+results must still be observed for the exact candidate; scheduling is not a pass.
+
+### Opt-in selected-Pi package binding
+
+Add `-observe-pi-package` and a non-empty `-pi-tarball` to the Go source
+observation. This is the only opt-in that permits that existing flag combination;
+absent/false preserves old observations, conflicts and standalone package behavior.
+The collector copies bounded compressed bytes into its owned workspace and
+materializes the selected Pi commit separately from the Pi input-capture copy.
+It reuses the existing Go archive validator on that same tarball snapshot,
+including all framing, metadata, inventory, path/link and size restrictions.
+The optional `piPackage` records state, verified Pi source commit, selected Pi
+version, actual compressed-tarball SHA-256 and valid file count when established.
+The validator runs in the collector, not as a selected-Core subprocess: no
+process exit code or selected-Core verifier identity is invented for this view.
+Observed source/archive/input changes, unreadable inputs, cancellation or owned
+cleanup failure cannot establish a passing binding. Copies are not a sandbox.
+No package entrypoint, Node/npm, dependency installation or publisher is invoked
+by this check; existing trusted Core freshness execution remains unchanged.
+Even a passing binding remains schema1/blocked/exit2/empty stderr. It is neither
+registry authenticity, reproducible-build proof, artifact execution nor eligibility.
+
 ## Separate real-schema diagnostic
 
 `node tools/pi-schema-diagnostic.mjs` captures real serialized TypeBox schemas
@@ -167,7 +287,183 @@ node --test plugin/pi/test/local-package.test.mjs
 go test ./tools/release-candidate
 ```
 
+The Go Core lifecycle tests require Node.js >=24 in PATH. If Node is missing,
+cannot run, or is older, the child-lifecycle test and only the runtime subtests of
+`TestArtifactInputCLI` skip with a clear prerequisite message; non-runtime
+admission checks still run. A separate regression runs with Node.js <24 to verify
+that the production helper rejects it before starting Core. Use Node.js 24 for
+full supported-runtime coverage; passing with skips is not lifecycle evidence.
+
 A passing checker test suite would demonstrate the rejection-only behavior and
 unchanged legacy Pi guard. It would not make current Go/Pi sources release-ready.
 Implementation validation and independent review must be observed separately;
 this guide does not claim those checks passed or authorize a PR/publication.
+
+## Reviewed staged-input admission
+
+Use `-observe-artifact-inputs` for non-executing admission of an explicitly reviewed #1928 bundle. It never starts Core or imports Pi.
+```bash
+go run ./tools/release-candidate -observe-artifact-inputs \
+  -core-ref "$CORE_REF" -pi-ref "$PI_REF" -core-source "$CORE_SOURCE" -pi-source "$PI_SOURCE" \
+  -root "$REVIEWED_REPOSITORY" -staging-bundle "$REVIEWED_ZIP" -staging-context context.json
+```
+
+Replace every context pin below with the reviewed value; the regular JSON file is limited to 4,096 bytes and unknown fields/trailing documents reject.
+```json
+{
+  "WorkflowSHA": "FULL_WORKFLOW_COMMIT", "CandidateSHA": "FULL_CORE_COMMIT",
+  "RunID": "REVIEWED_RUN_ID", "RunAttempt": "1",
+  "CoreVersion": "1.2.3", "PiVersion": "4.5.6", "ZIPHash": "REVIEWED_ZIP_SHA256"
+}
+```
+
+Refs/versions are intents, not authenticated tags or observed runtime versions. Core source must match the candidate; Pi source is selected independently and its archive bytes must validate against that raw Git snapshot. ZIP/member digests, actual host Go metadata and source-bound Pi materialization are checked, originals rechecked, and owned output removed before reporting. JSON always has outcome `blocked`, exit 2 and empty stderr; `check.state=passed` means admission only, while `workflows.state=unavailable` explicitly records no execution. Missing/mismatched/changed/unavailable evidence cannot pass. Caller-edited context/digests are not publisher authentication, execution permission or a sandbox. Without this opt-in (including false), existing modes are unchanged; do not combine it with other observation modes, assessment or tarball validation.
+
+## Owned Core lifecycle observation
+
+Replace `-observe-artifact-inputs` in the preceding command with `-observe-artifact-workflows` to explicitly execute the reviewed Core, bootstrap the validated Pi module, then run the five fixed topic, consolidation, batch-error, successful/mixed-judgment and finalization workflows after successful admission/bootstrap. These modes are mutually exclusive; false preserves existing modes. Node24 is required, without installation.
+The OS temporary directory must be outside Git ancestry: use an explicitly authorized owned TEMP/TMP/TMPDIR. Unknown isolation or prerequisites cannot establish execution. Only the selected measured binary and Go-validated Pi members are materialized; no executable/SDK override exists.
+
+The fixed embedded Node owner starts `serve --session-owned`, generates a private token, uses literal owned home/config/data/temp roots without inherited credentials/cloud/transport, and verifies loopback readiness, owned PID, authenticated health and instance identity. Readiness is bounded to 5s, EOF join to 3s, then owned-child kill/join to 2s.
+`coreRuntime` records lifecycle state, Node version, measured helper hash, actual exit/join/cleanup and raw health `reportedVersion` separately from version intent/build metadata. Unknown termination retains owned state; killed/failed/unknown cleanup cannot pass. Copies and environment containment are not a malicious-code sandbox.
+Core-only and published persistence observations retain `artifact_core.mjs`;
+Pi observations use `artifact_pi_core.mjs` for ordered Pi-before-Core cleanup.
+Both use the same Go admission, materialization, helper integrity and result checks.
+The optional `piBootstrap` is a distinct `pi-module-bootstrap-only` observation, never a Core or representative-workflow verdict. The same Core owner keeps Core alive while a fixed Node24 child directly imports the unmodified, fully Go-validated `materialized-pi/index.ts` outside Git. Native type stripping is used without source rewriting, registration-host execution or dependency installation. The existing operator-trusted local `plugin/pi/node_modules/typebox` cache may supply only pinned TypeBox1.3.34; Go reuses its bounded, regular-file copy, measures the copied tree separately and rechecks both original and copied content. Version/tree metadata is not package authenticity: the operator must approve this cache's bytes. No arbitrary dependency path/version selector is accepted. A fixed Node24 resolution hook allows `node:` builtins and realpath-normalized files only within the validated Pi tree or this fixed TypeBox copy, including transitive imports/requires. The sole fixed UI substitution is a minimal `@earendil-works/pi-tui.Text` class; resolving it is disclosed in `substitutions`. It is not Pi SDK or UI-rendering qualification. `typeBoxVersion` and `typeBoxTreeSha256` identify the copied dependency separately from the Pi archive tree. Other ancestor, checkout/global, non-file and external dependency resolution is rejected before module execution. Missing required dependencies/import failures are unavailable, not SDK success or a fallback to installed dependencies. This is only an import-boundary guard: reviewed builtins still permit filesystem/process access, so it is not a hostile-code sandbox.
+
+The child receives only literal owned environment roots, the explicit Core URL/private token (`ENGRAM_HTTP_TOKEN`), expected instance, and startup policy `deny` to forbid plugin fallback startup. No registration/session hooks are invoked. Its helper verifies authenticated same-instance health before import. Child stdout/stderr are discarded. Bootstrap acknowledgement is bounded to 2s, owned-stdin join to 3s and owned kill/join to 2s; an error after spawn is never an exit. Parent EOF requests Pi stop without closing Core stdin early. The Pi helper sets a sticky failure-aware `exitCode`, releases only its stdin/IPC and lets Node drain naturally rather than calling `process.exit()`; no arbitrary sleep or runtime upgrade is used. This does not guarantee graceful termination: the same bounded join/kill policy still rejects failed, killed or unknown cleanup. Core exit before the intentional Core-stop request—including a clean exit during Pi join—invalidates both observations. Ordered Pi cleanup precedes that request; unknown Pi termination still permits bounded best-effort Core cleanup, retains the entire runtime and cannot report joined. Killed/failed cleanup or materialized-tree mutation cannot pass bootstrap. `helperSha256` hashes the bootstrap helper, a NUL-delimited `pi-workflows.mjs` label, and the embedded workflow helper in that order; pre-import `treeSha256` identifies the Pi members. Passing evidence also requires the materialized Core/Pi/workflow helpers to match their embedded bytes before execution and remain unchanged regular files after the owned joins. Go reuses its bounded, same-file snapshot checks and rejects persistent helper changes/removals as unavailable evidence, without replacing observed exit/cleanup facts. The Pi and TypeBox trees are rechecked separately; this does not prevent hostile ABA changes or provide a malicious-code sandbox.
+
+`workflows.cases` preserves the five original HTTP assertion-family names from `plugin/pi/test/real-agent-workflows.test.mjs`. Each implemented case starts a fresh owned Core with the same measured binary and fresh Go-validated Pi/TypeBox copies; a nonpassing case stops subsequent execution. It invokes the unmodified default export through an explicitly disclosed `Pi registration host` substitute, with the original minimal tool/event/entry API and owned context, not a genuine SDK. A first-level owned project config prevents ancestor lookup. Only these fixed internal workflow phases use startup policy `allow` and the explicit authenticated external Core URL; `ENGRAM_SERVER_MODE` remains absent, with no plugin-owned process recovery. The original four topic vectors, invalid-input error, empty observations and missing-session assertions run over HTTP. Consolidation reuses the original two saves, unauthorized 401/no-change check, mutation-free preview/fingerprint and exact confirmation/survivor/soft-deletion receipt assertions. Batch errors reuse the original rejected-envelope, unauthorized, ordered item-error and unchanged public-state assertions. Judgments reuse public scan seeds, successful and mixed per-item outcomes, exact errors, confidence boundaries, persisted relation/stat counters and unchanged observations. Finalization reuses the original unregistered/no-session rejection, save, unauthorized finalize, original summary receipt, idempotent retry, ended-session/public summary, late-save rejection and shutdown/no-change assertions through the same minimal event/context API. Each workflow acknowledgement is separately bounded to 30s; baseline bootstrap remains `deny`/2s and the same 5s Core readiness and ordered 3s/2s joins apply. Each case reports its own Core/Pi lifecycle, helper/tree hashes and disclosed substitutions. The first materialization fixes whether the original TypeBox peer is present or absent; each later materialization and the post-bootstrap/post-workflow checks require that same presence and, when present, the original digest. A peer appearing after an absent baseline is changed evidence, including after the final workflow. The final integrity gate rechecks the original peer's presence and digest after package/source verification, before preserving passing observations. Any detected source/peer/input mutation invalidates affected evidence.
+
+All five fixed families are implemented, not implicitly qualified. `workflows.state` is `passed` only when all five observed cases pass and applicable integrity checks remain valid; otherwise it is `unavailable`, never a required skip counted as success. Outcome remains `blocked`/exit2/empty stderr even after all observations pass. There is no genuine SDK, installed-host lifecycle, semantic parity or release-eligibility claim. Core lifecycle success cannot imply Pi success. The Pi package, original bundle and context are rechecked before starting Core; a failed recheck leaves the runtime not started. Post-execution rechecks remain in place to detect changes during execution. These observations do not prevent hostile concurrent changes or ABA. No publication occurs.
+
+### Verification and qualification boundaries
+
+The artifact regression tests use authored synthetic Core/Pi fixtures to verify control flow, rejection, integrity and owned-process cleanup. Even a passing five-family fixture run is not execution evidence for selected staged artifacts. A missing real-TypeBox capture remains skipped/unavailable, not passing.
+
+An actual candidate observation requires its own explicitly reviewed Core/Pi pair, dependency bytes, platform and owned runtime; keep its source/version/digest and executed-case evidence separate from fixture results. Final distributed-byte startup, persistence/read-back and shutdown observations belong to [#2122](https://github.com/Gentleman-Programming/engram/issues/2122), not this candidate harness. Neither fixture nor candidate observations establish genuine installed-host/SDK execution, publication authority or release eligibility.
+
+## Published Core persistence observation (Windows/amd64)
+
+This separate, opt-in mode consumes a local **final GoReleaser ZIP**, not the
+staging bundle. It never downloads artifacts or installs prerequisites. Select
+and review the official release, immutable tag source and published asset digests
+before obtaining the ZIP and `checksums.txt`. Review execution permission as well:
+caller-editable pins and matching hashes are consistency checks, not publisher
+authentication or a hostile-code sandbox.
+
+Create a bounded JSON context using the selected, independently reviewed values:
+
+```json
+{
+  "version": "3.6.1",
+  "source": "d33a14a2ed822784752e5678b1673289ee1c0de4",
+  "archive_sha256": "129026b49e51db2453d28a5fbb915893ff7a8f4764b3ebc83e1ed80f72c3dedf",
+  "checksums_sha256": "f8192731617d119a69bbb7df334c4ca1e729f3d835532345fadd04b337e4ea33"
+}
+```
+
+These pins identify the inspected v3.6.1 Windows/amd64 release only; they are not
+defaults or authority for another version. Using the local files on native
+Windows/amd64 with Node24 already installed:
+
+```powershell
+go build -o release-candidate.exe ./tools/release-candidate
+.\release-candidate.exe -observe-published-core -archive .\engram_3.6.1_windows_amd64.zip -checksums .\checksums.txt -context .\reviewed-context.json
+# Add -execute only to execute the admitted artifact in owned temporary state.
+```
+
+`-observe-published-core` must be the first argument and cannot be combined with
+other candidate modes. Without `-execute`, only admission runs. Successful
+admission requires the checksum file and archive hashes, exactly one matching
+checksum entry, the three expected regular ZIP members (`engram.exe` and the two
+`tools/cloud-sync-projects` scripts), and the selected clean Go module/source,
+Windows/amd64 and CGO-disabled build identity. The existing bounded ZIP validator
+is shared with staging; extra, duplicate, missing and nonregular members reject.
+
+With `-execute`, the shared lifecycle owner starts the measured executable with
+`serve --session-owned`, private home/config/temp/data and a fresh token. It
+checks unauthenticated refusal, readiness, PID, loopback endpoint, instance and
+selected version. It registers one synthetic session, saves and reads one
+synthetic observation, observes successful exit, then starts the same bytes on
+the same private data using a new token. It requires the same instance and
+version and the original observation's fields after reopening. Both children
+must be joined and final cleanup must pass. The mode retains the existing
+two-minute outer observation, five-second readiness, two-second HTTP and bounded
+shutdown limits. Unknown termination retains owned state and cannot pass.
+
+JSON distinguishes `admission`, `runtime.state`, `runtime.persistence`, observed
+version/instance, executable hash and cleanup. Missing or mismatched evidence
+remains unavailable. The archive, checksum file, context and executed copy are
+rechecked; these checks do not prevent hostile concurrent changes or ABA.
+
+The command **always** reports `outcome: "blocked"` and exits **2**, including
+when admission, runtime and persistence are individually `passed`. That is a
+non-approving observation, not an execution failure or release eligibility.
+`go run` wraps this with its own nonzero exit and `exit status 2` on stderr; use
+the built command for its native exit code. Syntax/flag errors are separate.
+
+This first slice does not qualify Pi tarballs, installed SDK lifecycle, upgrades
+of an existing user store, other architectures/platforms, Cloud images or release
+promotion. Keep candidate observations (#2055) and these published-byte results
+(#2122) distinct. A failed published smoke calls for explicit inspection and
+fix-forward; it does not retag, roll back or republish anything automatically.
+
+## Published Pi and Core persistence observation (Windows/amd64)
+
+`-observe-published-pair` adds a separate local observation of an independently
+selected final Core ZIP and published Pi tarball. It shares the Core admission
+above and the Go-owned Pi archive/source validator from #2055. It does not
+download artifacts, install dependencies, or change a Core installer's Pi pin.
+In particular, selecting Pi 0.6.0 with Core 3.6.1 does not imply that the older
+Core installer installs Pi 0.6.0.
+
+Use `-observe-published-pair` as the first argument, with `-archive`, `-checksums`,
+`-pi-tarball`, `-context`, and `-root` pointing to the local Git repository that
+contains the reviewed Pi commit. The context nests the Core pins above and
+independent Pi pins:
+
+```json
+{
+  "core": {
+    "version": "3.6.1",
+    "source": "d33a14a2ed822784752e5678b1673289ee1c0de4",
+    "archive_sha256": "129026b49e51db2453d28a5fbb915893ff7a8f4764b3ebc83e1ed80f72c3dedf",
+    "checksums_sha256": "f8192731617d119a69bbb7df334c4ca1e729f3d835532345fadd04b337e4ea33"
+  },
+  "pi": {
+    "version": "0.6.0",
+    "source": "1e4bea1e647e2e8922494bfcbfcc1567f54712ad",
+    "tarball_sha256": "fddc16f50136ade83a77131d8ff87eb1ff0d2ffdf0064036bb3616c52b4a9d57"
+  }
+}
+```
+
+These are selected artifact identities, not defaults or publisher authentication.
+Review their release/registry origin and execution permission independently.
+Without `-execute`, admission verifies both inputs without starting either.
+Execution additionally requires Node24 and reviewed, checkout-local
+`plugin/pi/node_modules/typebox` version 1.3.34; missing prerequisites remain
+unavailable. For example, using the built command:
+
+```powershell
+.\release-candidate.exe -observe-published-pair -archive .\engram_3.6.1_windows_amd64.zip -checksums .\checksums.txt -pi-tarball .\gentle-engram-0.6.0.tgz -context .\reviewed-pair.json -root . -execute
+```
+
+Execution imports the admitted Pi TypeScript bytes, with the existing fixed
+registration host and disclosed `@earendil-works/pi-tui.Text` substitute. It
+invokes `mem_save`, joins Pi, stops Core, restarts the same executable against
+the same private data with a fresh token, and invokes `mem_get_observation`
+through a new Pi process. It checks the original ID, title, content and project,
+the Core version/instance, both Pi stage joins and final Core cleanup. Pi must
+join before Core stops. This is not an installed Pi SDK, interactive UI, upgrade
+or cross-platform qualification.
+
+The output separates `package`, `runtime` and `piRuntime`, including Pi stage
+results and disclosed substitutions. Archive, context, Git source, executable,
+helpers, Pi tree and original/copied TypeBox bytes are rechecked. A mismatch
+invalidates evidence; these checks are not hostile-code isolation or protection
+against concurrent changes that are reverted before rechecking. Unknown joins
+retain owned runtime state. The command always reports `outcome: "blocked"`
+and exits **2**, even when every observed check passes. A failed observation
+requires inspection and fix-forward, with no automatic retry or promotion.

@@ -20,6 +20,8 @@ Use this skill when:
 
 ## Critical Rules
 
+The [contribution policy transition](../../docs/contribution-policy-transition.md) is **PRE-CUTOVER / NOT ACTIVE**; the active rules below still apply.
+
 1. **Blank issues are disabled** — MUST use the matching bug, feature, docs, or tracked-question template
 2. **Every issue gets `status:needs-review` automatically** on creation
 3. **`status:approved` means maintainer-accepted proportional evidence** as defined in CONTRIBUTING.md; bugs include current-main reproduction and root cause

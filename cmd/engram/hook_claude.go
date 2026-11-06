@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
+
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 )
 
 // claudeEngramWriteAndSessionTools is the complete set of Engram MCP tools
@@ -124,6 +127,21 @@ func guardClaudePreToolUse(input []byte) []byte {
 	if !isClaudeEngramWriteOrSessionTool(tool) {
 		return transformClaudePreToolUse(input)
 	}
+	toolInputRaw, present := payload["tool_input"]
+	if !present {
+		return claudePreToolUseDeny("authoritative Claude tool_input is required")
+	}
+	var toolInput map[string]json.RawMessage
+	if json.Unmarshal(toolInputRaw, &toolInput) != nil || toolInput == nil {
+		return claudePreToolUseDeny("authoritative Claude tool_input must be an object")
+	}
+	isReview := strings.HasSuffix(tool, "__mem_review")
+	if isReview {
+		action, _ := claudeHookRequiredString(toolInput, "action")
+		if strings.TrimSpace(action) == "list" {
+			return []byte("{}")
+		}
+	}
 	id, idOK := claudeHookRequiredString(payload, "session_id")
 	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
 	if !idOK || !cwdOK {
@@ -132,6 +150,15 @@ func guardClaudePreToolUse(input []byte) []byte {
 	effective, err := confirmHookSession(id, cwd, true)
 	if err != nil {
 		return hookSessionConfirmationDeny("Claude", err)
+	}
+	// mem_review mutations retain confirmation, but its handler has no session
+	// argument to bind. An already-correct binding likewise needs no rewrite.
+	// Check only after confirmation, against the live effective continuation.
+	if isReview {
+		return []byte("{}")
+	}
+	if current, ok := claudeHookRequiredString(toolInput, claudeAuthoritativeSessionField(tool)); ok && current == effective {
+		return []byte("{}")
 	}
 	if effective != id {
 		payload["session_id"], _ = json.Marshal(effective)
@@ -152,6 +179,11 @@ func hookSessionConfirmationDeny(agent string, err error) []byte {
 // confirmHookSession returns the session ID writes must use: the host ID, or
 // the live continuation that SessionStart registered after a resume (#1624).
 func confirmHookSession(id, cwd string, projectOwned bool) (effective string, confirmationErr error) {
+	return confirmHookSessionForPlatform(id, cwd, projectOwned, runtime.GOOS)
+}
+
+// Keep the platform seam private; production always supplies runtime.GOOS.
+func confirmHookSessionForPlatform(id, cwd string, projectOwned bool, platform string) (effective string, confirmationErr error) {
 	base, client := hookEndpointClient("")
 	if base == "" {
 		return "", errHookSessionUnconfirmed
@@ -165,6 +197,16 @@ func confirmHookSession(id, cwd string, projectOwned bool) (effective string, co
 		}
 		cancel()
 	}()
+	if strings.TrimSpace(os.Getenv("ENGRAM_URL")) == "" {
+		identityErr := confirmHookLocalIdentity(ctx, client, base)
+		if identityErr != nil && hookLocalRecoveryEligible(platform, base, base+"/health", identityErr) {
+			if recovered := recoverHookLocalServer(ctx, client, base); recovered != nil {
+				return "", identityErr
+			}
+		} else if identityErr != nil {
+			return "", identityErr
+		}
+	}
 	// A registered session owns its project: confirm the write against that
 	// owner instead of re-deriving a project from the shell's current cwd
 	// (#1717). The cwd names the project only on first registration, and rows
@@ -247,9 +289,23 @@ func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id 
 	if err != nil {
 		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed"}
 	}
-	response, err := client.Do(request)
+	// Track redirects without changing policy or the shared request context,
+	// including redirects back to exactly the original request URL.
+	lookupClient := *client
+	redirected := false
+	lookupClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		redirected = true
+		if client.CheckRedirect != nil {
+			return client.CheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	response, err := lookupClient.Do(request)
 	if err != nil || response == nil {
-		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed"}
+		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed", cause: err, redirected: redirected}
 	}
 	defer func() { _ = response.Body.Close() }()
 	switch {
@@ -282,11 +338,26 @@ func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id 
 	}
 }
 
-// hookResolveCwdProject derives the project for a first registration from the
-// hook cwd. A resolution failure the server explains (ambiguous directory,
-// transition conflict, invalid name) becomes a denial naming that cause
-// instead of the generic unconfirmed message.
+// hookUsesClientProject inspects the original environment, not the synthesized
+// transport URL: a loopback SSH tunnel is external, a port/socket default is not.
+func hookUsesClientProject() bool {
+	return strings.TrimSpace(os.Getenv("ENGRAM_URL")) != ""
+}
+
+// hookResolveCwdProject derives first-registration identity on the client when
+// explicitly connected to an external endpoint. Local defaults retain server
+// resolution. Both paths share the caller's existing confirmation deadline.
 func hookResolveCwdProject(ctx context.Context, client *http.Client, base, cwd string) (string, error) {
+	if hookUsesClientProject() {
+		result, err := projectpkg.InspectLocalProject(ctx, cwd)
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", errHookSessionUnconfirmed
+		}
+		return result.Project, nil
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil)
 	if err != nil {
 		return "", errHookSessionUnconfirmed
@@ -340,8 +411,12 @@ func hookResolutionDenial(body []byte) error {
 // hookDenialError carries a cause-specific confirmation failure. The generic
 // unconfirmed error remains the fallback for unexplained failures.
 type hookDenialError struct {
-	message string
+	message    string
+	cause      error
+	redirected bool
 }
+
+func (e *hookDenialError) Unwrap() error { return e.cause }
 
 func (e *hookDenialError) Error() string { return e.message }
 

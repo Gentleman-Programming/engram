@@ -51,6 +51,15 @@ For schema details, use [DOCS.md — Database Schema](../../DOCS.md#database-sch
 - New-record write tools resolve the project from cwd/config or a bound session; do not invent a project when there is ambiguity. Update/delete assertions do not change save/session recovery rules.
 - Search is progressive: compact results first, `mem_get_observation` only when full content is needed.
 
+## Startup schema batches
+
+Startup reads column metadata once per explicit additive-column batch, then adds
+missing columns in their original order. The column set is local to that call;
+later batches re-read the schema, including after a legacy table rebuild. Every-open
+repairs, schema-version decisions and migration locks remain unchanged. A metadata
+read or close error stops the batch before any column is added; an ALTER failure
+stops later additions, and a retry discovers the actual partially updated schema.
+
 ## Save conflict candidate relevance
 
 `mem_save` keeps the original OR-based FTS query and raw BM25 scores, then applies
@@ -68,6 +77,10 @@ punctuation separates words except that `+` and `#` are preserved in technical
 identifiers (`C++` and `C#` remain distinct). Bare punctuation does not count as a
 term. Duplicates do not count twice, and common English
 connectives and generic change verbs (such as `updated` and `fixed`) are ignored.
+For multi-term sources, the gate checks whole words against the normalized source
+encoding and iterates target words without building temporary token lists or
+sorting each target. It counts distinct shared words and retains the original
+normalized comparison for the single-term case; it does not cache title data.
 Matches only in content do not establish title relevance. Missing or different
 topic keys do not veto otherwise relevant titles. Topic-key saves continue to
 revise the existing observation rather than creating a new same-topic record.
@@ -87,15 +100,47 @@ save gate. No new user setting or schema migration is required.
 
 The ledger uses a plain insert in the same transaction as the observation and its sync mutation. Soft-deleted observations are not replayable or recoverable by lookup, but retain their ledger binding and fingerprint so changed payloads still conflict. Hard deletion preserves the operation as a tombstone through nullable `observation_id` and `ON DELETE SET NULL`; identical tombstone replays and unsupported fingerprint versions return `ErrObservationOperationExpired`. Committed-result lookup returns that same error for a soft-deleted or tombstoned operation, while a never-recorded operation remains a distinct zero-result lookup. Saves without an operation ID retain existing behavior and write no ledger row. The HTTP and Pi recovery contract built on this store behavior is described in [Replay-Safe Observation Saves](replay-safe-observation-saves.md).
 
+## Bounded context work
+
+For a positive `ContextOptions.MaxBytes`, context formatting applies a conservative SQL cap to pinned observations using the minimum rendered bullet size, retaining a smaller explicit pinned cap when supplied. It stops rendering entries after the byte budget is exceeded and uses the existing UTF-8-safe final clipping and truncation marker. Section query ordering and history reservations remain unchanged. Zero or negative byte budgets retain legacy unbounded behavior; the MCP pinned default remains unchanged. This bounds pinned row hydration and discarded formatting work, but SQLite can still scan and sort matching rows.
+
+For `Compact: true`, pinned and recent observation queries select only type and title. This includes the recent slice inside the existing OlderHistory transaction; aggregate/sample reads keep the same snapshot and grouping. Noncompact context and the public pinned-observation API retain full observation fields. Scope, ordering, section/byte limits, error propagation for queried fields and generation fencing remain unchanged. This reduces hydration and allocations; it does not eliminate SQL scans/sorts or the existing safety checks.
+
+Global `mem_context` requests at most eight project names through `Store.ContextStats`,
+with the exact project total read from the same SQL statement as those names.
+The footer retains its existing ordering and `+N more` text. SQLite still groups
+the matching observations; the bounded read avoids transferring every project
+through the Go driver. `Stats` and `StatsProject` continue returning complete
+project lists; project-scoped context retains its existing statistics query path.
+Session, observation and prompt count queries are unchanged.
+
 ## Deferred relation diagnostics
 
 `referenced observation missing` means at least one endpoint identity is absent locally. `referenced observation effective project mismatch` means both identities exist, but the relation's project-scoped endpoint check fails. An observation's explicit project overrides its session project; blank observation projects inherit the session project. Check the endpoint and relation ownership rather than assuming another pull will supply a missing observation.
 
 Both diagnostics retain the same deferred retry lifecycle: the fifth failed replay marks the row dead. Eligible retry-cap dead relations can rearm only when the original scoped endpoint predicate is satisfied; legacy missing-error rows remain compatible. No project rewriting or automatic ownership repair occurs.
 
+Cloud import validates and decodes all still-pending chunks at the first relation classification, before using pending upserts or local endpoint identities (including soft-deleted observations) to resolve dependencies. When an endpoint remains unresolved, it consults historical delete evidence only for known chunks in the current manifest. Immutable cloud transports provide a server/project scope; the local `sync_chunk_delete_evidence` table stores complete delete-ID summaries (including empty results), keyed by tracking target, source scope, manifest version and chunk ID. New inbound summaries commit atomically with mutations and chunk tracking. Older imports without summaries lazily backfill on their first successful historical read; unavailable or corrupt history stays a cache miss and remains best effort. Transports that do not opt into immutable scoped identities retain the uncached fallback. No bearer tokens or full chunk payloads are stored in this index. Unreadable or corrupt pending payloads still fail before that relation-bearing chunk applies, and imports without relations retain incremental validation. Initial backfill and manifest metadata still scale with history; this does not make every import independent of history size.
+
 ## Explicit session identity replacement diagnostics
 
 Without `--replacement-id`, identity repair retains guidance to supply a canonical replacement. Once an explicit replacement attempt selects one source, a blocked plan reports the actual safety or ID-validation blocker instead of repeating that guidance for the selected source. Unselected sources retain their guidance; selection failures and all store repair guards remain unchanged.
+
+## Database generation identity checks
+
+Synced chunk-ID reads transfer one aggregated result through the generation-fenced driver, then rebuild the complete target-scoped ID set in Go. This avoids repeating filesystem identity checks for every chunk; it does not bypass the read/iteration guards or limit the number of IDs. IDs use hexadecimal inside the transient JSON result so even non-UTF-8 bytes round-trip unchanged. SQLite still scans all matching IDs, and the aggregate and decoded set use memory proportional to history size.
+
+The store checks database, WAL and SHM identity before and after driver operations,
+including each row read. Replacement or disappearance of an observed file invalidates
+the store until restart; sidecars can first appear after startup. On Windows, identity
+is captured from a short-lived metadata-only handle to avoid a separate attribute
+lookup followed by deferred identity lookup. Failed fast-path lookups fall back to
+`os.Stat`; other platforms continue using `os.Stat`. Check frequency and replacement
+guards remain unchanged.
+
+## Checkout-root project inspection
+
+Project detection at a checkout root inspects the Git marker with `Lstat`, then obtains the absolute common directory, checkout root and Git directory in one context-bound Git command. The values belong only to that detection and are passed to the configuration/binding helpers; later calls inspect Git and configuration again. Nearest-config precedence, shared linked-worktree identity and checkout-local configuration remain unchanged. Subdirectories and missing markers retain the existing probes; malformed markers, failed commands and ambiguous multi-line output fall back to them. A marker-present fallback can therefore pay one extra command within the existing two-second per-command budget. This optimizes ordinary checkout-root detection, not every project-resolution path.
 
 ## Local store change checklist
 

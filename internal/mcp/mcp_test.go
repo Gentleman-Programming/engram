@@ -129,13 +129,19 @@ func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
 		{
 			name: "mem_save",
 			write: func(t *testing.T, s *store.Store) (*mcppkg.CallToolResult, string) {
-				res, err := handleSave(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"title": "UTF-8 save", "content": content, "project": "engram"}}})
+				res, err := handleSave(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"title": "UTF-8 save", "content": content, "project": "engram", "session_id": "s-truncation"}}})
 				if err != nil {
 					t.Fatalf("mem_save: %v", err)
+				}
+				if res == nil || res.IsError {
+					t.Fatalf("mem_save tool error: %+v", res)
 				}
 				observations, err := s.RecentObservations("engram", "project", 1)
 				if err != nil {
 					t.Fatalf("recent observations: %v", err)
+				}
+				if len(observations) != 1 {
+					t.Fatalf("expected one saved observation, got %d", len(observations))
 				}
 				return res, observations[0].Content
 			},
@@ -154,6 +160,9 @@ func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
 				if err != nil {
 					t.Fatalf("mem_update: %v", err)
 				}
+				if res == nil || res.IsError {
+					t.Fatalf("mem_update tool error: %+v", res)
+				}
 				observation, err := s.GetObservation(id)
 				if err != nil {
 					t.Fatalf("get observation: %v", err)
@@ -164,13 +173,19 @@ func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
 		{
 			name: "mem_save_prompt",
 			write: func(t *testing.T, s *store.Store) (*mcppkg.CallToolResult, string) {
-				res, err := handleSavePrompt(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"content": content, "project": "engram"}}})
+				res, err := handleSavePrompt(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"content": content, "project": "engram", "session_id": "s-truncation"}}})
 				if err != nil {
 					t.Fatalf("mem_save_prompt: %v", err)
+				}
+				if res == nil || res.IsError {
+					t.Fatalf("mem_save_prompt tool error: %+v", res)
 				}
 				prompts, err := s.RecentPrompts("engram", 1)
 				if err != nil {
 					t.Fatalf("recent prompts: %v", err)
+				}
+				if len(prompts) != 1 {
+					t.Fatalf("expected one saved prompt, got %d", len(prompts))
 				}
 				return res, prompts[0].Content
 			},
@@ -180,6 +195,9 @@ func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newMCPTestStoreWithMaxContentLength(t, limit)
+			if err := s.CreateSession("s-truncation", "engram", t.TempDir()); err != nil {
+				t.Fatalf("create truncation session: %v", err)
+			}
 			res, persisted := tc.write(t, s)
 			if persisted != want || !utf8.ValidString(persisted) {
 				t.Fatalf("persisted content = %q, want valid UTF-8 %q", persisted, want)
@@ -2026,6 +2044,7 @@ func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 	markRes, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"action":         "mark_reviewed",
 		"observation_id": float64(id),
+		"project":        "engram",
 	}}})
 	if err != nil {
 		t.Fatalf("mark reviewed handler error: %v", err)
@@ -2055,8 +2074,9 @@ func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 
 	h := handleReview(s, MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"action": "mark_reviewed",
-		"id":     float64(id),
+		"action":  "mark_reviewed",
+		"id":      float64(id),
+		"project": "engram",
 	}}})
 	if err != nil {
 		t.Fatalf("mark reviewed handler error: %v", err)
@@ -2253,8 +2273,8 @@ func TestHandleContextPropagatesStatsError(t *testing.T) {
 	}
 	original := loadContextStats
 	t.Cleanup(func() { loadContextStats = original })
-	loadContextStats = func(*store.Store) (*store.Stats, error) {
-		return nil, store.ErrDatabaseGenerationChanged
+	loadContextStats = func(*store.Store, string) (*store.Stats, int, error) {
+		return nil, 0, store.ErrDatabaseGenerationChanged
 	}
 
 	result, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram"}}})
@@ -4415,6 +4435,14 @@ func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 		"content": "Memory content",
 	}}})
 
+	previousList := listSaveProjectNames
+	enumerations := 0
+	listSaveProjectNames = func(st *store.Store) ([]string, error) {
+		enumerations++
+		return previousList(st)
+	}
+	t.Cleanup(func() { listSaveProjectNames = previousList })
+
 	req2 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Second memory",
 		"content": "Another memory content",
@@ -4427,6 +4455,9 @@ func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 	text := callResultText(t, res2)
 	if strings.Contains(text, "Similar project") {
 		t.Fatalf("unexpected similar project warning on existing project, got %q", text)
+	}
+	if enumerations != 0 {
+		t.Errorf("established project save enumerated all project names %d times, want zero", enumerations)
 	}
 }
 
@@ -6433,26 +6464,37 @@ func TestAmbiguousRecoveryConcurrentSameChoiceBootstrap(t *testing.T) {
 }
 
 func TestAmbiguousRecoveryReadHintKeepsSameReadTool(t *testing.T) {
-	parent := t.TempDir()
-	for _, name := range []string{"read-a", "read-b"} {
-		child := filepath.Join(parent, name)
-		if err := os.MkdirAll(child, 0o755); err != nil {
+	// This tests recovery formatting, not whether the bounded child scan
+	// finishes under CI load. Detector integration has separate coverage.
+	res := project.DetectionResult{
+		Source:            project.SourceAmbiguous,
+		Path:              t.TempDir(),
+		Error:             project.ErrAmbiguousProject,
+		AvailableProjects: []string{"read-a", "read-b"},
+	}
+	for _, name := range res.AvailableProjects {
+		if err := os.MkdirAll(filepath.Join(res.Path, name, ".git"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		initTestGitRepo(t, child)
 	}
-	t.Chdir(parent)
-	res, err := resolveWriteProject(newMCPTestStore(t))
-	if !errors.Is(err, project.ErrAmbiguousProject) {
-		t.Fatalf("expected ambiguity, got %v", err)
-	}
-	body := callResultJSON(t, readProjectErrorResult(NewSessionActivity(time.Minute), res, err))
+	activity := NewSessionActivity(time.Minute)
+	body := callResultJSON(t, readProjectErrorResult(activity, res, res.Error))
 	hint, ok := body["hint"].(string)
 	if !ok || !strings.Contains(hint, "retry the same read tool") || strings.Contains(hint, "mem_save") {
 		t.Fatalf("incorrect read guidance: %v", body)
 	}
 	if body["error_code"] != "ambiguous_project" || body["recovery_token"] == nil || body["project_source"] != "ambiguous" {
 		t.Fatalf("missing compatible structured ambiguity: %v", body)
+	}
+	token, ok := body["recovery_token"].(string)
+	if !ok || token == "" {
+		t.Fatalf("missing usable recovery token: %v", body)
+	}
+	if !activity.ValidateAmbiguousProjectRecoveryToken(defaultSessionID(""), token, "read-a", res.AvailableProjects, res.Path) {
+		t.Fatal("issued recovery token did not validate for its candidate and context")
+	}
+	if !reflect.DeepEqual(body["available_projects"], []any{"read-a", "read-b"}) || body["project_path"] != res.Path {
+		t.Fatalf("lost ambiguity context: %v", body)
 	}
 }
 

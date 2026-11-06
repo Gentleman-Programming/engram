@@ -685,7 +685,7 @@ func (s *Store) RepairObservationSourceTitles(project string, apply bool) (Obser
 		actions = observationSourceTitleRepairActions(currentRows)
 		report.Unrepairable = observationSourceUnrepairable(currentRows, actions)
 		for _, action := range actions {
-			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = datetime('now') WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, action.ID, action.SyncID)
+			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = ? WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, Now(), action.ID, action.SyncID)
 			if err != nil {
 				return fmt.Errorf("repair source observation title %d: %w", action.ID, err)
 			}
@@ -1341,10 +1341,18 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 
 func (s *Store) sqliteRepairBackupPath() (string, error) {
 	backupDir := filepath.Join(s.cfg.DataDir, "backups")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
 		return "", fmt.Errorf("create sqlite backup dir: %w", err)
 	}
 	path := filepath.Join(backupDir, "engram-repair-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
+	// Reserve privately before SQLite opens the path, including in existing directories.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", fmt.Errorf("reserve sqlite backup: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close sqlite backup reservation: %w", err)
+	}
 	return path, nil
 }
 

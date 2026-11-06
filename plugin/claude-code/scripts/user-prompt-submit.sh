@@ -46,6 +46,14 @@ set_json_string_value() {
   fi
 }
 
+# Bash 3.2 may sign-extend a quoted byte in printf's numeric conversions.
+# These scanners use LC_ALL=C: normalize to 0..255 before classifying/encoding.
+byte_value_without_jq() {
+  local LC_ALL=C
+  printf -v JSON_VALUE '%d' "'$1"
+  JSON_VALUE=$(( JSON_VALUE & 255 ))
+}
+
 session_state_key_part() {
   local raw="$1"
   local encoded="sid-"
@@ -162,7 +170,8 @@ json_parse_string_without_jq() {
         esac
         ;;
       *)
-        [ "$(printf '%d' "'$char")" -ge 32 ] || return 1
+        byte_value_without_jq "$char"
+        [ "$JSON_VALUE" -ge 32 ] || return 1
         JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
         ;;
     esac
@@ -279,21 +288,25 @@ json_escape_without_jq() {
       $'\r') value+='\r' ;;
       $'\t') value+='\t' ;;
       *)
-        printf -v byte '%d' "'$char"
+        byte_value_without_jq "$char"
+        byte="$JSON_VALUE"
         if [ "$byte" -ge 1 ] && [ "$byte" -le 31 ]; then
           printf -v escaped '\\u%04x' "$byte"
           value+="$escaped"
         elif [ "$byte" -ge 128 ]; then
           codepoint=""
           if [ "$byte" -ge 194 ] && [ "$byte" -le 223 ] && [ "$(( i + 1 ))" -lt "${#raw}" ]; then
-            printf -v byte2 '%d' "'${raw:i+1:1}"
+            byte_value_without_jq "${raw:i+1:1}"
+            byte2="$JSON_VALUE"
             if [ "$byte2" -ge 128 ] && [ "$byte2" -le 191 ]; then
               codepoint=$(( ((byte & 31) << 6) | (byte2 & 63) ))
               i=$(( i + 1 ))
             fi
           elif [ "$byte" -ge 224 ] && [ "$byte" -le 239 ] && [ "$(( i + 2 ))" -lt "${#raw}" ]; then
-            printf -v byte2 '%d' "'${raw:i+1:1}"
-            printf -v byte3 '%d' "'${raw:i+2:1}"
+            byte_value_without_jq "${raw:i+1:1}"
+            byte2="$JSON_VALUE"
+            byte_value_without_jq "${raw:i+2:1}"
+            byte3="$JSON_VALUE"
             if [ "$byte2" -ge 128 ] && [ "$byte2" -le 191 ] && [ "$byte3" -ge 128 ] && [ "$byte3" -le 191 ]; then
               codepoint=$(( ((byte & 15) << 12) | ((byte2 & 63) << 6) | (byte3 & 63) ))
               if [ "$codepoint" -ge 2048 ] && { [ "$codepoint" -lt 55296 ] || [ "$codepoint" -gt 57343 ]; }; then
@@ -303,9 +316,12 @@ json_escape_without_jq() {
               fi
             fi
           elif [ "$byte" -ge 240 ] && [ "$byte" -le 244 ] && [ "$(( i + 3 ))" -lt "${#raw}" ]; then
-            printf -v byte2 '%d' "'${raw:i+1:1}"
-            printf -v byte3 '%d' "'${raw:i+2:1}"
-            printf -v byte4 '%d' "'${raw:i+3:1}"
+            byte_value_without_jq "${raw:i+1:1}"
+            byte2="$JSON_VALUE"
+            byte_value_without_jq "${raw:i+2:1}"
+            byte3="$JSON_VALUE"
+            byte_value_without_jq "${raw:i+3:1}"
+            byte4="$JSON_VALUE"
             if [ "$byte2" -ge 128 ] && [ "$byte2" -le 191 ] && [ "$byte3" -ge 128 ] && [ "$byte3" -le 191 ] && [ "$byte4" -ge 128 ] && [ "$byte4" -le 191 ]; then
               codepoint=$(( ((byte & 7) << 18) | ((byte2 & 63) << 12) | ((byte3 & 63) << 6) | (byte4 & 63) ))
               if [ "$codepoint" -ge 65536 ] && [ "$codepoint" -le 1114111 ]; then
@@ -344,7 +360,8 @@ url_encode_without_jq() {
     case "$char" in
       [a-zA-Z0-9.~_-]) value+="$char" ;;
       *)
-        printf -v byte '%02X' "'$char"
+        byte_value_without_jq "$char"
+        printf -v byte '%02X' "$JSON_VALUE"
         value+="%${byte}"
         ;;
     esac

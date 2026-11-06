@@ -57,7 +57,7 @@ func historyPeriods(now time.Time) []historyPeriod {
 
 // The transaction pins recent membership, aggregates and bounded title reads to
 // one SQLite snapshot. Old content bodies are never selected.
-func (s *Store) contextHistory(project, scope string, limit int, now time.Time) ([]Observation, []historyGroup, error) {
+func (s *Store) contextHistory(project, scope string, limit int, now time.Time, compact bool) ([]Observation, []historyGroup, error) {
 	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, nil, err
@@ -78,23 +78,9 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time) 
 	if limit <= 0 {
 		limit = s.cfg.MaxContextResults
 	}
-	recentSQL := "SELECT " + observationSelectColumns + " FROM observations WHERE " + filter + " ORDER BY datetime(created_at) DESC, id DESC LIMIT ?"
+	recentSQL := "SELECT " + contextObservationColumns(compact) + " FROM observations WHERE " + filter + " ORDER BY datetime(created_at) DESC, id DESC LIMIT ?"
 	recentArgs := append(append([]any{}, args...), limit)
-	rows, err := tx.Query(recentSQL, recentArgs...)
-	if err != nil {
-		return nil, nil, err
-	}
-	var recent []Observation
-	for rows.Next() {
-		var o Observation
-		if err = scanObservationRow(rows, &o); err != nil {
-			_ = rows.Close()
-			return nil, nil, err
-		}
-		recent = append(recent, o)
-	}
-	err = rows.Err()
-	_ = rows.Close()
+	recent, err := s.queryContextObservations(tx, recentSQL, recentArgs, compact)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -105,7 +91,7 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time) 
 	baseArgs := append(append([]any{}, recentArgs...), args...)
 	periods := historyPeriods(now)
 	aggregateSQL, queryArgs := historyAggregateSQL(base, baseArgs, periods, now)
-	rows, err = tx.Query(aggregateSQL, queryArgs...)
+	rows, err := tx.Query(aggregateSQL, queryArgs...)
 	if err != nil {
 		return nil, nil, err
 	}
