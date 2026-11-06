@@ -130,8 +130,11 @@ func TestInvalidProjectScopeAndPayloadPriority(t *testing.T) {
 		if want.ReasonCode == "" {
 			want.ReasonCode = "sync_mutation_project_invalid"
 		}
-		if report.Status != StatusBlocked || len(report.Checks[0].Findings) != 1 || report.Checks[0].ReasonCode != want.ReasonCode {
+		if report.Status != StatusBlocked || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 || report.Checks[0].ReasonCode != want.ReasonCode {
 			t.Fatalf("scoped reason: %+v want %s", report, want.ReasonCode)
+		}
+		if want.Message != "" && report.Checks[0].Findings[0].Message != want.Message {
+			t.Fatalf("payload error message lost priority: %+v", report.Checks[0].Findings[0])
 		}
 		next := report.Checks[0].Findings[0].SafeNextStep
 		if !strings.Contains(next, "engram doctor repair --check sync_mutation_required_fields --dry-run") || strings.Contains(next, "--project") {
