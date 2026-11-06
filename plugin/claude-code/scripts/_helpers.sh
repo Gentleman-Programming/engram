@@ -116,6 +116,46 @@ engram_curl() {
   return "$status"
 }
 
+# Lifecycle hooks register through the server; it owns continuation allocation.
+# Return the authoritative project for the hook's subsequent context request.
+engram_register_claude_session() {
+  local id="$1" project="$2" dir="$3"
+  local mode="project_owned" encoded_id session="" persisted_project=""
+  if [ -z "$id" ]; then
+    printf '%s\n' "$project"
+    return 0
+  fi
+  if [ -z "$project" ]; then
+    printf '%s\n' "warning: Engram session registration failed: project could not be resolved; memory writes may be denied." >&2
+    printf '\n'
+    return 0
+  fi
+  encoded_id=$(printf '%s' "$id" | jq -sRr @uri 2>/dev/null)
+  if [ -n "$encoded_id" ]; then
+    session=$(engram_curl -sf "${ENGRAM_URL}/sessions/${encoded_id}" --max-time 1 2>/dev/null)
+  fi
+  # Project resolution may change while Claude keeps the same host ID. Use
+  # only an exact root response; never move its owner to match today's cwd.
+  if [ -n "$session" ]; then
+    persisted_project=$(printf '%s' "$session" | jq -ej --arg id "$id" '
+      select(.id == $id) | .project |
+      select(type == "string" and (gsub("^[[:space:]]+|[[:space:]]+$"; "") | length) > 0)
+    ' 2>/dev/null) || persisted_project=""
+    [ -z "$persisted_project" ] || project="$persisted_project"
+    if printf '%s' "$session" | jq -e --arg id "$id" '.id == $id and .ended_at != null and .ownership_mode == "shared"' >/dev/null 2>&1; then
+      mode="shared"
+    fi
+  fi
+  if ! engram_curl -sf "${ENGRAM_URL}/sessions" \
+    -X POST -H "Content-Type: application/json" \
+    -d "$(jq -n --arg id "$id" --arg project "$project" --arg dir "$dir" --arg mode "$mode" \
+      '{id: $id, project: $project, directory: $dir, ownership_mode: $mode, resume: true}')" >/dev/null 2>/dev/null; then
+    # Never log the response body, session ID, project, cwd or credentials.
+    printf '%s\n' "warning: Engram session registration failed: server rejected the request or could not be reached; memory writes may be denied. Check the Engram server and retry SessionStart." >&2
+  fi
+  printf '%s\n' "$project"
+}
+
 engram_health_matches_instance() {
   local expected="$1" response
   response=$(engram_curl -sf "${ENGRAM_URL}/health" --max-time 1 2>/dev/null) || return 1
