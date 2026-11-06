@@ -1,8 +1,8 @@
-# 🧠 Obsidian Brain — Beta
+# 🧠 Obsidian Brain
 
-> **Status**: Beta — feedback welcome on the [GitHub issues](https://github.com/Gentleman-Programming/engram/issues) tagged `beta:obsidian`.
-> **Available since**: `v1.12.0-beta.1`
-> **Stability**: Included in the stable release.
+> **Status**: Stable — feedback welcome on the [GitHub issues](https://github.com/Gentleman-Programming/engram/issues).
+> **Available since**: `v1.12.0` (first shipped in `v1.12.0-beta.1`)
+> **Stability**: Included in the stable `engram` binary; no separate install is needed.
 
 Visualize your AI agent's memory as an interactive knowledge graph in [Obsidian](https://obsidian.md/). Every observation becomes a Markdown note. Sessions, projects, and topic clusters become connected hubs. Open Obsidian's Graph View and **see how your agent's brain actually thinks**.
 
@@ -385,7 +385,7 @@ In the Filter panel of Graph View:
 
 ## Feedback & Bugs
 
-This is a beta feature. **We want to hear how it works for you, especially**:
+**We want to hear how the Obsidian export works for you, especially**:
 
 - Does the graph layout feel right at your scale (100 / 1k / 10k+ observations)?
 - Are the color groups useful, or do you wish they were configurable?
@@ -393,15 +393,14 @@ This is a beta feature. **We want to hear how it works for you, especially**:
 - Did the daemon mode crash, leak memory, or behave unexpectedly?
 - Did the graph config bootstrap clobber something you cared about?
 
-File issues at [github.com/Gentleman-Programming/engram/issues](https://github.com/Gentleman-Programming/engram/issues) with the `beta:obsidian` label.
+File issues at [github.com/Gentleman-Programming/engram/issues](https://github.com/Gentleman-Programming/engram/issues) and mention `obsidian-export` in the title.
 
 ---
 
-## Roadmap (post-beta)
+## Roadmap
 
-Once there's feedback signal:
+Ideas under consideration, prioritized by feedback:
 
-- **Move into stable** — promote docs into main README, remove beta marker
 - **Embeddings + semantic edges** — optional `--with-embeddings` flag using local Ollama
 - **Bidirectional sync** — let Obsidian edits flow back to Engram (with conflict resolution)
 - **Custom hub templates** — user-defined templates for session/topic hub notes
