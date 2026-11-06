@@ -139,7 +139,7 @@ func TestPrintCloudStatusDaemonProbeFormatsEachState(t *testing.T) {
 			},
 			wantLines: []string{
 				"Local daemon: not running on port",
-				"Hint: run `engram serve`",
+				"Hint: run `engram run -d`",
 				"launchd",
 			},
 		},
