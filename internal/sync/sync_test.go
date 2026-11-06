@@ -1237,12 +1237,12 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 			wantObservation:    true,
 		},
 		{
-			name: "older observation in a direct historical row remains filtered",
+			name: "identity-only history cannot prove an older observation was exported",
 			history: func(observation store.Observation) ChunkData {
 				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
 			},
 			observationUpdated: "2025-01-01 00:00:00",
-			wantEmpty:          true,
+			wantObservation:    true,
 		},
 		{
 			name: "observation tombstone mutation counts as historical presence",

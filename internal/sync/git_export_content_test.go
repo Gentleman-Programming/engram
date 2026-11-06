@@ -78,6 +78,7 @@ func TestBuildGitExportChunkReviewRestoration(t *testing.T) {
 			}
 			chunk, err := buildGitExportChunk(data, gitExportInputs{
 				lastChunkTime: "2025-01-02", historicalObservations: map[string]struct{}{"obs": {}}, reviewDates: tc.prior,
+				observationUpdates: map[string]string{"obs": "2025-01-02"},
 			})
 			if err != nil || len(chunk.Observations) != tc.want || len(chunk.Sessions) != tc.want {
 				t.Fatalf("chunk=%+v err=%v want=%d", chunk, err, tc.want)
@@ -92,7 +93,8 @@ func TestBuildGitExportChunkClearAndMutationOrder(t *testing.T) {
 	deletion := store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "gone", Op: store.SyncOpDelete, Payload: `{}`}
 	inputs := gitExportInputs{
 		lastChunkTime: "2025-01-02", historicalObservations: map[string]struct{}{"obs": {}},
-		relationMutations: []store.SyncMutation{relation}, localDeletes: []store.SyncMutation{deletion},
+		observationUpdates: map[string]string{"obs": "2025-01-01"},
+		relationMutations:  []store.SyncMutation{relation}, localDeletes: []store.SyncMutation{deletion},
 		events:         []store.ReviewClearEvent{{ID: 1, Key: "fresh", SyncID: "obs"}, {ID: 2, Key: "old", SyncID: "obs"}, {ID: 3, Key: "absent", SyncID: "missing"}},
 		exportedClears: map[string]bool{"obs:2:old": true},
 	}

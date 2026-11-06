@@ -2309,7 +2309,14 @@ func filterObservationsForExport(observations []store.Observation, historical ma
 		_, present := historical[observation.SyncID]
 		observationCutoff := cutoff
 		if updated, known := updates[observation.SyncID]; known {
-			observationCutoff = normalizeTime(updated)
+			if updated != "" {
+				observationCutoff = normalizeTime(updated)
+			}
+		} else if present {
+			// Presence without a readable version does not prove this edit was
+			// exported. One conservative snapshot establishes that evidence.
+			filtered = append(filtered, observation)
+			continue
 		}
 		if !present || normalizeTime(observation.CreatedAt) > observationCutoff || normalizeTime(observation.UpdatedAt) > observationCutoff {
 			filtered = append(filtered, observation)
@@ -2461,7 +2468,9 @@ func (sy *Syncer) exportedObservationState(m *Manifest) (map[string]historicalRe
 			}
 			if mutation.Op == store.SyncOpDelete {
 				dates[mutation.EntityKey] = historicalReviewState{deleted: true}
-				delete(updates, mutation.EntityKey)
+				// Retain a delete floor so a later stale upsert cannot lower it.
+				// Empty means a legacy tombstone: preserve its watermark fallback.
+				updates[mutation.EntityKey] = exportedObservationTime(mutation.OccurredAt)
 				continue
 			}
 			var fields struct {
@@ -2479,8 +2488,8 @@ func (sy *Syncer) exportedObservationState(m *Manifest) (map[string]historicalRe
 			_ = json.Unmarshal(fields.UpdatedAt, &updated)
 			_ = json.Unmarshal(fields.CreatedAt, &created)
 			version := exportedObservationTime(updated)
-			if version == "" {
-				version = exportedObservationTime(created)
+			if createdVersion := exportedObservationTime(created); createdVersion > version {
+				version = createdVersion
 			}
 			if version > updates[fields.SyncID] {
 				updates[fields.SyncID] = version
@@ -2501,7 +2510,7 @@ func (sy *Syncer) exportedObservationState(m *Manifest) (map[string]historicalRe
 }
 
 // Only readable timestamps establish a known exported version. Older chunks
-// without one retain the legacy manifest-watermark fallback.
+// without one are conservatively re-exported unless history establishes a delete.
 func exportedObservationTime(value string) string {
 	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999"} {
 		if parsed, err := time.Parse(layout, strings.TrimSpace(value)); err == nil {
