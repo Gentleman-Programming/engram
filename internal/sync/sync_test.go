@@ -2087,6 +2087,13 @@ func TestExportErrors(t *testing.T) {
 		}
 		chunk := filterNewData(data, "")
 		chunk.Prompts = nil // Match the default Git policy in this known-hash fixture.
+		historyJSON, err := json.Marshal(chunk)
+		if err != nil {
+			t.Fatalf("marshal observation history: %v", err)
+		}
+		// Equal observation versions are already exported. The old manifest
+		// timestamp still selects sessions, so hash that remaining candidate.
+		chunk.Observations = []store.Observation{}
 		chunkJSON, err := json.Marshal(chunk)
 		if err != nil {
 			t.Fatalf("marshal chunk: %v", err)
@@ -2095,12 +2102,15 @@ func TestExportErrors(t *testing.T) {
 		chunkID := hex.EncodeToString(hash[:])[:8]
 
 		// A healthy known-ID no-op requires payload bytes, not only a reference.
+		if err := sy.transport.WriteChunk("observation-history", historyJSON, ChunkEntry{ID: "observation-history"}); err != nil {
+			t.Fatalf("write observation history: %v", err)
+		}
 		if err := sy.transport.WriteChunk(chunkID, chunkJSON, ChunkEntry{ID: chunkID}); err != nil {
 			t.Fatalf("write known chunk payload: %v", err)
 		}
 		writeManifestFile(t, sy.syncDir, &Manifest{
 			Version: 1,
-			Chunks: []ChunkEntry{{
+			Chunks: []ChunkEntry{{ID: "observation-history", CreatedAt: "2000-01-01T00:00:00Z"}, {
 				ID:        chunkID,
 				CreatedBy: "alice",
 				CreatedAt: "2000-01-01T00:00:00Z",

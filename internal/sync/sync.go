@@ -551,7 +551,7 @@ func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitEx
 	if err != nil {
 		return nil, fmt.Errorf("export local delete tombstones: %w", err)
 	}
-	reviewDates, exportedClears, err := sy.exportedReviewState(manifest)
+	reviewDates, exportedClears, observationUpdates, err := sy.exportedObservationState(manifest)
 	if err != nil {
 		return nil, err
 	}
@@ -565,6 +565,7 @@ func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitEx
 		includePrompts:         opts.IncludePrompts,
 		historicalPrompts:      historicalPrompts,
 		historicalObservations: historicalObservations,
+		observationUpdates:     observationUpdates,
 		reviewDates:            reviewDates,
 		relationMutations:      relationMutations,
 		exportedRelations:      exportedRelations,
@@ -2297,7 +2298,7 @@ func filterNewData(data *store.ExportData, lastChunkTime string) *ChunkData {
 	return chunk
 }
 
-func filterObservationsForExport(observations []store.Observation, historical map[string]struct{}, lastChunkTime string) []store.Observation {
+func filterObservationsForExport(observations []store.Observation, historical map[string]struct{}, lastChunkTime string, updates map[string]string) []store.Observation {
 	if lastChunkTime == "" {
 		return observations
 	}
@@ -2306,7 +2307,11 @@ func filterObservationsForExport(observations []store.Observation, historical ma
 	filtered := make([]store.Observation, 0, len(observations))
 	for _, observation := range observations {
 		_, present := historical[observation.SyncID]
-		if !present || normalizeTime(observation.CreatedAt) > cutoff || normalizeTime(observation.UpdatedAt) > cutoff {
+		observationCutoff := cutoff
+		if updated, known := updates[observation.SyncID]; known {
+			observationCutoff = normalizeTime(updated)
+		}
+		if !present || normalizeTime(observation.CreatedAt) > observationCutoff || normalizeTime(observation.UpdatedAt) > observationCutoff {
 			filtered = append(filtered, observation)
 		}
 	}
@@ -2430,21 +2435,22 @@ type historicalReviewState struct {
 	deleted bool
 }
 
-// exportedReviewState follows replay order. Missing fields preserve earlier
-// knowledge, but cannot establish a date or resurrect tombstoned knowledge.
-func (sy *Syncer) exportedReviewState(m *Manifest) (map[string]historicalReviewState, map[string]bool, error) {
+// exportedObservationState follows replay order for review state and retains
+// each observation's newest exported timestamp independently of unrelated chunks.
+func (sy *Syncer) exportedObservationState(m *Manifest) (map[string]historicalReviewState, map[string]bool, map[string]string, error) {
 	dates, clears := make(map[string]historicalReviewState), make(map[string]bool)
+	updates := make(map[string]string)
 	for _, entry := range m.Chunks {
 		raw, err := sy.transport.ReadChunk(entry.ID)
 		if errors.Is(err, ErrChunkNotFound) {
 			continue
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		var chunk ChunkData
 		if err := json.Unmarshal(raw, &chunk); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for _, receipt := range chunk.ReviewClears {
 			clears[receipt] = true
@@ -2455,19 +2461,33 @@ func (sy *Syncer) exportedReviewState(m *Manifest) (map[string]historicalReviewS
 			}
 			if mutation.Op == store.SyncOpDelete {
 				dates[mutation.EntityKey] = historicalReviewState{deleted: true}
+				delete(updates, mutation.EntityKey)
 				continue
 			}
 			var fields struct {
 				SyncID      string          `json:"sync_id"`
 				ReviewAfter json.RawMessage `json:"review_after"`
+				UpdatedAt   json.RawMessage `json:"updated_at"`
+				CreatedAt   json.RawMessage `json:"created_at"`
 			}
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &fields); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
+			}
+			// Legacy identity-only snapshots establish presence, not a revision.
+			// Do not make their timestamps an additional format requirement.
+			var updated, created string
+			_ = json.Unmarshal(fields.UpdatedAt, &updated)
+			_ = json.Unmarshal(fields.CreatedAt, &created)
+			if updated == "" {
+				updated = created
+			}
+			if version := exportedObservationTime(updated); version > updates[fields.SyncID] {
+				updates[fields.SyncID] = version
 			}
 			if fields.ReviewAfter != nil {
 				var date *string
 				if err := json.Unmarshal(fields.ReviewAfter, &date); err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				dates[fields.SyncID] = historicalReviewState{date: date}
 			} else if dates[fields.SyncID].deleted {
@@ -2476,7 +2496,18 @@ func (sy *Syncer) exportedReviewState(m *Manifest) (map[string]historicalReviewS
 			}
 		}
 	}
-	return dates, clears, nil
+	return dates, clears, updates, nil
+}
+
+// Only readable timestamps establish a known exported version. Older chunks
+// without one retain the legacy manifest-watermark fallback.
+func exportedObservationTime(value string) string {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999"} {
+		if parsed, err := time.Parse(layout, strings.TrimSpace(value)); err == nil {
+			return parsed.UTC().Format("2006-01-02 15:04:05.000000000")
+		}
+	}
+	return ""
 }
 
 // exportedChunkKeys scans manifest chunks for availability and historical

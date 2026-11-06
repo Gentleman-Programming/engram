@@ -13,6 +13,7 @@ type gitExportInputs struct {
 	lastChunkTime                             string
 	includePrompts                            bool
 	historicalPrompts, historicalObservations map[string]struct{}
+	observationUpdates                        map[string]string
 	exportedRelations, exportedDeletes        map[string]struct{}
 	reviewDates                               map[string]historicalReviewState
 	exportedClears                            map[string]bool
@@ -32,7 +33,7 @@ func buildGitExportChunk(data *store.ExportData, inputs gitExportInputs) (*Chunk
 			}
 		}
 	}
-	chunk.Observations = filterObservationsForExport(data.Observations, inputs.historicalObservations, inputs.lastChunkTime)
+	chunk.Observations = filterObservationsForExport(data.Observations, inputs.historicalObservations, inputs.lastChunkTime, inputs.observationUpdates)
 	selected := make(map[string]bool)
 	for _, observation := range chunk.Observations {
 		selected[observation.SyncID] = true
