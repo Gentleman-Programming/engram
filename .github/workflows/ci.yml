@@ -337,6 +337,7 @@ jobs:
           set -euo pipefail
           node -e 'const p = require("./plugin/pi/node_modules/typebox/package.json"); if (p.name !== "typebox" || p.version !== "1.3.34") process.exit(1)'
           go build -mod=readonly -o "$RUNNER_TEMP/pi-test-server" ./plugin/pi/test/support/real-server
+          go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary
           echo "ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server" >> "$GITHUB_ENV"
       - name: Run Pi adapters
         id: pi
@@ -349,6 +350,7 @@ jobs:
             case "$key" in ENGRAM_*|GENTLE_*|CLOUDSTORE_TEST_DSN|NODE_OPTIONS|GOFLAGS) unset "$key" ;; esac
           done < <(env)
           export ENGRAM_DATA_DIR="$HOME/../store" ENGRAM_PI_TEST_SERVER_BINARY="$RUNNER_TEMP/pi-test-server"
+          export ENGRAM_PI_TEST_PATH_BINARY="$RUNNER_TEMP/pi-test-path"
           node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs | tee "$RUNNER_TEMP/pi.tap"
       - name: Run OpenCode adapters
         id: opencode
@@ -440,6 +442,10 @@ jobs:
           go build -mod=readonly -o $binary ./plugin/pi/test/support/real-server
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (!(Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Missing mandatory prebuilt fixture' }
+          $pathBinary = Join-Path $env:RUNNER_TEMP 'pi-test-path.exe'
+          go build -mod=readonly -o $pathBinary ./plugin/pi/test/support/runtime-path-binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path -LiteralPath $pathBinary -PathType Leaf)) { throw 'Missing mandatory prebuilt path fixture' }
       - name: Run Pi adapters
         id: pi
         timeout-minutes: 5
@@ -451,6 +457,7 @@ jobs:
             ForEach-Object { Remove-Item "Env:$($_.Name)" }
           $env:ENGRAM_DATA_DIR = Join-Path (Split-Path $env:HOME) 'store'
           $env:ENGRAM_PI_TEST_SERVER_BINARY = Join-Path $env:RUNNER_TEMP 'pi-test-server.exe'
+          $env:ENGRAM_PI_TEST_PATH_BINARY = Join-Path $env:RUNNER_TEMP 'pi-test-path.exe'
           node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'pi.tap')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run OpenCode adapters

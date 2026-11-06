@@ -394,7 +394,9 @@ then explicitly decide promotion, focused fix or defer.
 
 The separate **Native macOS ARM64 Adapter Tests** lane (#2150, Mac portion)
 reuses the serial Pi `npm test` script with CLI-only TAP reporting, locked TypeBox dependencies and the existing
-three-file OpenCode command with fresh Go-backed fixtures. Mandatory prerequisites
+three-file OpenCode command with fresh Go-backed fixtures. The Pi server and
+synthetic PATH runtime fixtures are prebuilt; the PATH selector is exported again
+after environment isolation so both runtime-negotiation tests execute. Mandatory prerequisites
 and unexpected skips fail completeness; only the installed-host opt-in exclusion
 is accepted. Its provisional ceilings are 15 minutes outer, 2 minutes fixture
 build and 5 minutes per adapter step. Source/fixture success is not installed-host,
@@ -406,8 +408,10 @@ artifact, Windows or release qualification. See [commands and finite rollout](do
 PowerShell lane for #2150. It requires native Windows/x64 Node 24 and
 Windows/amd64 Go 1.26.10, a full checkout, contract JSON, and locked local
 TypeBox 1.3.34 (`npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi`).
-It builds the existing Pi server as `$env:RUNNER_TEMP\pi-test-server.exe`;
-the existing prebuilt-server selector enables packaged positive workflows.
+It builds the existing Pi server as `$env:RUNNER_TEMP\pi-test-server.exe`
+and the synthetic PATH runtime fixture as `$env:RUNNER_TEMP\pi-test-path.exe`;
+both prebuilt selectors are exported again after environment isolation, so the
+packaged positive workflows and both runtime-negotiation tests execute.
 
 From `plugin/pi`, reuse the serial package script with CLI-only TAP:
 `node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs`.

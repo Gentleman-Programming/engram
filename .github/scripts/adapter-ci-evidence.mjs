@@ -7,10 +7,11 @@ const profiles = {
 const profile = Object.hasOwn(profiles, process.argv[2]) && profiles[process.argv[2]];
 if (!profile) throw new Error('Usage: node adapter-ci-evidence.mjs <macos|windows>');
 const report = { scope: profile.scope, suites: {}, coverage: 'incomplete' };
+// #1906 adds the runtime-metadata Pi case, so the packaged suite now runs nine tests.
 const required = {
   pi: ['Pi native saves persist under separate host sessions and stop on failed registration',
     'existing CLI verifies real Pi registration without writing',
-    'packaged real workflows run all eight tests with the prebuilt fixture binary'],
+    'packaged real workflows run all nine tests with the prebuilt fixture binary'],
   opencode: ['V2 inbox prompts stay idempotent and deleted across real server restarts'],
 };
 for (const [suite, names] of Object.entries(required)) {
