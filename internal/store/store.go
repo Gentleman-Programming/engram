@@ -1500,6 +1500,12 @@ func (s *Store) migrate() error {
 			created_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			deleted_at TEXT,
+			review_after TEXT,
+			superseded_by_sync_id TEXT,
+			expires_at TEXT,
+			embedding BLOB,
+			embedding_model TEXT,
+			embedding_created_at TEXT,
 			FOREIGN KEY (session_id) REFERENCES sessions(id)
 		);
 
