@@ -17,15 +17,11 @@ func init() {
 			encodedTerms, _ := args[0].(string)
 			sourceTopic, _ := args[1].(string)
 			title, _ := args[2].(string)
-			var sourceTerms []string
-			if encodedTerms != "" {
-				sourceTerms = strings.Split(encodedTerms, "\x1f")
-			}
 			var topic *string
 			if value, ok := args[3].(string); ok {
 				topic = &value
 			}
-			if saveCandidateRelevant(sourceTerms, sourceTopic, title, topic) {
+			if saveCandidateRelevant(encodedTerms, sourceTopic, title, topic) {
 				return int64(1), nil
 			}
 			return int64(0), nil
@@ -61,22 +57,59 @@ func saveCandidateTerms(title string) []string {
 	return result
 }
 
-// saveCandidateRelevant uses explicit topic identity or distinct title terms,
-// not matches in observation content or corpus-dependent BM25 magnitude.
-func saveCandidateRelevant(sourceTerms []string, sourceTopic, title string, topic *string) bool {
+// saveCandidateRelevant uses explicit topic identity or distinct title terms.
+// encodedTerms contains the normalized, deduplicated source terms produced by
+// saveCandidateTerms, separated by the unit separator used by FindCandidates.
+func saveCandidateRelevant(encodedTerms, sourceTopic, title string, topic *string) bool {
 	if sourceTopic != "" && topic != nil && sourceTopic == *topic {
 		return true
 	}
-	targetTerms := saveCandidateTerms(title)
-	shared := 0
-	for _, source := range sourceTerms {
-		for _, target := range targetTerms {
-			if source == target {
-				shared++
-				break
+	if encodedTerms == "" {
+		return false
+	}
+	if !strings.Contains(encodedTerms, "\x1f") {
+		// Keep the single-term equivalence rule, including ignored words and repeats.
+		targetTerms := saveCandidateTerms(title)
+		return len(targetTerms) == 1 && targetTerms[0] == encodedTerms
+	}
+	// A match against normalized source terms cannot be a stop word or bare
+	// punctuation. Remember the first match so repeated target words count once.
+	first := ""
+	for target := range strings.FieldsFuncSeq(strings.ToLower(title), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '+' && r != '#'
+	}) {
+		if target == first {
+			continue
+		}
+		if saveCandidateEncodingContains(encodedTerms, target) {
+			if first != "" {
+				return true
 			}
+			first = target
 		}
 	}
-	// A one-term title remains eligible only against an equivalent one-term title.
-	return shared >= 2 || (shared == 1 && len(sourceTerms) == 1 && len(targetTerms) == 1)
+	return false
+}
+
+// saveCandidateEncodingContains requires complete terms, not substrings of one.
+// Both the encoding and term use the unchanged significant-word normalization.
+func saveCandidateEncodingContains(encoded, term string) bool {
+	for offset := 0; offset < len(encoded); {
+		index := strings.Index(encoded[offset:], term)
+		if index < 0 {
+			return false
+		}
+		start := offset + index
+		end := start + len(term)
+		if (start == 0 || encoded[start-1] == '\x1f') && (end == len(encoded) || encoded[end] == '\x1f') {
+			return true
+		}
+		separator := strings.IndexByte(encoded[end:], '\x1f')
+		if separator < 0 {
+			return false
+		}
+		// A partial match cannot become a complete match inside this same word.
+		offset = end + separator + 1
+	}
+	return false
 }
