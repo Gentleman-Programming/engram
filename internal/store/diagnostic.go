@@ -588,7 +588,18 @@ func (s *Store) ReclassifyOrphanedPendingRelations() (OrphanedPendingRelationRec
 func (s *Store) ListPendingProjectMutations(project string) ([]SyncMutation, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	return s.listPendingProjectMutationsTxLike(s.db, project)
+	mutations, err := s.listPendingProjectMutationsTxLike(s.db, "")
+	if err != nil || project == "" {
+		return mutations, err
+	}
+	filtered := make([]SyncMutation, 0)
+	for _, mutation := range mutations {
+		owner, _ := NormalizeProject(mutation.Project)
+		if owner == project {
+			filtered = append(filtered, mutation)
+		}
+	}
+	return filtered, nil
 }
 
 type diagnosticObservationRow struct {

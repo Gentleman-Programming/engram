@@ -11,7 +11,7 @@ import (
 
 func TestCmdDoctorRepairEmptyCLIContract(t *testing.T) {
 	binary := buildCompatibilityBinary(t)
-	const want = "{\n  \"applied\": false,\n  \"actions\": [],\n  \"directory_repairs\": [],\n  \"repairs\": [],\n  \"superseded\": [],\n  \"source_repairs\": [],\n  \"source_unrepairable\": []\n}\n"
+	const want = "{\n  \"applied\": false,\n  \"actions\": [],\n  \"project_repairs\": [],\n  \"directory_repairs\": [],\n  \"repairs\": [],\n  \"superseded\": [],\n  \"source_repairs\": [],\n  \"source_unrepairable\": []\n}\n"
 	for _, mode := range []string{"default", "--plan", "--dry-run", "--apply"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := testConfig(t)

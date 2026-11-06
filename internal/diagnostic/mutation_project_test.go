@@ -79,3 +79,58 @@ func TestCompleteMutationInvalidProject(t *testing.T) {
 		})
 	}
 }
+
+func TestCompleteMutationWithRecoverableProject(t *testing.T) {
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
+	if err := s.CreateSession("manual-save", "demo", "/synthetic"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnrollProject("demo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`DELETE FROM sync_mutations`); err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"id":"manual-save","project":"demo","directory":"/synthetic","started_at":"2026-01-01 00:00:00","ownership_mode":""}`
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "", store.SyncEntitySession, "manual-save", store.SyncOpUpsert, payload)
+	dry, err := RepairSyncMutationRequiredFields(s, "", RepairModeDryRun)
+	if err != nil || len(dry.ProjectRepairs) != 1 {
+		t.Fatalf("dry-run: %+v %v", dry, err)
+	}
+	before, err := s.ListPendingProjectMutations("")
+	if err != nil || len(before) != 1 || before[0].Project != "" {
+		t.Fatalf("dry-run wrote: %+v %v", before, err)
+	}
+	if _, err := RepairSyncMutationRequiredFields(s, "", RepairModeApply); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListPendingProjectMutations("")
+	if err != nil || len(rows) != 1 || rows[0].Project != "demo" || rows[0].Payload != payload || rows[0].Disposition != store.SyncMutationDispositionPending || rows[0].AckedAt != nil {
+		t.Fatalf("recoverable project not restored safely: %+v %v", rows, err)
+	}
+	again, err := RepairSyncMutationRequiredFields(s, "", RepairModeApply)
+	if err != nil || len(again.ProjectRepairs) != 0 {
+		t.Fatalf("repeat repair: %+v %v", again, err)
+	}
+}
+
+func TestInvalidProjectScopeAndPayloadPriority(t *testing.T) {
+	for _, payload := range []string{`{"id":"manual-save","project":"demo","directory":"/synthetic","ownership_mode":""}`, `{}`} {
+		s, cfg := newDiagnosticTestStoreWithConfig(t)
+		if err := s.EnrollProject("demo"); err != nil {
+			t.Fatal(err)
+		}
+		seedDiagnosticPendingMutation(t, cfg.DataDir, " demo ", store.SyncEntitySession, "manual-save", store.SyncOpUpsert, payload)
+		report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "demo"}, CheckSyncMutationRequiredFields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := store.ValidateSyncMutationPayload(store.SyncEntitySession, store.SyncOpUpsert, payload, "manual-save")
+		if want.ReasonCode == "" {
+			want.ReasonCode = "sync_mutation_project_invalid"
+		}
+		if report.Status != StatusBlocked || report.Checks[0].ReasonCode != want.ReasonCode {
+			t.Fatalf("scoped reason: %+v want %s", report, want.ReasonCode)
+		}
+	}
+}

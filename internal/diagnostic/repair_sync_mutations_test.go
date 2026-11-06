@@ -40,6 +40,9 @@ func (s *mutationRepairStore) record(name, project, target string, apply bool) e
 func (s *mutationRepairStore) RepairPendingSessionDirectories(project string, apply bool) ([]store.SyncMutationDirectoryRepairAction, error) {
 	return s.directories, s.record("directory", project, "", apply)
 }
+func (s *mutationRepairStore) RepairPendingSessionProjects(project string, apply bool) ([]store.SyncMutationProjectRepairAction, error) {
+	return nil, s.record("project", project, "", apply)
+}
 func (s *mutationRepairStore) RepairObservationMutationTitles(project string, apply bool) (store.SyncMutationTitleRepairReport, error) {
 	return s.titles, s.record("title", project, "", apply)
 }
@@ -56,7 +59,7 @@ func (s *mutationRepairStore) RepairObservationSourceTitles(project string, appl
 func TestRepairSyncMutationRequiredFieldsOrderModesAndErrors(t *testing.T) {
 	const project = "mixed_case_project"
 	for _, mode := range []RepairMode{RepairModePlan, RepairModeDryRun, RepairModeApply} {
-		for failAt := 0; failAt <= 5; failAt++ {
+		for failAt := 0; failAt <= 6; failAt++ {
 			t.Run(fmt.Sprintf("%s/failure-%d", mode, failAt), func(t *testing.T) {
 				apply := mode == RepairModeApply
 				s := &mutationRepairStore{
@@ -72,6 +75,7 @@ func TestRepairSyncMutationRequiredFieldsOrderModesAndErrors(t *testing.T) {
 				}
 				result, err := RepairSyncMutationRequiredFields(s, project, mode)
 				wantCalls := []mutationRepairCall{
+					{"project", project, "", apply},
 					{"directory", project, "", apply}, {"title", project, "", apply},
 					{"supersede", project, store.DefaultSyncTargetKey, apply},
 					{"quarantine", project, store.DefaultSyncTargetKey, apply}, {"source", project, "", apply},

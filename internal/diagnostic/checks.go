@@ -455,6 +455,10 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		if validation.ReasonCode == "" {
 			continue
 		}
+		repairProject := scope.Project
+		if invalidProjects[mutation.Project] {
+			repairProject = "" // Raw padded owners require an unscoped repair.
+		}
 		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
 			Severity:             SeverityBlocking,
@@ -462,7 +466,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              validation.Message,
 			Why:                  "A pending sync mutation with missing required fields can block safe cloud replication and must fail loudly instead of being silently dropped.",
 			Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "target_key": mutation.TargetKey, "project": mutation.Project, "entity": mutation.Entity, "op": mutation.Op, "entity_key": mutation.EntityKey, "missing_fields": validation.MissingFields}),
-			SafeNextStep:         syncMutationRequiredFieldsRepairHint(scope.Project),
+			SafeNextStep:         syncMutationRequiredFieldsRepairHint(repairProject),
 			RequiresConfirmation: true,
 		})
 	}

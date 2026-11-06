@@ -51,6 +51,7 @@ func IsRepairableCode(code string) bool {
 }
 
 type syncMutationRepairStore interface {
+	RepairPendingSessionProjects(string, bool) ([]store.SyncMutationProjectRepairAction, error)
 	RepairPendingSessionDirectories(string, bool) ([]store.SyncMutationDirectoryRepairAction, error)
 	RepairObservationMutationTitles(string, bool) (store.SyncMutationTitleRepairReport, error)
 	SupersedeUnenrolledLegacyMutations(string, string, bool) (store.SyncMutationSupersedeReport, error)
@@ -62,6 +63,7 @@ type syncMutationRepairStore interface {
 // The caller owns presentation; store owns each repair's data and backup behavior.
 type SyncMutationRepairResult struct {
 	Quarantine             store.SyncMutationQuarantineReport
+	ProjectRepairs         []store.SyncMutationProjectRepairAction
 	DirectoryRepairs       []store.SyncMutationDirectoryRepairAction
 	Repairs                []store.SyncMutationTitleRepairAction
 	Superseded             []store.SyncMutationSupersedeAction
@@ -70,10 +72,14 @@ type SyncMutationRepairResult struct {
 	SourceUnrepairable     []store.ObservationSourceUnrepairable
 }
 
-// RepairSyncMutationRequiredFields runs the existing five repairs in order.
+// RepairSyncMutationRequiredFields runs the session-project repair and existing repairs in order.
 // Errors stop later repairs without rolling back earlier store effects.
 func RepairSyncMutationRequiredFields(s syncMutationRepairStore, project string, mode RepairMode) (SyncMutationRepairResult, error) {
 	apply := mode == RepairModeApply
+	projectRepairs, err := s.RepairPendingSessionProjects(project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
 	directoryRepairs, err := s.RepairPendingSessionDirectories(project, apply)
 	if err != nil {
 		return SyncMutationRepairResult{}, err
@@ -114,10 +120,10 @@ func RepairSyncMutationRequiredFields(s syncMutationRepairStore, project string,
 		return SyncMutationRepairResult{}, err
 	}
 	if apply {
-		report.Applied = len(directoryRepairs) > 0 || len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(superseded.Actions) > 0 || len(sourceRepairs.Actions) > 0
+		report.Applied = len(projectRepairs) > 0 || len(directoryRepairs) > 0 || len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(superseded.Actions) > 0 || len(sourceRepairs.Actions) > 0
 	}
 	return SyncMutationRepairResult{
-		Quarantine: report, DirectoryRepairs: directoryRepairs, Repairs: repairs.Actions,
+		Quarantine: report, ProjectRepairs: projectRepairs, DirectoryRepairs: directoryRepairs, Repairs: repairs.Actions,
 		Superseded: superseded.Actions, SourceRepairs: sourceRepairs.Actions,
 		SourceRepairBackupPath: sourceRepairs.BackupPath, SourceUnrepairable: sourceRepairs.Unrepairable,
 	}, nil
