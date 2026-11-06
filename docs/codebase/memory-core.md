@@ -77,6 +77,10 @@ punctuation separates words except that `+` and `#` are preserved in technical
 identifiers (`C++` and `C#` remain distinct). Bare punctuation does not count as a
 term. Duplicates do not count twice, and common English
 connectives and generic change verbs (such as `updated` and `fixed`) are ignored.
+For multi-term sources, the gate checks whole words against the normalized source
+encoding and iterates target words without building temporary token lists or
+sorting each target. It counts distinct shared words and retains the original
+normalized comparison for the single-term case; it does not cache title data.
 Matches only in content do not establish title relevance. Missing or different
 topic keys do not veto otherwise relevant titles. Topic-key saves continue to
 revise the existing observation rather than creating a new same-topic record.
