@@ -15,14 +15,17 @@ func TestLocalExportComparesObservationVersions(t *testing.T) {
 		history    []string
 		current    string
 		wantExport bool
+		created    string
 	}{
-		{"overtaken SQLite revision", []string{"2025-01-01 00:00:00"}, "2025-01-02 00:00:00", true},
-		{"overtaken RFC3339 revision", []string{"2025-01-01T01:00:00+01:00"}, "2025-01-02 00:00:00", true},
-		{"fractional edit", []string{"2025-01-02 00:00:00.100"}, "2025-01-02 00:00:00.200", true},
-		{"equal version", []string{"2025-01-02T00:00:00Z"}, "2025-01-02 00:00:00", false},
-		{"older snapshot after newer", []string{"2025-01-03 00:00:00", "2025-01-01 00:00:00"}, "2025-01-02 00:00:00", false},
-		{"legacy identity uses watermark", []string{""}, "2025-01-02 00:00:00", false},
-		{"unreadable legacy version uses watermark", []string{"zzzz"}, "2025-07-02 00:00:00", true},
+		{"overtaken SQLite revision", []string{"2025-01-01 00:00:00"}, "2025-01-02 00:00:00", true, ""},
+		{"overtaken RFC3339 revision", []string{"2025-01-01T01:00:00+01:00"}, "2025-01-02 00:00:00", true, ""},
+		{"fractional edit", []string{"2025-01-02 00:00:00.100"}, "2025-01-02 00:00:00.200", true, ""},
+		{"equal version", []string{"2025-01-02T00:00:00Z"}, "2025-01-02 00:00:00", false, ""},
+		{"older snapshot after newer", []string{"2025-01-03 00:00:00", "2025-01-01 00:00:00"}, "2025-01-02 00:00:00", false, ""},
+		{"legacy identity uses watermark", []string{""}, "2025-01-02 00:00:00", false, ""},
+		{"unreadable legacy version uses watermark", []string{"zzzz"}, "2025-07-02 00:00:00", true, ""},
+		{"malformed update with readable creation", []string{"zzzz"}, "2025-01-02 00:00:00", true, "2025-01-01 00:00:00"},
+		{"missing update with readable creation", []string{""}, "2025-01-02 00:00:00", true, "2025-01-01 00:00:00"},
 	} {
 		for _, mutations := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/mutations=%t", tc.name, mutations), func(t *testing.T) {
@@ -45,7 +48,7 @@ func TestLocalExportComparesObservationVersions(t *testing.T) {
 				manifest := &Manifest{Version: 1}
 				for i, stamp := range tc.history {
 					history := *obs
-					history.CreatedAt, history.UpdatedAt = "", stamp
+					history.CreatedAt, history.UpdatedAt = tc.created, stamp
 					chunk := ChunkData{Observations: []store.Observation{history}}
 					if mutations {
 						payload, err := json.Marshal(history)

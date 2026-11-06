@@ -2478,10 +2478,11 @@ func (sy *Syncer) exportedObservationState(m *Manifest) (map[string]historicalRe
 			var updated, created string
 			_ = json.Unmarshal(fields.UpdatedAt, &updated)
 			_ = json.Unmarshal(fields.CreatedAt, &created)
-			if updated == "" {
-				updated = created
+			version := exportedObservationTime(updated)
+			if version == "" {
+				version = exportedObservationTime(created)
 			}
-			if version := exportedObservationTime(updated); version > updates[fields.SyncID] {
+			if version > updates[fields.SyncID] {
 				updates[fields.SyncID] = version
 			}
 			if fields.ReviewAfter != nil {
