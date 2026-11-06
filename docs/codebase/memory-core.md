@@ -132,6 +132,10 @@ lookup followed by deferred identity lookup. Failed fast-path lookups fall back 
 `os.Stat`; other platforms continue using `os.Stat`. Check frequency and replacement
 guards remain unchanged.
 
+## Checkout-root project inspection
+
+Project detection at a checkout root inspects the Git marker with `Lstat`, then obtains the absolute common directory, checkout root and Git directory in one context-bound Git command. The values belong only to that detection and are passed to the configuration/binding helpers; later calls inspect Git and configuration again. Nearest-config precedence, shared linked-worktree identity and checkout-local configuration remain unchanged. Subdirectories and missing markers retain the existing probes; malformed markers, failed commands and ambiguous multi-line output fall back to them. A marker-present fallback can therefore pay one extra command within the existing two-second per-command budget. This optimizes ordinary checkout-root detection, not every project-resolution path.
+
 ## Local store change checklist
 
 - [ ] The rule really belongs in `internal/store`.
