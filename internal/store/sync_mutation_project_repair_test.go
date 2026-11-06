@@ -1,7 +1,9 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -77,5 +79,30 @@ func TestRepairPendingSessionProjectsGuards(t *testing.T) {
 				t.Fatalf("unexpected repair: project=%q payload=%q disposition=%q ack=%v", gotProject, gotPayload, gotDisposition, gotAck)
 			}
 		})
+	}
+}
+
+func TestRepairPendingSessionProjectsCommitRetry(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("host", "demo", "/synthetic"); err != nil {
+		t.Fatal(err)
+	}
+	enrollTestProject(t, s, "demo")
+	if _, err := s.DB().Exec(`DELETE FROM sync_mutations; INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud','session','host','upsert','{"id":"host","project":"demo","directory":"/synthetic","ownership_mode":""}','local','')`); err != nil {
+		t.Fatal(err)
+	}
+	commit := s.hooks.commit
+	t.Cleanup(func() { s.hooks.commit = commit })
+	attempts := 0
+	s.hooks.commit = func(tx *sql.Tx) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("database is locked")
+		}
+		return commit(tx)
+	}
+	actions, err := s.RepairPendingSessionProjects("demo", true)
+	if err != nil || attempts != 2 || len(actions) != 1 {
+		t.Fatalf("retry duplicated plan: attempts=%d actions=%+v err=%v", attempts, actions, err)
 	}
 }

@@ -20,6 +20,7 @@ func (s *Store) RepairPendingSessionProjects(project string, apply bool) ([]Sync
 	project, _ = NormalizeProject(project)
 	actions := make([]SyncMutationProjectRepairAction, 0)
 	run := func(tx *sql.Tx) error {
+		actions = actions[:0] // A retried transaction must not duplicate its plan.
 		var enrolled int
 		if err := tx.QueryRow(`SELECT count(*) FROM sync_enrolled_projects`).Scan(&enrolled); err != nil {
 			return err
@@ -81,5 +82,8 @@ func (s *Store) RepairPendingSessionProjects(project string, apply bool) ([]Sync
 	} else {
 		err = s.withReadTx(run)
 	}
-	return actions, err
+	if err != nil {
+		return nil, err
+	}
+	return actions, nil
 }
