@@ -958,10 +958,6 @@ func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) 
 		FROM sync_mutations
 		WHERE target_key = ? AND acked_at IS NULL`
 	args := []any{DefaultSyncTargetKey}
-	if project != "" {
-		query += ` AND project = ?`
-		args = append(args, project)
-	}
 	query += ` ORDER BY seq ASC`
 	rows, err := q.Query(query, args...)
 	if err != nil {
@@ -973,6 +969,12 @@ func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) 
 		var m SyncMutation
 		if err := rows.Scan(&m.Seq, &m.TargetKey, &m.Entity, &m.EntityKey, &m.Op, &m.Payload, &m.Source, &m.Project, &m.OccurredAt, &m.AckedAt, &m.Disposition, &m.DispositionReason, &m.DispositionEvidence, &m.DispositionAt); err != nil {
 			return nil, err
+		}
+		if project != "" {
+			owner, _ := NormalizeProject(m.Project)
+			if owner != project {
+				continue
+			}
 		}
 		mutations = append(mutations, m)
 	}

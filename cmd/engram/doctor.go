@@ -187,15 +187,7 @@ func cmdDoctorRepair(cfg store.Config) {
 			failDoctorRepair(err.Error())
 			return
 		}
-		writeDoctorRepairJSON(struct {
-			store.SyncMutationQuarantineReport
-			DirectoryRepairs       []store.SyncMutationDirectoryRepairAction  `json:"directory_repairs"`
-			Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`
-			Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
-			SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
-			SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
-			SourceUnrepairable     []store.ObservationSourceUnrepairable      `json:"source_unrepairable"`
-		}{result.Quarantine, result.DirectoryRepairs, result.Repairs, result.Superseded, result.SourceRepairs, result.SourceRepairBackupPath, result.SourceUnrepairable})
+		writeDoctorSyncMutationRepairJSON(result)
 		return
 	}
 
@@ -390,4 +382,17 @@ func renderDoctorText(report diagnostic.Report) {
 			}
 		}
 	}
+}
+
+func writeDoctorSyncMutationRepairJSON(result diagnostic.SyncMutationRepairResult) {
+	writeDoctorRepairJSON(struct {
+		store.SyncMutationQuarantineReport
+		ProjectRepairs         []store.SyncMutationProjectRepairAction    `json:"project_repairs"`
+		DirectoryRepairs       []store.SyncMutationDirectoryRepairAction  `json:"directory_repairs"`
+		Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`
+		Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
+		SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
+		SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
+		SourceUnrepairable     []store.ObservationSourceUnrepairable      `json:"source_unrepairable"`
+	}{result.Quarantine, result.ProjectRepairs, result.DirectoryRepairs, result.Repairs, result.Superseded, result.SourceRepairs, result.SourceRepairBackupPath, result.SourceUnrepairable})
 }
