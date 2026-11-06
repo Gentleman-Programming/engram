@@ -121,6 +121,7 @@ engram_curl() {
 engram_register_claude_session() {
   local id="$1" project="$2" dir="$3"
   local mode="project_owned" encoded_id session="" persisted_project=""
+  local response code lookup_status attempt
   if [ -z "$id" ]; then
     printf '%s\n' "$project"
     return 0
@@ -132,7 +133,29 @@ engram_register_claude_session() {
   fi
   encoded_id=$(printf '%s' "$id" | jq -sRr @uri 2>/dev/null)
   if [ -n "$encoded_id" ]; then
-    session=$(engram_curl -sf "${ENGRAM_URL}/sessions/${encoded_id}" --max-time 1 2>/dev/null)
+    # Two read-only attempts share the previous one-second lookup allowance.
+    # Only a received 404 establishes absence; failures never authorize a POST.
+    for attempt in 1 2; do
+      response=$(engram_curl -s "${ENGRAM_URL}/sessions/${encoded_id}" --max-time 0.5 -w '\n%{http_code}' 2>/dev/null)
+      lookup_status=$?
+      code=${response##*$'\n'}
+      if [ "$lookup_status" -eq 0 ] && [ "$code" = 200 ]; then
+        session=${response%$'\n'*}
+        break
+      fi
+      if [ "$lookup_status" -eq 0 ] && [ "$code" = 404 ]; then
+        break
+      fi
+      if [ "$attempt" = 1 ]; then
+        case "$code" in
+          408|429|5??) continue ;;
+        esac
+        [ "$lookup_status" -eq 0 ] || continue
+      fi
+      printf '%s\n' "warning: Engram session registration failed: session lookup failed; no registration was attempted. Check the Engram server and retry SessionStart." >&2
+      printf '%s\n' "$project"
+      return 0
+    done
   fi
   # Project resolution may change while Claude keeps the same host ID. Use
   # only an exact root response; never move its owner to match today's cwd.

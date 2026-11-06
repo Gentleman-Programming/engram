@@ -700,9 +700,10 @@ exec `+quote(posix[binary[0]])+` "$@"`)
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -sf) shift ;;
+      -s) [ "${FIXTURE_LOCAL:-}" = 1 ] || return 1; shift ;;
       --max-time)
         [ "$#" -ge 2 ] || return 1
-        case "$2" in 0.2|1|2|3) ;; *) return 1 ;; esac
+        case "$2" in 0.2|1|2|3) ;; 0.5) [ "${FIXTURE_LOCAL:-}" = 1 ] || return 1 ;; *) return 1 ;; esac
         shift 2 ;;
       -d)
         [ "$#" -ge 2 ] || return 1
