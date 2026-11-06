@@ -33,7 +33,9 @@ type ProbeResult struct {
 	Status Status
 	Port   int
 	Token  string
-	Err    error
+	// Version is optional metadata from an Engram health response, not identity.
+	Version string
+	Err     error
 }
 
 // Probe issues a bounded GET to /health on the local engram daemon. A dial
@@ -57,14 +59,20 @@ func Probe(ctx context.Context, port int, timeout time.Duration) ProbeResult {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var health struct {
-		DaemonToken string `json:"daemon_token"`
+		DaemonToken string          `json:"daemon_token"`
+		Service     string          `json:"service"`
+		Version     json.RawMessage `json:"version"`
 	}
 	// A body that is not the expected JSON still classifies by status code:
 	// the token simply stays empty, which token-checking callers treat as
 	// "identity did not answer".
-	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health)
+	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return ProbeResult{Status: StatusRunning, Port: port, Token: health.DaemonToken}
+		var version string
+		if decodeErr == nil && health.Service == "engram" {
+			_ = json.Unmarshal(health.Version, &version)
+		}
+		return ProbeResult{Status: StatusRunning, Port: port, Token: health.DaemonToken, Version: version}
 	}
 	return ProbeResult{Status: StatusUnreachable, Port: port}
 }

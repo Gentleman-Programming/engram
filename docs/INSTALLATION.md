@@ -273,9 +273,15 @@ If it differs, check the launcher's executable path and restart the intended
 server through its owner. A missing version or `dev` does not confirm which
 release is running.
 
-`engram cloud status` reporting `Local daemon: running` proves liveness only;
-it does not compare versions. Successful local CLI, doctor, or direct-store MCP
-operations also do not confirm the version of a separate HTTP server.
+`engram cloud status` reporting `Local daemon: running` proves liveness only.
+Its `Versions:` line compares the server's reported semantic release version
+with the installed CLI and prints `Restart pending` when both are known and
+differ. `engram ps` shows the same comparison for its identity-confirmed daemon.
+Missing, malformed or development versions are `unknown`; build metadata is
+ignored. This comparison does not authenticate a listener or restart anything.
+Use the intended server's existing supervisor; `engram restart` manages only
+the pidfile-tracked daemon. Successful local CLI, doctor, or direct-store MCP
+operations do not confirm the version of a separate HTTP server.
 
 ---
 

@@ -116,8 +116,10 @@ func cmdPs(cfg store.Config, args []string) error {
 		_, _ = stdoutPrinter("unmanaged legacy record (pid %d) on port %d; daemon identity unavailable\n", record.Pid, record.Port)
 		return fmt.Errorf("legacy daemon record has no start token; verify the process manually: %w", errDaemonUnconfirmed)
 	}
-	if daemonIdentityConfirmed(record, daemonStatusProbe(record.Port)) {
+	probe := daemonStatusProbe(record.Port)
+	if daemonIdentityConfirmed(record, probe) {
 		_, _ = stdoutPrinter("running (pid %d) on port %d\n", record.Pid, record.Port)
+		_, _ = stdoutPrinter("%s", daemonVersionStatus(probe.Version, version))
 		return nil
 	}
 	_, _ = stdoutPrinter("unreachable (pid %d) on port %d\n", record.Pid, record.Port)

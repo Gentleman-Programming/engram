@@ -60,6 +60,7 @@ func printCloudStatusDaemonProbe() {
 	switch res.Status {
 	case daemonProbeRunning:
 		fmt.Printf("Local daemon: running on port %d\n", res.Port)
+		fmt.Print(daemonVersionStatus(res.Version, version))
 	case daemonProbeNotRunning:
 		fmt.Printf("Local daemon: not running on port %d\n", res.Port)
 		fmt.Println("Hint: run `engram run -d` to start the daemon (or `engram serve` in the foreground); on macOS see DOCS.md launchd template to keep it alive across upgrades")
