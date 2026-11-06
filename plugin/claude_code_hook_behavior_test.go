@@ -116,13 +116,16 @@ func newSessionID(t *testing.T) string {
 	bytes[8] = (bytes[8] & 0x3f) | 0x80
 	id := hex.EncodeToString(bytes[:])
 	id = id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:]
-	for _, path := range []string{stateFilePath(id), nudgeFilePath(id)} {
+	// Keep cleanup bound to the exact directory checked for this invocation.
+	dir := hookStateDir()
+	paths := []string{filepath.Join(dir, "engram-claude-"+id+"-tools-loaded"), filepath.Join(dir, "engram-claude-"+id+"-last-nudge")}
+	for _, path := range paths {
 		if _, err := os.Stat(path); err == nil || !os.IsNotExist(err) {
 			t.Fatalf("refuse to reuse existing session marker %q: %v", path, err)
 		}
 	}
 	t.Cleanup(func() {
-		for _, path := range []string{stateFilePath(id), nudgeFilePath(id)} {
+		for _, path := range paths {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				t.Errorf("remove session marker %q: %v", path, err)
 			}
