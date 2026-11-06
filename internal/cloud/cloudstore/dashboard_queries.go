@@ -106,10 +106,11 @@ type DashboardProjectDetail struct {
 }
 
 type dashboardReadModel struct {
-	projects       []DashboardProjectRow
-	contributors   []DashboardContributorRow
-	projectDetails map[string]DashboardProjectDetail
-	admin          DashboardAdminOverview
+	projectPartitionSafe bool
+	projects             []DashboardProjectRow
+	contributors         []DashboardContributorRow
+	projectDetails       map[string]DashboardProjectDetail
+	admin                DashboardAdminOverview
 }
 
 type dashboardEntityKey struct {
@@ -134,10 +135,11 @@ func newDashboardSessionKey(project, sessionID string) dashboardEntityKey {
 // all chunks in canonical chunk order, then all mutations in seq order, then
 // call finish exactly once.
 type dashboardReadModelFold struct {
-	projectChunkCounts  map[string]int
-	contributors        map[string]*DashboardContributorRow
-	contributorProjects map[string]map[string]struct{}
-	projectContributors map[string]map[string]*DashboardContributorRow
+	projectPartitionSafe bool
+	projectChunkCounts   map[string]int
+	contributors         map[string]*DashboardContributorRow
+	contributorProjects  map[string]map[string]struct{}
+	projectContributors  map[string]map[string]*DashboardContributorRow
 
 	sessions     map[dashboardEntityKey]DashboardSessionRow
 	observations map[dashboardEntityKey]DashboardObservationRow
@@ -150,18 +152,20 @@ type dashboardReadModelFold struct {
 
 func newDashboardReadModelFold() *dashboardReadModelFold {
 	return &dashboardReadModelFold{
-		projectChunkCounts:  make(map[string]int),
-		contributors:        make(map[string]*DashboardContributorRow),
-		contributorProjects: make(map[string]map[string]struct{}),
-		projectContributors: make(map[string]map[string]*DashboardContributorRow),
-		sessions:            make(map[dashboardEntityKey]DashboardSessionRow),
-		observations:        make(map[dashboardEntityKey]DashboardObservationRow),
-		prompts:             make(map[dashboardEntityKey]DashboardPromptRow),
-		mutationKeys:        make(map[string]map[string]map[string]struct{}),
+		projectPartitionSafe: true,
+		projectChunkCounts:   make(map[string]int),
+		contributors:         make(map[string]*DashboardContributorRow),
+		contributorProjects:  make(map[string]map[string]struct{}),
+		projectContributors:  make(map[string]map[string]*DashboardContributorRow),
+		sessions:             make(map[dashboardEntityKey]DashboardSessionRow),
+		observations:         make(map[dashboardEntityKey]DashboardObservationRow),
+		prompts:              make(map[dashboardEntityKey]DashboardPromptRow),
+		mutationKeys:         make(map[string]map[string]map[string]struct{}),
 	}
 }
 
 func (f *dashboardReadModelFold) applyChunk(chunk dashboardChunkRow) error {
+	f.projectPartitionSafe = f.projectPartitionSafe && dashboardChunkIsProjectLocal(chunk)
 	sessions, observations, prompts := f.sessions, f.observations, f.prompts
 	contributors, contributorProjects, projectContributors := f.contributors, f.contributorProjects, f.projectContributors
 
@@ -273,6 +277,7 @@ func (f *dashboardReadModelFold) applyMutation(mutationRow dashboardMutationRow)
 		Project:    mutationRow.project,
 		OccurredAt: mutationRow.occurredAt.UTC().Format(time.RFC3339),
 	}
+	f.projectPartitionSafe = f.projectPartitionSafe && !mutationRow.noncanonicalProject && dashboardMutationIsProjectLocal(mutationRow.project, mutation.Payload)
 	if err := applyDashboardMutation(mutationRow.project, mutation, f.sessions, f.observations, f.prompts); err != nil {
 		return fmt.Errorf("cloudstore: invalid dashboard mutation payload in cloud_mutations seq %d: %w", mutationRow.seq, err)
 	}
@@ -404,9 +409,10 @@ func (f *dashboardReadModelFold) finish() dashboardReadModel {
 	}
 
 	return dashboardReadModel{
-		projects:       projectRows,
-		contributors:   contributorRows,
-		projectDetails: projectDetails,
+		projectPartitionSafe: f.projectPartitionSafe,
+		projects:             projectRows,
+		contributors:         contributorRows,
+		projectDetails:       projectDetails,
 		admin: DashboardAdminOverview{
 			Projects:     len(projectRows),
 			Contributors: len(contributorRows),
@@ -937,6 +943,11 @@ func (cs *CloudStore) loadDashboardNeutralReadModel() (dashboardReadModel, error
 	}
 	build := &dashboardReadModelBuild{gen: cs.dashboardReadModelGen, done: make(chan struct{})}
 	cs.dashboardReadModelBuild = build
+	base := cs.dashboardReadModel
+	projects := make([]string, 0, len(cs.dashboardReadModelDirty))
+	for project := range cs.dashboardReadModelDirty {
+		projects = append(projects, project)
+	}
 	cs.dashboardReadModelMu.Unlock()
 
 	finished := false
@@ -950,7 +961,7 @@ func (cs *CloudStore) loadDashboardNeutralReadModel() (dashboardReadModel, error
 	if cs.dashboardReadModelLoad != nil {
 		build.model, build.err = cs.dashboardReadModelLoad()
 	} else {
-		build.model, build.err = cs.buildDashboardReadModel()
+		build.model, build.err = cs.refreshDashboardProjects(base, projects)
 	}
 	if build.err != nil {
 		build.model = dashboardReadModel{}
@@ -983,6 +994,7 @@ func (cs *CloudStore) finishDashboardReadModelBuild(build *dashboardReadModelBui
 	if build.err == nil && build.gen == cs.dashboardReadModelGen {
 		cs.dashboardReadModel = build.model
 		cs.dashboardReadModelOK = true
+		cs.dashboardReadModelDirty = nil
 	}
 	cs.dashboardReadModelMu.Unlock()
 	close(build.done)
@@ -1599,13 +1611,14 @@ type dashboardChunkRow struct {
 }
 
 type dashboardMutationRow struct {
-	seq        int64
-	project    string
-	entity     string
-	entityKey  string
-	op         string
-	payload    []byte
-	occurredAt time.Time
+	noncanonicalProject bool
+	seq                 int64
+	project             string
+	entity              string
+	entityKey           string
+	op                  string
+	payload             []byte
+	occurredAt          time.Time
 }
 
 // dashboardChunkStreamQuery reproduces the buildDashboardReadModelFromRows chunk
@@ -1622,11 +1635,21 @@ const dashboardMutationStreamQuery = `SELECT seq, project, entity, entity_key, o
 // streamDashboardChunkRows decodes cloud_chunks one row at a time in canonical
 // fold order. The decoded payload is only valid for the duration of apply.
 func (cs *CloudStore) streamDashboardChunkRows(apply func(dashboardChunkRow) error) error {
+	return cs.streamDashboardChunkRowsForProject("", apply)
+}
+
+func (cs *CloudStore) streamDashboardChunkRowsForProject(project string, apply func(dashboardChunkRow) error) error {
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
 	}
 	// Cache inputs are permission-neutral; public readers apply credential scope.
-	rows, err := cs.db.QueryContext(context.Background(), dashboardChunkStreamQuery)
+	query := dashboardChunkStreamQuery
+	var args []any
+	if project != "" {
+		query = strings.Replace(query, "\n\tORDER BY", "\n\tWHERE project_name = $1\n\tORDER BY", 1)
+		args = append(args, project)
+	}
+	rows, err := cs.db.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return fmt.Errorf("cloudstore: dashboard query chunks: %w", err)
 	}
@@ -1661,11 +1684,21 @@ func (cs *CloudStore) streamDashboardChunkRows(apply func(dashboardChunkRow) err
 // streamDashboardMutationRows reads cloud_mutations one row at a time in seq
 // order. row.payload aliases driver memory and is only valid during apply.
 func (cs *CloudStore) streamDashboardMutationRows(apply func(dashboardMutationRow) error) error {
+	return cs.streamDashboardMutationRowsForProject("", apply)
+}
+
+func (cs *CloudStore) streamDashboardMutationRowsForProject(project string, apply func(dashboardMutationRow) error) error {
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
 	}
 	// Cache inputs are permission-neutral; public readers apply credential scope.
-	rows, err := cs.db.QueryContext(context.Background(), dashboardMutationStreamQuery)
+	query := dashboardMutationStreamQuery
+	var args []any
+	if project != "" {
+		query = strings.Replace(query, "\n\tORDER BY", "\n\tWHERE project = $1\n\tORDER BY", 1)
+		args = append(args, project)
+	}
+	rows, err := cs.db.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return fmt.Errorf("cloudstore: dashboard query mutations: %w", err)
 	}
@@ -1677,6 +1710,7 @@ func (cs *CloudStore) streamDashboardMutationRows(apply func(dashboardMutationRo
 		if err := rows.Scan(&row.seq, &row.project, &row.entity, &row.entityKey, &row.op, &payload, &row.occurredAt); err != nil {
 			return fmt.Errorf("cloudstore: dashboard scan mutation row: %w", err)
 		}
+		row.noncanonicalProject = row.project != strings.TrimSpace(row.project)
 		row.project = strings.TrimSpace(row.project)
 		row.entity = strings.TrimSpace(row.entity)
 		row.entityKey = mutationEntityKey(row.entity, row.entityKey)

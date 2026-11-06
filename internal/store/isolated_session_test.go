@@ -266,3 +266,75 @@ func TestRegisterIsolatedSessionRefusesRuntimeBoundLegacyIdentity(t *testing.T) 
 		})
 	}
 }
+
+func TestRegisterIsolatedSessionSyncMutationLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("target"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	// 1. When project is enrolled, RegisterIsolatedSession enqueues a session upsert
+	// sync mutation with blank directory and ownership_mode: "project_owned".
+	id, err := s.RegisterIsolatedSession("satellite-sync", "target", true)
+	if err != nil {
+		t.Fatalf("RegisterIsolatedSession: %v", err)
+	}
+
+	var count int
+	var payloadStr string
+	if err := s.db.QueryRow(`SELECT COUNT(*), ifnull(max(payload), '') FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`,
+		SyncEntitySession, id, SyncOpUpsert,
+	).Scan(&count, &payloadStr); err != nil {
+		t.Fatalf("query sync_mutations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 session upsert mutation, got %d", count)
+	}
+
+	var payload syncSessionPayload
+	if err := decodeSyncPayload([]byte(payloadStr), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.Directory != "" {
+		t.Fatalf("payload directory = %q, want blank", payload.Directory)
+	}
+	if payload.OwnershipMode != SessionOwnershipProjectOwned {
+		t.Fatalf("payload ownership_mode = %q, want %q", payload.OwnershipMode, SessionOwnershipProjectOwned)
+	}
+
+	// 2. Renewing the lease does not enqueue duplicate mutations.
+	beforeRenew, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil || len(beforeRenew) != 1 {
+		t.Fatalf("before renewal = %+v, %v", beforeRenew, err)
+	}
+	if _, err := s.RegisterIsolatedSession(id, "target", true); err != nil {
+		t.Fatalf("renew lease: %v", err)
+	}
+	var countAfterRenew int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`,
+		SyncEntitySession, id, SyncOpUpsert,
+	).Scan(&countAfterRenew); err != nil {
+		t.Fatalf("query sync_mutations after renew: %v", err)
+	}
+	if countAfterRenew != 1 {
+		t.Fatalf("expected still 1 session upsert mutation after lease renewal, got %d", countAfterRenew)
+	}
+	afterRenew, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil || len(afterRenew) != 1 || afterRenew[0].Seq != beforeRenew[0].Seq {
+		t.Fatalf("renewal replaced the pending generation: %+v -> %+v, %v", beforeRenew, afterRenew, err)
+	}
+
+	// 3. Ordinary local sessions with blank directory and shared mode still do NOT enqueue.
+	if err := s.StartSessionWithOwnershipMode("shared-blank", "target", "", SessionOwnershipShared); err != nil {
+		t.Fatalf("StartSessionWithOwnershipMode shared: %v", err)
+	}
+	var countShared int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`,
+		SyncEntitySession, "shared-blank", SyncOpUpsert,
+	).Scan(&countShared); err != nil {
+		t.Fatalf("query sync_mutations shared: %v", err)
+	}
+	if countShared != 0 {
+		t.Fatalf("expected 0 session upsert mutations for shared blank-directory session, got %d", countShared)
+	}
+}

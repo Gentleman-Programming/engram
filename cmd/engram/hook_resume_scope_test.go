@@ -112,7 +112,7 @@ func TestRootScopedResumeLifecycle(t *testing.T) {
 				t.Helper()
 				raw, _ := json.Marshal(payload)
 				command := exec.Command(os.Args[0], "-test.run=^TestRootScopedResumeHookProcess$")
-				command.Env = append(os.Environ(), "ENGRAM_RESUME_TEST_ACTION="+action, "ENGRAM_PROJECT=", "HOME="+root, "ENGRAM_DATA_DIR="+filepath.Join(root, "child-data"), "ENGRAM_HOOK_OUTPUT=json")
+				command.Env = append(os.Environ(), "ENGRAM_RESUME_TEST_ACTION="+action, "ENGRAM_PROJECT=", "HOME="+root, "ENGRAM_DATA_DIR="+filepath.Join(root, "data"), "ENGRAM_HOOK_OUTPUT=json")
 				command.Stdin = bytes.NewReader(raw)
 				var stdout, stderr bytes.Buffer
 				command.Stdout = &stdout

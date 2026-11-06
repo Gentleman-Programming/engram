@@ -14,6 +14,7 @@ import (
 )
 
 func TestNativeHooksSocket(t *testing.T) {
+	t.Setenv("ENGRAM_DATA_DIR", t.TempDir())
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "hook.sock"))
 	if err != nil {
 		t.Skipf("Unix socket unavailable: %v", err)
@@ -24,7 +25,7 @@ func TestNativeHooksSocket(t *testing.T) {
 		case "/sessions/host":
 			w.WriteHeader(http.StatusNotFound)
 		case "/health":
-			codexMockHealth(w)
+			hookLocalMockHealth(t, w)
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"socket-project","project_source":"config"}`)
 		case "/sessions":

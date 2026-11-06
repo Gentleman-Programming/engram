@@ -2273,7 +2273,7 @@ func TestHandleContextPropagatesStatsError(t *testing.T) {
 	}
 	original := loadContextStats
 	t.Cleanup(func() { loadContextStats = original })
-	loadContextStats = func(*store.Store) (*store.Stats, error) {
+	loadContextStats = func(*store.Store, string) (*store.Stats, error) {
 		return nil, store.ErrDatabaseGenerationChanged
 	}
 

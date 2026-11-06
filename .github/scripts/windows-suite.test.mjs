@@ -135,3 +135,12 @@ for (const [before, after] of mutations) {
     assert.throws(() => contract(target === source ? changed : source.replace(body, changed)));
   });
 }
+
+test('public Windows recovery builds a fresh binary and requires an executed pass', () => {
+  const body = job(source);
+  assert.ok(body.includes('& go build -o $binary ./cmd/engram'), 'fresh native binary');
+  assert.ok(body.includes('ENGRAM_RECOVERY_PUBLIC_BINARY=$binary'), 'test receives the owned binary');
+  assert.ok(body.indexOf('& go build') < body.indexOf('& go test'), 'build precedes full suite');
+  assert.ok(body.includes('prerequisite-coverage.mjs windows-recovery'), 'named recovery pass required');
+  assert.ok(body.includes('if ($suiteExit -eq 0)'), 'original Go failure is not replaced by evidence success');
+});

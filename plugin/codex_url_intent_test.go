@@ -65,6 +65,18 @@ func TestCodexShellNativeURLIntent(t *testing.T) {
 
 type codexIntentFixture struct{ root, bash, cygpath, tools, alias string }
 
+// MSYS can retain its initial /tmp mapping across overlapping Bash processes.
+// Capture the effective native temp before tests can change TMP/TEMP or profile
+// fallbacks; its owner must outlive individual fixture cleanup.
+var codexBashProcessTemp = os.TempDir()
+
+func codexBashStartupTemp(private string) string {
+	if runtime.GOOS == "windows" {
+		return codexBashProcessTemp
+	}
+	return private
+}
+
 // Resolve selectors without executing tools or searching an ambient PATH.
 func codexIntentExecutable(t *testing.T, path string) string {
 	t.Helper()
@@ -185,7 +197,11 @@ func (f codexIntentFixture) run(t *testing.T, mode, script, intent string) strin
 		cmd.Env = append(cmd.Env, "SystemRoot="+os.Getenv("SystemRoot"), "WINDIR="+os.Getenv("SystemRoot"), "OS=Windows_NT")
 	}
 	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "CODEX_HOME", "CURL_HOME", "ENGRAM_DATA_DIR", "ENGRAM_CONFIG_DIR", "TMPDIR", "TMP", "TEMP"} {
-		cmd.Env = append(cmd.Env, key+"="+f.root)
+		value := f.root
+		if key == "TMP" || key == "TEMP" {
+			value = codexBashStartupTemp(value)
+		}
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	if intent != "unset" {
 		cmd.Env = append(cmd.Env, "ENGRAM_URL="+intent)
