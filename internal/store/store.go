@@ -1400,8 +1400,53 @@ func (s *Store) backfillLegacySessionOwnershipModes() error {
 	return nil
 }
 
+// backfillLegacySyncMutationProjects preserves payload-first recovery followed
+// by session fallback, without updating rows whose project would remain blank.
+// CASE keeps added JSON evaluation inside the original eligibility conditions.
+func (s *Store) backfillLegacySyncMutationProjects() error {
+	// Backfill: extract project from JSON payload for existing rows with empty project.
+	if _, err := s.execHook(s.db, `
+		UPDATE sync_mutations
+		SET project = COALESCE(json_extract(payload, '$.project'), '')
+		WHERE project = '' AND payload != ''
+		  AND CASE WHEN project = '' AND payload != ''
+		      THEN COALESCE(json_extract(payload, '$.project'), '') != ''
+		      ELSE 0 END
+	`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `
+		UPDATE sync_mutations
+		SET project = COALESCE((
+			SELECT sessions.project
+			FROM sessions
+			WHERE sessions.id = json_extract(sync_mutations.payload, '$.session_id')
+		), '')
+		WHERE project = ''
+		  AND payload != ''
+		  AND ifnull(json_extract(payload, '$.session_id'), '') != ''
+		  AND CASE WHEN project = '' AND payload != ''
+		      THEN COALESCE((
+		          SELECT sessions.project FROM sessions
+		          WHERE sessions.id = json_extract(sync_mutations.payload, '$.session_id')
+		      ), '') != ''
+		      ELSE 0 END
+	`); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (s *Store) migrate() error {
-	schema := `
+	// Existing and partially migrated schemas can have triggers that need FTS
+	// before the legacy data migrations run. Only an empty schema can defer
+	// creation to migrateFTS, which installs tables and triggers together.
+	var existingSchema bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master)`).Scan(&existingSchema); err != nil {
+		return fmt.Errorf("inspect initial schema: %w", err)
+	}
+	const baseSchema = `
 		CREATE TABLE IF NOT EXISTS project_aliases (
 			kind TEXT NOT NULL CHECK (kind IN ('key', 'cwd')),
 			alias_key TEXT NOT NULL,
@@ -1462,18 +1507,6 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_obs_type     ON observations(type);
 		CREATE INDEX IF NOT EXISTS idx_obs_project  ON observations(project);
 		CREATE INDEX IF NOT EXISTS idx_obs_created  ON observations(created_at DESC);
-
-		CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
-			title,
-			content,
-			tool_name,
-			type,
-			project,
-			topic_key,
-			tokenize='trigram remove_diacritics 1',
-			content='observations',
-			content_rowid='id'
-		);
 
 		CREATE TABLE IF NOT EXISTS observation_versions (
 			id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1549,14 +1582,6 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_prompts_project ON user_prompts(project);
 		CREATE INDEX IF NOT EXISTS idx_prompts_created ON user_prompts(created_at DESC);
 
-		CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
-			content,
-			project,
-			tokenize='trigram remove_diacritics 1',
-			content='user_prompts',
-			content_rowid='id'
-		);
-
 			-- Local Git clear intent is independent of enrollment and cloud acks.
 			-- Retain events; manifest history owns export deduplication.
 			CREATE TABLE IF NOT EXISTS review_clear_events (
@@ -1570,6 +1595,17 @@ func (s *Store) migrate() error {
 				chunk_id    TEXT NOT NULL,
 				imported_at TEXT NOT NULL DEFAULT (datetime('now')),
 				PRIMARY KEY (target_key, chunk_id)
+			);
+
+			-- Local derived evidence, never exported as memory or sync data.
+			CREATE TABLE IF NOT EXISTS sync_chunk_delete_evidence (
+				target_key TEXT NOT NULL,
+				scope TEXT NOT NULL,
+				manifest_version INTEGER NOT NULL,
+				chunk_id TEXT NOT NULL,
+				deleted_ids TEXT NOT NULL,
+				PRIMARY KEY (target_key, scope, manifest_version, chunk_id),
+				FOREIGN KEY (target_key, chunk_id) REFERENCES sync_chunks(target_key, chunk_id) ON DELETE CASCADE
 			);
 
 			CREATE TABLE IF NOT EXISTS sync_state (
@@ -1616,6 +1652,31 @@ func (s *Store) migrate() error {
 				updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 			);
 		`
+	schema := baseSchema
+	if existingSchema {
+		schema = baseSchema + `
+		CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
+			title,
+			content,
+			tool_name,
+			type,
+			project,
+			topic_key,
+			tokenize='trigram remove_diacritics 1',
+			content='observations',
+			content_rowid='id'
+		);
+
+		CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
+			content,
+			project,
+			tokenize='trigram remove_diacritics 1',
+			content='user_prompts',
+			content_rowid='id'
+		);
+		`
+	}
+
 	if _, err := s.execHook(s.db, schema); err != nil {
 		return err
 	}
@@ -1623,10 +1684,7 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	observationColumns := []struct {
-		name       string
-		definition string
-	}{
+	observationColumns := []migrationColumn{
 		{name: "sync_id", definition: "TEXT"},
 		{name: "scope", definition: "TEXT NOT NULL DEFAULT 'project'"},
 		{name: "topic_key", definition: "TEXT"},
@@ -1638,22 +1696,18 @@ func (s *Store) migrate() error {
 		{name: "updated_at", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "deleted_at", definition: "TEXT"},
 	}
-	for _, c := range observationColumns {
-		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
-			return err
-		}
+	if err := s.addColumnsIfNotExists("observations", observationColumns...); err != nil {
+		return err
 	}
 
 	if err := s.migrateLegacyObservationsTable(); err != nil {
 		return err
 	}
-	if err := s.addColumnIfNotExists("sessions", "ownership_mode", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sessions", "runtime_lease_expires_at", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sessions", "local_creation_project", "TEXT"); err != nil {
+	if err := s.addColumnsIfNotExists("sessions",
+		migrationColumn{"ownership_mode", "TEXT"},
+		migrationColumn{"runtime_lease_expires_at", "TEXT"},
+		migrationColumn{"local_creation_project", "TEXT"},
+	); err != nil {
 		return err
 	}
 	// Legacy rows remain unclassified unless their persisted identity proves a
@@ -1662,29 +1716,27 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	if err := s.addColumnIfNotExists("user_prompts", "sync_id", "TEXT"); err != nil {
+	if err := s.addColumnsIfNotExists("user_prompts",
+		migrationColumn{"sync_id", "TEXT"},
+		migrationColumn{"source_inbox_id", "TEXT"},
+		migrationColumn{"local_creation_session_id", "TEXT"},
+		migrationColumn{"local_creation_inbox_id", "TEXT"},
+		migrationColumn{"local_creation_project", "TEXT"},
+	); err != nil {
 		return err
 	}
-	if err := s.addColumnIfNotExists("user_prompts", "source_inbox_id", "TEXT"); err != nil {
+	if err := s.addColumnsIfNotExists("prompt_tombstones",
+		migrationColumn{"source_inbox_id", "TEXT"},
+		migrationColumn{"local_creation_session_id", "TEXT"},
+		migrationColumn{"local_creation_inbox_id", "TEXT"},
+		migrationColumn{"local_creation_project", "TEXT"},
+	); err != nil {
 		return err
 	}
-	for _, column := range []string{"local_creation_session_id", "local_creation_inbox_id", "local_creation_project"} {
-		if err := s.addColumnIfNotExists("user_prompts", column, "TEXT"); err != nil {
-			return err
-		}
-	}
-	if err := s.addColumnIfNotExists("prompt_tombstones", "source_inbox_id", "TEXT"); err != nil {
-		return err
-	}
-	for _, column := range []string{"local_creation_session_id", "local_creation_inbox_id", "local_creation_project"} {
-		if err := s.addColumnIfNotExists("prompt_tombstones", column, "TEXT"); err != nil {
-			return err
-		}
-	}
-	if err := s.addColumnIfNotExists("sync_delete_tombstones", "superseded_by_sync_id", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sync_delete_tombstones", "last_remote_mutation_seq", "INTEGER"); err != nil {
+	if err := s.addColumnsIfNotExists("sync_delete_tombstones",
+		migrationColumn{"superseded_by_sync_id", "TEXT"},
+		migrationColumn{"last_remote_mutation_seq", "INTEGER"},
+	); err != nil {
 		return err
 	}
 	if err := s.migrateFTS(); err != nil {
@@ -1712,29 +1764,23 @@ func (s *Store) migrate() error {
 	}
 
 	// Project-scoped sync: add project column to sync_mutations and enrollment table.
-	if err := s.addColumnIfNotExists("sync_mutations", "project", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	for _, c := range []struct{ name, definition string }{
+	if err := s.addColumnsIfNotExists("sync_mutations", []migrationColumn{
+		{"project", "TEXT NOT NULL DEFAULT ''"},
 		{"disposition", "TEXT NOT NULL DEFAULT 'pending'"},
 		{"disposition_reason", "TEXT"},
 		{"disposition_evidence", "TEXT"},
 		{"disposition_at", "TEXT"},
-	} {
-		if err := s.addColumnIfNotExists("sync_mutations", c.name, c.definition); err != nil {
-			return err
-		}
+	}...); err != nil {
+		return err
 	}
 	if _, err := s.execHook(s.db, `UPDATE sync_mutations SET disposition = 'pending' WHERE disposition IS NULL OR disposition = ''`); err != nil {
 		return err
 	}
-	if err := s.addColumnIfNotExists("sync_state", "reason_code", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sync_state", "reason_message", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sync_state", "last_success_at", "TEXT"); err != nil {
+	if err := s.addColumnsIfNotExists("sync_state",
+		migrationColumn{"reason_code", "TEXT"},
+		migrationColumn{"reason_message", "TEXT"},
+		migrationColumn{"last_success_at", "TEXT"},
+	); err != nil {
 		return err
 	}
 	if err := s.migrateSyncChunksTable(); err != nil {
@@ -1743,13 +1789,10 @@ func (s *Store) migrate() error {
 
 	// ── Phase: memory-conflict-surfacing — B.1 ──────────────────────────────
 	// Additive nullable columns on observations for conflict surfacing, decay,
-	// and embedding reservation.  All applied via addColumnIfNotExists so that
+	// and embedding reservation. Applied as a fresh schema batch so that
 	// running migrate() on a fresh DB (where CREATE TABLE already added these
 	// columns) is a no-op.
-	memConflictObsCols := []struct {
-		name       string
-		definition string
-	}{
+	memConflictObsCols := []migrationColumn{
 		{name: "review_after", definition: "TEXT"},
 		{name: "superseded_by_sync_id", definition: "TEXT"},
 		{name: "expires_at", definition: "TEXT"},
@@ -1757,10 +1800,8 @@ func (s *Store) migrate() error {
 		{name: "embedding_model", definition: "TEXT"},
 		{name: "embedding_created_at", definition: "TEXT"},
 	}
-	for _, c := range memConflictObsCols {
-		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
-			return err
-		}
+	if err := s.addColumnsIfNotExists("observations", memConflictObsCols...); err != nil {
+		return err
 	}
 
 	// ── Phase: memory-conflict-surfacing — B.2 ──────────────────────────────
@@ -1810,44 +1851,11 @@ func (s *Store) migrate() error {
 	`); err != nil {
 		return err
 	}
-	// Backfill: extract project from JSON payload for existing rows with empty project.
-	if _, err := s.execHook(s.db, `
-		UPDATE sync_mutations
-		SET project = COALESCE(json_extract(payload, '$.project'), '')
-		WHERE project = '' AND payload != ''
-	`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `
-		UPDATE sync_mutations
-		SET project = COALESCE((
-			SELECT sessions.project
-			FROM sessions
-			WHERE sessions.id = json_extract(sync_mutations.payload, '$.session_id')
-		), '')
-		WHERE project = ''
-		  AND payload != ''
-		  AND ifnull(json_extract(payload, '$.session_id'), '') != ''
-	`); err != nil {
+	if err := s.backfillLegacySyncMutationProjects(); err != nil {
 		return err
 	}
 
-	if _, err := s.execHook(s.db, `UPDATE observations SET scope = 'project' WHERE scope IS NULL OR scope = ''`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET topic_key = NULL WHERE topic_key = ''`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET revision_count = 1 WHERE revision_count IS NULL OR revision_count < 1`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET duplicate_count = 1 WHERE duplicate_count IS NULL OR duplicate_count < 1`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET sync_id = 'obs-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
+	if err := s.normalizeLegacyObservations(); err != nil {
 		return err
 	}
 
@@ -1920,10 +1928,7 @@ func (s *Store) migrate() error {
 	`); err != nil {
 		return err
 	}
-	deferredColumns := []struct {
-		name       string
-		definition string
-	}{
+	deferredColumns := []migrationColumn{
 		{name: "target_key", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "remote_seq", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{name: "entity_key", definition: "TEXT NOT NULL DEFAULT ''"},
@@ -1940,10 +1945,8 @@ func (s *Store) migrate() error {
 		// at all, which is itself one of the reasons its row is dead.
 		{name: "payload_sync_id", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
-	for _, c := range deferredColumns {
-		if err := s.addColumnIfNotExists("sync_apply_deferred", c.name, c.definition); err != nil {
-			return err
-		}
+	if err := s.addColumnsIfNotExists("sync_apply_deferred", deferredColumns...); err != nil {
+		return err
 	}
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_sad_scope_status_seen
@@ -2019,6 +2022,47 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_obs_save_op_created
 			ON observation_save_operations(created_at);
 	`); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// normalizeLegacyObservations preserves the ordered repair statements, while
+// healthy databases need only one check. Keep the guard predicates equivalent
+// to the repairs below; do not cache the result between migration runs.
+func (s *Store) normalizeLegacyObservations() error {
+	var needsNormalization bool
+	if err := s.db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM observations
+		WHERE scope IS NULL OR scope = ''
+			OR topic_key = ''
+			OR revision_count IS NULL OR revision_count < 1
+			OR duplicate_count IS NULL OR duplicate_count < 1
+			OR updated_at IS NULL OR updated_at = ''
+			OR sync_id IS NULL OR sync_id = ''
+	)`).Scan(&needsNormalization); err != nil {
+		return fmt.Errorf("inspect legacy observations: %w", err)
+	}
+	if !needsNormalization {
+		return nil
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET scope = 'project' WHERE scope IS NULL OR scope = ''`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET topic_key = NULL WHERE topic_key = ''`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET revision_count = 1 WHERE revision_count IS NULL OR revision_count < 1`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET duplicate_count = 1 WHERE duplicate_count IS NULL OR duplicate_count < 1`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET sync_id = 'obs-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
 		return err
 	}
 
@@ -3235,13 +3279,14 @@ func (s *Store) migrateFTS() error {
 			return fmt.Errorf("inspect prompts fts: %w", err)
 		}
 
-		observationsRebuild := !observationsOK || !ftsTriggersMatch(tx, map[string][]string{
+		triggerDefinitions := s.readFTSTriggerDefinitions(tx)
+		observationsRebuild := !observationsOK || !ftsTriggersMatch(triggerDefinitions, map[string][]string{
 			"obs_fts_insert":        {"afterinsertonobservations", "whennew.deleted_atisnull"},
 			"obs_fts_delete":        {"beforedeleteonobservations", "whenold.deleted_atisnull", "deletefromobservations_ftswhererowid=old.id"},
 			"obs_fts_update":        {"beforeupdateonobservations", "whenold.deleted_atisnull", "deletefromobservations_ftswhererowid=old.id"},
 			"obs_fts_update_insert": {"afterupdateonobservations", "whennew.deleted_atisnull"},
 		})
-		promptsRebuild := !promptsOK || !ftsTriggersMatch(tx, map[string][]string{
+		promptsRebuild := !promptsOK || !ftsTriggersMatch(triggerDefinitions, map[string][]string{
 			"prompt_fts_insert":        {"afterinsertonuser_prompts"},
 			"prompt_fts_delete":        {"beforedeleteonuser_prompts", "deletefromprompts_ftswhererowid=old.id"},
 			"prompt_fts_update":        {"beforeupdateonuser_prompts", "deletefromprompts_ftswhererowid=old.id"},
@@ -3320,10 +3365,34 @@ func ftsTableMatches(tx *sql.Tx, table string, expectedColumns []string, content
 		strings.Contains(normalized, "content_rowid='id'"), nil
 }
 
-func ftsTriggersMatch(tx *sql.Tx, expected map[string][]string) bool {
+// readFTSTriggerDefinitions snapshots both trigger groups in the migration
+// transaction. An unreadable or partial snapshot is invalid, retaining the
+// existing mismatch-and-repair behavior for trigger inspection failures.
+func (s *Store) readFTSTriggerDefinitions(tx *sql.Tx) map[string]string {
+	rows, err := s.queryItHook(tx, `SELECT name, sql FROM sqlite_master
+		WHERE type = 'trigger' AND (name GLOB 'obs_fts_*' OR name GLOB 'prompt_fts_*')`)
+	if err != nil {
+		return nil
+	}
+	definitions := make(map[string]string, 8)
+	for rows.Next() {
+		var name, ddl string
+		if err := rows.Scan(&name, &ddl); err != nil {
+			_ = rows.Close()
+			return nil
+		}
+		definitions[name] = ddl
+	}
+	if err := closeRowsWithError(rows, rows.Err()); err != nil {
+		return nil
+	}
+	return definitions
+}
+
+func ftsTriggersMatch(definitions map[string]string, expected map[string][]string) bool {
 	for name, fragments := range expected {
-		var ddl string
-		if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&ddl); err != nil {
+		ddl, ok := definitions[name]
+		if !ok {
 			return false
 		}
 		normalized := normalizeFTSSQL(ddl)
@@ -4498,18 +4567,18 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 // ContextOptions.Pinned) use the unexported pinnedObservationsLimit helper,
 // which this delegates to with limit=0 ("no LIMIT clause", i.e. unbounded).
 func (s *Store) PinnedObservations(project, scope string) ([]Observation, error) {
-	return s.pinnedObservationsLimit(project, scope, 0)
+	return s.pinnedObservationsLimit(project, scope, 0, false)
 }
 
 // pinnedObservationsLimit is the shared query behind PinnedObservations. A
 // limit <= 0 means "no LIMIT clause" (every pinned row, matching
 // PinnedObservations' historical unbounded behavior); a positive limit caps
 // the result via SQL LIMIT.
-func (s *Store) pinnedObservationsLimit(project, scope string, limit int) ([]Observation, error) {
+func (s *Store) pinnedObservationsLimit(project, scope string, limit int, compact bool) ([]Observation, error) {
 	project, _ = NormalizeProject(project)
 
 	query := `
-		SELECT ` + observationSelectColumns + `
+		SELECT ` + contextObservationColumns(compact) + `
 		FROM observations o
 		WHERE o.deleted_at IS NULL AND o.pinned = 1
 	`
@@ -4529,7 +4598,7 @@ func (s *Store) pinnedObservationsLimit(project, scope string, limit int) ([]Obs
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	return s.queryObservations(query, args...)
+	return s.queryContextObservations(s.db, query, args, compact)
 }
 
 func (s *Store) PinObservation(id int64) error {
@@ -4559,14 +4628,14 @@ func (s *Store) setObservationPinned(id int64, pinned bool) error {
 	return nil
 }
 
-func (s *Store) recentUnpinnedObservations(project, scope string, limit int) ([]Observation, error) {
+func (s *Store) recentUnpinnedObservations(project, scope string, limit int, compact bool) ([]Observation, error) {
 	project, _ = NormalizeProject(project)
 	if limit <= 0 {
 		limit = s.cfg.MaxContextResults
 	}
 
 	query := `
-		SELECT ` + observationSelectColumns + `
+		SELECT ` + contextObservationColumns(compact) + `
 		FROM observations o
 		WHERE o.deleted_at IS NULL AND o.pinned = 0
 	`
@@ -4581,7 +4650,7 @@ func (s *Store) recentUnpinnedObservations(project, scope string, limit int) ([]
 	}
 	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC LIMIT ?"
 	args = append(args, limit)
-	return s.queryObservations(query, args...)
+	return s.queryContextObservations(s.db, query, args, compact)
 }
 
 func (s *Store) compactionObservations(sessionID, project string, pinned bool, limit int) ([]Observation, error) {
@@ -6218,6 +6287,26 @@ func (s *Store) StatsProject(project string) (*Stats, error) {
 }
 
 func (s *Store) statsForProject(project string) (*Stats, error) {
+	stats, _, err := s.statsForProjectLimit(project, 0)
+	return stats, err
+}
+
+// ContextStats returns aggregate counts, at most maxProjects project names, and
+// the exact project total. Public Stats and StatsProject retain complete lists.
+func (s *Store) ContextStats(project string, maxProjects int) (*Stats, int, error) {
+	if maxProjects <= 0 {
+		return nil, 0, fmt.Errorf("max projects must be positive")
+	}
+	if project != "" {
+		project, _ = NormalizeProject(project)
+		if strings.TrimSpace(project) == "" {
+			return nil, 0, fmt.Errorf("project is required")
+		}
+	}
+	return s.statsForProjectLimit(project, maxProjects)
+}
+
+func (s *Store) statsForProjectLimit(project string, maxProjects int) (*Stats, int, error) {
 	stats := &Stats{}
 	args := []any{}
 	where := ""
@@ -6226,47 +6315,66 @@ func (s *Store) statsForProject(project string) (*Stats, error) {
 		args = append(args, project)
 	}
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+func() string {
-		if project == "" {
-			return ""
-		}
-		return " AND LOWER(project) = ?"
-	}(), args...).Scan(&stats.TotalObservations); err != nil {
-		return nil, err
+	observationsFilter := ""
+	if project != "" {
+		observationsFilter = " AND LOWER(project) = ?"
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+observationsFilter, args...).Scan(&stats.TotalObservations); err != nil {
+		return nil, 0, err
 	}
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	projectsQuery := "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
+	projectColumns := "project"
+	if maxProjects > 0 {
+		projectColumns += ", MAX(created_at) AS latest_created_at"
+	}
+	projectsQuery := "SELECT " + projectColumns + " FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
 	if project != "" {
 		projectsQuery += " AND LOWER(project) = ?"
 	}
 	projectsQuery += " GROUP BY project ORDER BY MAX(created_at) DESC"
+	if maxProjects > 0 {
+		// Retain the grouped recency order and explicitly order the outer
+		// result before LIMIT, without adding a tie-breaker.
+		// The window counts all groups before LIMIT, in the same snapshot as
+		// the returned names, without hydrating every group through the driver.
+		projectsQuery = "SELECT project, COUNT(*) OVER () FROM (" + projectsQuery + ") ORDER BY latest_created_at DESC LIMIT ?"
+		args = append(args, maxProjects)
+	}
 	rows, err := s.queryItHook(s.db, projectsQuery, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
+	totalProjects := 0
 	for rows.Next() {
 		var projectName string
-		if err := rows.Scan(&projectName); err != nil {
+		var scanErr error
+		if maxProjects > 0 {
+			scanErr = rows.Scan(&projectName, &totalProjects)
+		} else {
+			scanErr = rows.Scan(&projectName)
+			totalProjects++
+		}
+		if scanErr != nil {
 			_ = rows.Close()
-			return nil, err
+			return nil, 0, scanErr
 		}
 		stats.Projects = append(stats.Projects, projectName)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return nil, err
+		return nil, 0, err
 	}
 	if err := rows.Close(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	return stats, nil
+	return stats, totalProjects, nil
 }
 
 // ─── Project Existence ───────────────────────────────────────────────────────
@@ -6373,12 +6481,18 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		}
 	}
 
-	if opts.Pinned == 0 {
-		if pinned, err = s.PinnedObservations(project, scope); err != nil {
-			return "", err
+	if opts.Pinned >= 0 {
+		limit := opts.Pinned
+		if opts.MaxBytes > 0 {
+			// Even an empty compact bullet ("- [] ****\n") costs 10 bytes.
+			// One extra row guarantees the rendered prefix exceeds the budget
+			// when more rows exist, preserving the final truncation marker.
+			byteLimit := opts.MaxBytes/len("- [] ****\n") + 1
+			if limit == 0 || limit > byteLimit {
+				limit = byteLimit
+			}
 		}
-	} else if opts.Pinned > 0 {
-		if pinned, err = s.pinnedObservationsLimit(project, scope, opts.Pinned); err != nil {
+		if pinned, err = s.pinnedObservationsLimit(project, scope, limit, opts.Compact); err != nil {
 			return "", err
 		}
 	}
@@ -6389,7 +6503,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		if s.contextHistoryNow != nil {
 			now = s.contextHistoryNow().UTC()
 		}
-		observations, olderGroups, err = s.contextHistory(project, scope, opts.Observations, now)
+		observations, olderGroups, err = s.contextHistory(project, scope, opts.Observations, now, opts.Compact)
 		if err != nil {
 			return "", err
 		}
@@ -6401,7 +6515,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		if limit == 0 {
 			limit = s.cfg.MaxContextResults
 		}
-		if observations, err = s.recentUnpinnedObservations(project, scope, limit); err != nil {
+		if observations, err = s.recentUnpinnedObservations(project, scope, limit, opts.Compact); err != nil {
 			return "", err
 		}
 	}
@@ -6426,6 +6540,9 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(sessions) > 0 {
 		b.WriteString("### Recent Sessions\n")
 		for _, sess := range sessions {
+			if opts.MaxBytes > 0 && b.Len() > opts.MaxBytes {
+				break
+			}
 			summary := ""
 			if sess.Summary != nil {
 				summary = fmt.Sprintf(": %s", truncate(*sess.Summary, 200))
@@ -6439,6 +6556,9 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(prompts) > 0 {
 		b.WriteString("### Recent User Prompts\n")
 		for _, p := range prompts {
+			if opts.MaxBytes > 0 && b.Len() > opts.MaxBytes {
+				break
+			}
 			fmt.Fprintf(&b, "- %s: %s\n", timeutil.FormatLocal(p.CreatedAt), truncate(p.Content, 200))
 		}
 		b.WriteString("\n")
@@ -6447,6 +6567,9 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(pinned) > 0 {
 		b.WriteString("### Pinned\n")
 		for _, obs := range pinned {
+			if opts.MaxBytes > 0 && b.Len() > opts.MaxBytes {
+				break
+			}
 			writeObservationBullet(&b, obs, opts.Compact)
 		}
 		b.WriteString("\n")
@@ -6455,6 +6578,9 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(observations) > 0 {
 		b.WriteString("### Recent Observations\n")
 		for _, obs := range observations {
+			if opts.MaxBytes > 0 && b.Len() > opts.MaxBytes {
+				break
+			}
 			writeObservationBullet(&b, obs, opts.Compact)
 		}
 		b.WriteString("\n")
@@ -7326,7 +7452,10 @@ func (s *Store) GetSyncedChunks() (map[string]bool, error) {
 // GetSyncedChunksForTarget returns chunk IDs tracked for a specific sync target.
 func (s *Store) GetSyncedChunksForTarget(targetKey string) (map[string]bool, error) {
 	targetKey = normalizeChunkTargetKey(targetKey)
-	rows, err := s.queryItHook(s.db, "SELECT chunk_id FROM sync_chunks WHERE target_key = ?", targetKey)
+	// Transfer one driver row so generation checks protect the read without
+	// repeating filesystem probes for every ID. Hex preserves opaque bytes:
+	// decoding chunk_id directly from JSON would replace invalid UTF-8.
+	rows, err := s.queryItHook(s.db, "SELECT json_group_array(hex(chunk_id)) FROM sync_chunks WHERE target_key = ?", targetKey)
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
 	}
@@ -7334,11 +7463,21 @@ func (s *Store) GetSyncedChunksForTarget(targetKey string) (map[string]bool, err
 
 	chunks := make(map[string]bool)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
 			return nil, err
 		}
-		chunks[id] = true
+		var ids []string
+		if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			decoded, err := hex.DecodeString(id)
+			if err != nil {
+				return nil, err
+			}
+			chunks[string(decoded)] = true
+		}
 	}
 	return chunks, rows.Err()
 }
@@ -8782,6 +8921,10 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 // blank directories are accepted and the skip-plus-evidence quarantine ladder
 // behaves exactly as before.
 func (s *Store) ApplyPulledChunkForDomain(targetKey, chunkID string, mutations []SyncMutation, cloud bool) error {
+	return s.applyPulledChunkForDomain(targetKey, chunkID, mutations, cloud, nil)
+}
+
+func (s *Store) applyPulledChunkForDomain(targetKey, chunkID string, mutations []SyncMutation, cloud bool, evidence *ChunkDeleteEvidence) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	chunkTargetKey := normalizeChunkTargetKey(targetKey)
 	chunkID = strings.TrimSpace(chunkID)
@@ -8799,6 +8942,9 @@ func (s *Store) ApplyPulledChunkForDomain(targetKey, chunkID string, mutations [
 			return err
 		}
 		if alreadyImported > 0 {
+			if evidence != nil {
+				return s.recordChunkDeleteEvidenceTx(tx, chunkTargetKey, chunkID, *evidence)
+			}
 			return nil
 		}
 
@@ -8837,6 +8983,11 @@ func (s *Store) ApplyPulledChunkForDomain(targetKey, chunkID string, mutations [
 			chunkTargetKey, chunkID,
 		); err != nil {
 			return err
+		}
+		if evidence != nil {
+			if err := s.recordChunkDeleteEvidenceTx(tx, chunkTargetKey, chunkID, *evidence); err != nil {
+				return err
+			}
 		}
 
 		_, err = s.execHook(tx,
@@ -9675,6 +9826,23 @@ func (s *Store) ListProjectsWithStats() ([]ProjectStats, error) {
 	}
 
 	return results, nil
+}
+
+// HasObservationsForProject checks for a live observation using the exact stored
+// project name, matching membership in ListProjectNames without enumerating it.
+// Sessions, prompts and enrollment alone do not establish this membership.
+func (s *Store) HasObservationsForProject(name string) (bool, error) {
+	if name == "" {
+		return false, nil
+	}
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM observations WHERE project = ? AND deleted_at IS NULL LIMIT 1
+	)`, name).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 // CountObservationsForProject returns the number of non-deleted observations
@@ -13310,12 +13478,23 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 	return results, rows.Err()
 }
 
-func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) error {
+type migrationColumn struct {
+	name       string
+	definition string
+}
+
+// addColumnsIfNotExists reads schema once per ordered migration batch. The set
+// is invocation-local: later batches re-read schema after intervening rebuilds.
+func (s *Store) addColumnsIfNotExists(tableName string, columns ...migrationColumn) error {
+	if len(columns) == 0 {
+		return nil
+	}
 	rows, err := s.queryItHook(s.db, fmt.Sprintf("PRAGMA table_info(%s)", tableName))
 	if err != nil {
 		return err
 	}
 
+	existing := make(map[string]bool)
 	for rows.Next() {
 		var cid int
 		var name, typ string
@@ -13325,10 +13504,7 @@ func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) e
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
 			return closeRowsWithError(rows, err)
 		}
-		if name == columnName {
-			rows.Close()
-			return nil
-		}
+		existing[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -13338,8 +13514,16 @@ func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) e
 		return err
 	}
 
-	_, err = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, columnName, definition))
-	return err
+	for _, column := range columns {
+		if existing[column.name] {
+			continue
+		}
+		if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, column.name, column.definition)); err != nil {
+			return err
+		}
+		existing[column.name] = true
+	}
+	return nil
 }
 
 func (s *Store) migrateSyncChunksTable() error {

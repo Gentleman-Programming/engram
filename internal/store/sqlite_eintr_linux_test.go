@@ -5,6 +5,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,6 +23,35 @@ import (
 )
 
 const sqliteSleepChildEnv = "ENGRAM_SQLITE_SLEEP_CHILD"
+
+// Linux/amd64 errno is a 32-bit C int. GoBytes borrows TLS-owned memory;
+// decode it immediately while tls is live rather than retaining the view.
+func sqliteLibcErrno(tls *libc.TLS) int32 {
+	return int32(binary.NativeEndian.Uint32(libc.GoBytes(libc.X__errno_location(tls), 4)))
+}
+
+func TestSQLiteLibcErrnoRead(t *testing.T) {
+	tls := libc.NewTLS()
+	defer tls.Close()
+	if got := sqliteLibcErrno(tls); got != 0 {
+		t.Fatalf("new TLS errno=%d, want 0", got)
+	}
+
+	// Exercise a real error so an accidentally constant-zero diagnostic fails.
+	// The uintptr crosses Go calls in libc, so allocate stable TLS-owned storage
+	// rather than passing an address on the movable goroutine stack.
+	const reqSize = int(unsafe.Sizeof(libctime.Timespec{}))
+	req := tls.Alloc(reqSize)
+	defer tls.Free(reqSize)
+	request := libc.GoBytes(req, reqSize)
+	clear(request)
+	binary.NativeEndian.PutUint64(request[unsafe.Offsetof(libctime.Timespec{}.Ftv_nsec):], ^uint64(0))
+	rc := libc.Xnanosleep(tls, req, 0)
+	runtime.GC()
+	if got := sqliteLibcErrno(tls); rc != -1 || got != int32(syscall.EINVAL) {
+		t.Fatalf("nanosleep rc=%d errno=%d, want -1/EINVAL", rc, got)
+	}
+}
 
 // S3: exercise the driver's public sleep owner, not a Store mock or a retry
 // wrapper. Only Linux/amd64 is included: its libc Timespec and syscall ABI were
@@ -76,7 +106,7 @@ func TestSQLiteLibcSleepEINTRChild(t *testing.T) {
 	req := libctime.Timespec{Ftv_nsec: int64(duration)}
 	if mode == "absolute-deadline" {
 		if rc := libc.Xclock_gettime(tls, libctime.CLOCK_MONOTONIC, uintptr(unsafe.Pointer(&req))); rc != 0 {
-			t.Fatalf("clock_gettime rc=%d errno=%d", rc, *(*int32)(unsafe.Pointer(libc.X__errno_location(tls))))
+			t.Fatalf("clock_gettime rc=%d errno=%d", rc, sqliteLibcErrno(tls))
 		}
 		req.Ftv_nsec += int64(duration)
 		if req.Ftv_nsec >= int64(time.Second) {
@@ -154,7 +184,7 @@ func TestSQLiteLibcSleepEINTRChild(t *testing.T) {
 		rc = libc.Xclock_nanosleep(tls, libctime.CLOCK_MONOTONIC, libctime.TIMER_ABSTIME, uintptr(unsafe.Pointer(&req)), 0)
 	}
 	elapsed := time.Since(start)
-	errno := *(*int32)(unsafe.Pointer(libc.X__errno_location(tls)))
+	errno := sqliteLibcErrno(tls)
 	runtime.KeepAlive(&req)
 	close(stop)
 	result := <-injected

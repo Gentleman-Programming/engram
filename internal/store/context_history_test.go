@@ -34,91 +34,97 @@ func historyFormat(t *testing.T, s *Store, opts ContextOptions) string {
 // Coordinate committed writes between the public formatter's reads. No sleeps
 // or scheduler races decide which database state the assertions observe.
 func TestOlderHistoryConcurrentSnapshot(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.CreateSession("snapshot", "alpha", ""); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
-	s.contextHistoryNow = func() time.Time { return now }
-	var ids []int64
-	for i, title := range []string{"recent-before-write", "sample-before-write", "other-sample"} {
-		id, err := s.AddObservation(AddObservationParams{SessionID: "snapshot", Project: "alpha", Scope: "project", Type: "decision", Title: title, Content: title})
-		if err != nil {
-			t.Fatal(err)
-		}
-		date := "2026-05-19 12:00:00"
-		if i == 0 {
-			date = "2026-05-20 12:00:00"
-		}
-		if _, err := s.db.Exec("UPDATE observations SET created_at=? WHERE id=?", date, id); err != nil {
-			t.Fatal(err)
-		}
-		ids = append(ids, id)
-	}
-	// A second store opens an independent connection to the same isolated WAL DB.
-	writer, err := New(s.cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = writer.Close() })
-	work := make(chan string)
-	results := make(chan error, 1)
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		for stage := range work {
-			switch stage {
-			case "recent":
-				results <- writer.PinObservation(ids[0])
-			case "counts":
-				title := "sample-after-write"
-				_, err := writer.UpdateObservation(ids[1], UpdateObservationParams{Title: &title})
-				results <- err
-			default:
-				results <- fmt.Errorf("unexpected read stage %q", stage)
+	for _, compact := range []bool{false, true} {
+		t.Run(fmt.Sprintf("compact=%t", compact), func(t *testing.T) {
+
+			s := newTestStore(t)
+			if err := s.CreateSession("snapshot", "alpha", ""); err != nil {
+				t.Fatal(err)
 			}
-		}
-	}()
-	defer func() { close(work); <-finished }()
-	var stages []string
-	s.contextHistoryAfterRead = func(stage string) {
-		stages = append(stages, stage)
-		work <- stage
-		select {
-		case err := <-results:
+			now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+			s.contextHistoryNow = func() time.Time { return now }
+			var ids []int64
+			for i, title := range []string{"recent-before-write", "sample-before-write", "other-sample"} {
+				id, err := s.AddObservation(AddObservationParams{SessionID: "snapshot", Project: "alpha", Scope: "project", Type: "decision", Title: title, Content: title})
+				if err != nil {
+					t.Fatal(err)
+				}
+				date := "2026-05-19 12:00:00"
+				if i == 0 {
+					date = "2026-05-20 12:00:00"
+				}
+				if _, err := s.db.Exec("UPDATE observations SET created_at=? WHERE id=?", date, id); err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, id)
+			}
+			// A second store opens an independent connection to the same isolated WAL DB.
+			writer, err := New(s.cfg)
 			if err != nil {
-				t.Fatalf("concurrent write after %s: %v", stage, err)
+				t.Fatal(err)
 			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("concurrent writer did not commit after %s", stage)
-		}
-	}
-	opts := ContextOptions{OlderHistory: true, Observations: 1, Sessions: -1, Prompts: -1, Pinned: -1}
-	got := historyFormat(t, s, opts)
-	if strings.Join(stages, ",") != "recent,counts" {
-		t.Fatalf("snapshot barriers not reached: %v", stages)
-	}
-	wantSamples := fmt.Sprintf("  - Sample #%d: other-sample\n  - Sample #%d: sample-before-write\n", ids[2], ids[1])
-	if !strings.Contains(got, "### Recent Observations\n- [decision] **recent-before-write**") ||
-		!strings.Contains(got, "2026-05-18–2026-05-24: 2 observations\n"+wantSamples) ||
-		strings.Contains(got, "sample-after-write") {
-		t.Fatalf("mixed concurrent snapshots: %s", got)
-	}
-	// Fresh public reads prove both writes committed before the first call ended.
-	s.contextHistoryAfterRead = nil
-	pinned, err := writer.GetObservation(ids[0])
-	if err != nil || !pinned.Pinned {
-		t.Fatalf("pin did not commit: observation=%+v err=%v", pinned, err)
-	}
-	changed, err := writer.GetObservation(ids[1])
-	if err != nil || changed.Title != "sample-after-write" {
-		t.Fatalf("title did not commit: observation=%+v err=%v", changed, err)
-	}
-	fresh := historyFormat(t, s, opts)
-	if !strings.Contains(fresh, "### Recent Observations\n- [decision] **other-sample**") ||
-		!strings.Contains(fresh, fmt.Sprintf("2026-05-18–2026-05-24: 1 observations\n  - Sample #%d: sample-after-write\n", ids[1])) ||
-		strings.Contains(fresh, "recent-before-write") || strings.Contains(fresh, "sample-before-write") {
-		t.Fatalf("fresh read did not see committed writes: %s", fresh)
+			t.Cleanup(func() { _ = writer.Close() })
+			work := make(chan string)
+			results := make(chan error, 1)
+			finished := make(chan struct{})
+			go func() {
+				defer close(finished)
+				for stage := range work {
+					switch stage {
+					case "recent":
+						results <- writer.PinObservation(ids[0])
+					case "counts":
+						title := "sample-after-write"
+						_, err := writer.UpdateObservation(ids[1], UpdateObservationParams{Title: &title})
+						results <- err
+					default:
+						results <- fmt.Errorf("unexpected read stage %q", stage)
+					}
+				}
+			}()
+			defer func() { close(work); <-finished }()
+			var stages []string
+			s.contextHistoryAfterRead = func(stage string) {
+				stages = append(stages, stage)
+				work <- stage
+				select {
+				case err := <-results:
+					if err != nil {
+						t.Fatalf("concurrent write after %s: %v", stage, err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatalf("concurrent writer did not commit after %s", stage)
+				}
+			}
+			opts := ContextOptions{Compact: compact, OlderHistory: true, Observations: 1, Sessions: -1, Prompts: -1, Pinned: -1}
+			got := historyFormat(t, s, opts)
+			if strings.Join(stages, ",") != "recent,counts" {
+				t.Fatalf("snapshot barriers not reached: %v", stages)
+			}
+			wantSamples := fmt.Sprintf("  - Sample #%d: other-sample\n  - Sample #%d: sample-before-write\n", ids[2], ids[1])
+			if !strings.Contains(got, "### Recent Observations\n- [decision] **recent-before-write**") ||
+				!strings.Contains(got, "2026-05-18–2026-05-24: 2 observations\n"+wantSamples) ||
+				strings.Contains(got, "sample-after-write") {
+				t.Fatalf("mixed concurrent snapshots: %s", got)
+			}
+			// Fresh public reads prove both writes committed before the first call ended.
+			s.contextHistoryAfterRead = nil
+			pinned, err := writer.GetObservation(ids[0])
+			if err != nil || !pinned.Pinned {
+				t.Fatalf("pin did not commit: observation=%+v err=%v", pinned, err)
+			}
+			changed, err := writer.GetObservation(ids[1])
+			if err != nil || changed.Title != "sample-after-write" {
+				t.Fatalf("title did not commit: observation=%+v err=%v", changed, err)
+			}
+			fresh := historyFormat(t, s, opts)
+			if !strings.Contains(fresh, "### Recent Observations\n- [decision] **other-sample**") ||
+				!strings.Contains(fresh, fmt.Sprintf("2026-05-18–2026-05-24: 1 observations\n  - Sample #%d: sample-after-write\n", ids[1])) ||
+				strings.Contains(fresh, "recent-before-write") || strings.Contains(fresh, "sample-before-write") {
+				t.Fatalf("fresh read did not see committed writes: %s", fresh)
+			}
+
+		})
 	}
 }
 
@@ -261,7 +267,7 @@ func TestContextHistoryCalendarAndMembership(t *testing.T) {
 		}
 	}
 	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
-	recent, groups, err := s.contextHistory(" ALPHA ", "project", 1, now)
+	recent, groups, err := s.contextHistory(" ALPHA ", "project", 1, now, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -76,15 +76,24 @@ var suggestTopicKey = store.SuggestTopicKey
 
 var capturePromptForSave = (*store.Store).CapturePromptForSave
 
+var listSaveProjectNames = (*store.Store).ListProjectNames
+
+var hasSaveProjectObservations = (*store.Store).HasObservationsForProject
+
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
 
-var loadContextStats = func(s *store.Store, project string) (*store.Stats, error) {
+var loadContextStats = func(s *store.Store, project string) (*store.Stats, int, error) {
 	if project == "" {
-		return s.Stats()
+		return s.ContextStats("", memContextMaxStatsProjects)
 	}
-	return s.StatsProject(project)
+	// Scoped lists are already narrow; retain their existing query path.
+	stats, err := s.StatsProject(project)
+	if err != nil {
+		return nil, 0, err
+	}
+	return stats, len(stats.Projects), nil
 }
 
 func truncationWarning(metadata store.TruncationMetadata) string {
@@ -1631,20 +1640,23 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Check for similar existing projects (only when this project has no existing observations)
 		var similarWarning string
 		if project != "" {
-			existingNames, _ := s.ListProjectNames()
-			isNew := true
-			for _, e := range existingNames {
-				if e == project {
-					isNew = false
-					break
+			hasObservations, _ := hasSaveProjectObservations(s, project)
+			if !hasObservations {
+				existingNames, _ := listSaveProjectNames(s)
+				isNew := true
+				for _, e := range existingNames {
+					if e == project {
+						isNew = false
+						break
+					}
 				}
-			}
-			if isNew && len(existingNames) > 0 {
-				matches := projectpkg.FindSimilar(project, existingNames, 3)
-				if len(matches) > 0 {
-					bestMatch := matches[0].Name
-					obsCount, _ := s.CountObservationsForProject(bestMatch)
-					similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+				if isNew && len(existingNames) > 0 {
+					matches := projectpkg.FindSimilar(project, existingNames, 3)
+					if len(matches) > 0 {
+						bestMatch := matches[0].Name
+						obsCount, _ := s.CountObservationsForProject(bestMatch)
+						similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+					}
 				}
 			}
 		}
@@ -2125,14 +2137,14 @@ const memContextMaxStatsProjects = 8
 // formatContextProjects renders the projects list for the mem_context stats
 // suffix: "none", the full join, or the first memContextMaxStatsProjects
 // names plus a "+N more" overflow marker.
-func formatContextProjects(names []string) string {
+func formatContextProjects(names []string, total int) string {
 	if len(names) == 0 {
 		return "none"
 	}
-	if len(names) <= memContextMaxStatsProjects {
+	if total <= memContextMaxStatsProjects {
 		return strings.Join(names, ", ")
 	}
-	return fmt.Sprintf("%s, +%d more", strings.Join(names[:memContextMaxStatsProjects], ", "), len(names)-memContextMaxStatsProjects)
+	return fmt.Sprintf("%s, +%d more", strings.Join(names[:memContextMaxStatsProjects], ", "), total-memContextMaxStatsProjects)
 }
 
 // clampMemContextResult caps the complete mem_context tool result — context
@@ -2202,17 +2214,17 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		maxBytes := memContextMaxBytes(req.GetArguments()["max_bytes"])
 
 		// #1039 (CodeRabbit major on PR #1074): the budget applies to the
-		// COMPLETE result. The stats suffix joins every project name in the
-		// store (unbounded) and the nudge is appended after the context block,
+		// COMPLETE result. The stats suffix lists bounded project names with
+		// an exact overflow count and the nudge is appended after the context block,
 		// so the suffix is rendered FIRST and its bytes are reserved from the
 		// context budget; a final clamp backstops the pathological case where
 		// the suffix alone meets or exceeds the budget.
-		stats, err := loadContextStats(s, contextProject)
+		stats, totalProjects, err := loadContextStats(s, contextProject)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
 		}
 		suffix := fmt.Sprintf("\n---\nMemory stats: %d sessions, %d observations across projects: %s",
-			stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects))
+			stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects, totalProjects))
 		suffix += activity.NudgeIfNeededForProject(sessionID, project)
 
 		contextBudget := maxBytes - len(suffix)

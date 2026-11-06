@@ -22,6 +22,13 @@ Before upgrading:
 4. Validate compatibility with your environment and integrations.
 5. Retain a known-good installation or artifact until the upgrade is accepted.
 
+After installing the replacement binary, restart any already-running local
+`engram serve` HTTP server through its existing supervisor or launcher. Verify the intended server's
+`/health` version against the installed executable and recheck HTTP integrations;
+a running process or successful local CLI check alone does not confirm that the
+server was upgraded. Follow [After upgrading](./INSTALLATION.md#after-upgrading)
+for endpoint, authentication, and service guidance.
+
 ## Rollback expectations
 
 Rollback means restoring the known-good release and configuration, plus any required backup, using the documented procedure for the affected component. It does not promise an automated rollback path or behavior beyond that component's documentation. Feature or data migrations can constrain rollback; consult the release-specific notes before upgrading.
@@ -63,9 +70,12 @@ For a separately authorized release:
    Missing versions, transport/HTTP/JSON failures and mismatched required `startupPolicy` or
    declared `sessionOwned` metadata stop core publication. There are no retries, redirects,
    private npm config reads or configurable registry endpoints. Startup-only source contracts
-   remain supported when `sessionOwned` is absent. Current source and installer pin select 0.5.1
+   remain supported when `sessionOwned` is absent. Current source and installer pin prepare 0.6.0
    and require owned metadata; public 0.4.2 lacks that contract and is not a compatible substitute.
-   Source preparation does not establish public availability of 0.5.1.
+   This version preparation adds no runtime functionality. The managed 0.5.1 pin joins the older
+   predecessor cleanup while custom/local/object entries and unrelated settings remain intact.
+   Source preparation does not establish public availability of 0.6.0 or change an already
+   published core's installer pin.
    This is rejection-only availability evidence, **not** protocol, source-byte identity,
    published-content integrity or permission approval.
 4. Core GoReleaser still performs its existing release and automatic Homebrew tap behavior.

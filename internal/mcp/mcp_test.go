@@ -2273,8 +2273,8 @@ func TestHandleContextPropagatesStatsError(t *testing.T) {
 	}
 	original := loadContextStats
 	t.Cleanup(func() { loadContextStats = original })
-	loadContextStats = func(*store.Store, string) (*store.Stats, error) {
-		return nil, store.ErrDatabaseGenerationChanged
+	loadContextStats = func(*store.Store, string) (*store.Stats, int, error) {
+		return nil, 0, store.ErrDatabaseGenerationChanged
 	}
 
 	result, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram"}}})
@@ -4435,6 +4435,14 @@ func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 		"content": "Memory content",
 	}}})
 
+	previousList := listSaveProjectNames
+	enumerations := 0
+	listSaveProjectNames = func(st *store.Store) ([]string, error) {
+		enumerations++
+		return previousList(st)
+	}
+	t.Cleanup(func() { listSaveProjectNames = previousList })
+
 	req2 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Second memory",
 		"content": "Another memory content",
@@ -4447,6 +4455,9 @@ func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 	text := callResultText(t, res2)
 	if strings.Contains(text, "Similar project") {
 		t.Fatalf("unexpected similar project warning on existing project, got %q", text)
+	}
+	if enumerations != 0 {
+		t.Errorf("established project save enumerated all project names %d times, want zero", enumerations)
 	}
 }
 
@@ -6453,26 +6464,37 @@ func TestAmbiguousRecoveryConcurrentSameChoiceBootstrap(t *testing.T) {
 }
 
 func TestAmbiguousRecoveryReadHintKeepsSameReadTool(t *testing.T) {
-	parent := t.TempDir()
-	for _, name := range []string{"read-a", "read-b"} {
-		child := filepath.Join(parent, name)
-		if err := os.MkdirAll(child, 0o755); err != nil {
+	// This tests recovery formatting, not whether the bounded child scan
+	// finishes under CI load. Detector integration has separate coverage.
+	res := project.DetectionResult{
+		Source:            project.SourceAmbiguous,
+		Path:              t.TempDir(),
+		Error:             project.ErrAmbiguousProject,
+		AvailableProjects: []string{"read-a", "read-b"},
+	}
+	for _, name := range res.AvailableProjects {
+		if err := os.MkdirAll(filepath.Join(res.Path, name, ".git"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		initTestGitRepo(t, child)
 	}
-	t.Chdir(parent)
-	res, err := resolveWriteProject(newMCPTestStore(t))
-	if !errors.Is(err, project.ErrAmbiguousProject) {
-		t.Fatalf("expected ambiguity, got %v", err)
-	}
-	body := callResultJSON(t, readProjectErrorResult(NewSessionActivity(time.Minute), res, err))
+	activity := NewSessionActivity(time.Minute)
+	body := callResultJSON(t, readProjectErrorResult(activity, res, res.Error))
 	hint, ok := body["hint"].(string)
 	if !ok || !strings.Contains(hint, "retry the same read tool") || strings.Contains(hint, "mem_save") {
 		t.Fatalf("incorrect read guidance: %v", body)
 	}
 	if body["error_code"] != "ambiguous_project" || body["recovery_token"] == nil || body["project_source"] != "ambiguous" {
 		t.Fatalf("missing compatible structured ambiguity: %v", body)
+	}
+	token, ok := body["recovery_token"].(string)
+	if !ok || token == "" {
+		t.Fatalf("missing usable recovery token: %v", body)
+	}
+	if !activity.ValidateAmbiguousProjectRecoveryToken(defaultSessionID(""), token, "read-a", res.AvailableProjects, res.Path) {
+		t.Fatal("issued recovery token did not validate for its candidate and context")
+	}
+	if !reflect.DeepEqual(body["available_projects"], []any{"read-a", "read-b"}) || body["project_path"] != res.Path {
+		t.Fatalf("lost ambiguity context: %v", body)
 	}
 }
 

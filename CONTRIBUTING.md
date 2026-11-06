@@ -212,8 +212,13 @@ proof that the hosted Node22 case executed.
 
 #### Observational Windows full-module baseline (#1891)
 
-`Windows Full Suite (Observational)` independently runs `go test -json ./...`
+`Windows Full Suite (Observational)` independently runs `go test -json -count=1 ./...`
 with default tags on native Windows x64 for PRs, merge groups and main pushes.
+`-count=1` executes fresh tests and avoids Go's test-result cache processing,
+which can continue after the package prints `ok` for SQLite-heavy fixtures.
+Compilation and module caches remain enabled. The bounded local observation in
+[#2192](https://github.com/Gentleman-Programming/engram/issues/2192#issuecomment-6623802296)
+does not establish a full hosted speedup; compare actual job outcomes and timings.
 It does not replace selective Windows jobs, change the six required contexts,
 App15368, or the queue. Its initial 30-minute outer ceiling is a new bounded
 observation policy, not the #2020 setup/wrapper budgets or a measured SLO;
@@ -234,10 +239,21 @@ provide process isolation, not measured proof of cleanup.
 The job builds a fresh `cmd/engram` executable into runner-owned temp and exports
 `ENGRAM_RECOVERY_PUBLIC_BINARY` before the unchanged full-suite invocation.
 `prerequisite-coverage.mjs windows-recovery EVENTS.json GO_EXIT` requires
-`TestHookManagedLocalPublicRecovery` to execute and pass, not skip. A nonzero Go
+`TestHookManagedLocalPublicRecovery` and all four
+`TestSubagentStopPreservesUnicodeTransport` cases to execute and pass, not skip.
+The Unicode test selects Git-bundled native curl from either the current
+`ucrt64/bin` or legacy `mingw64/bin` layout, logs the selected executable, and
+preserves exact Unicode readback assertions; system/PATH curl is not a substitute. A nonzero Go
 exit remains authoritative; successful JSON cannot mask it. The original native
 identity, job-object ownership and cleanup assertions remain unchanged. Wiring
 checks alone do not establish the new binary-backed native execution.
+
+The native Codex Windows test runners report command-context cancellation
+separately from ordinary child exit codes, retaining elapsed time and partial
+streams for PowerShell-file helper calls. The default command deadlines remain five
+seconds for manifest commands and eight seconds for PowerShell files. These
+diagnostics identify a canceled invocation; they do not explain why a hosted
+runner exceeded its deadline.
 
 JSON, stderr, suite exit code and elapsed seconds are retained in logs, with
 failure artifacts when available. Cancellation/outer timeout can leave partial
@@ -802,6 +818,12 @@ The command is a dry run: it prints the canonical label list as JSON and never w
 The symlink cases in `TestCompatibilityOfflineNeverAuthorizes` and `TestMigrateCopyRejects` skip only when Windows returns `ERROR_PRIVILEGE_NOT_HELD` (1314). Other fixture errors still fail; hosts that support symlinks execute the original rejection assertions.
 
 ### Focused Verification Map
+
+The `cmd/engram` public CLI fixtures build the candidate once per package test
+process and remove that executable after the package finishes. Build inputs are
+captured before individual tests change their environment or working directory;
+each consumer still owns its runtime configuration, data and child processes.
+The executable is never reused across separate test invocations.
 
 Use the row that matches the change, not every row. These are existing entry points,
 not a new required local gate. Run commands from the listed directory; paths are

@@ -31,7 +31,8 @@ func (s *Server) handlePromptCaptureDecision(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	content := strings.TrimSpace(*body.Content)
-	if content == "" || strings.HasPrefix(content, "<task-notification>") || strings.HasPrefix(content, "<agent-message") {
+	if content == "" || strings.HasPrefix(content, "<task-notification>") || strings.HasPrefix(content, "<agent-message") ||
+		strings.HasPrefix(content, "<system-reminder>") || strings.HasPrefix(content, "<ci-monitor-event>") {
 		jsonResponse(w, http.StatusOK, map[string]any{"decision": "skip"})
 		return
 	}

@@ -551,62 +551,31 @@ func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitEx
 	if err != nil {
 		return nil, fmt.Errorf("export local delete tombstones: %w", err)
 	}
-	reviewDates, exportedClears, err := sy.exportedReviewState(manifest)
+	reviewDates, exportedClears, observationUpdates, err := sy.exportedObservationState(manifest)
 	if err != nil {
 		return nil, err
 	}
-	chunk := sy.filterNewData(data, lastChunkTime)
-	// Prompt identity history, including deletes, overrides the watermark.
-	// Omitted prompts remain eligible later; shared or tombstoned identities do not.
-	chunk.Prompts = nil
-	if opts.IncludePrompts {
-		for _, prompt := range data.Prompts {
-			if _, shared := historicalPrompts[prompt.SyncID]; !shared {
-				chunk.Prompts = append(chunk.Prompts, prompt)
-			}
-		}
-	}
-	chunk.Observations = filterObservationsForExport(data.Observations, historicalObservations, lastChunkTime)
-	selected := make(map[string]bool)
-	for _, observation := range chunk.Observations {
-		selected[observation.SyncID] = true
-	}
-	for _, observation := range data.Observations {
-		prior, authoritative := reviewDates[observation.SyncID]
-		if observation.ReviewAfter != nil && authoritative && !prior.deleted && (prior.date == nil || *prior.date != *observation.ReviewAfter) && !selected[observation.SyncID] {
-			chunk.Observations = append(chunk.Observations, observation)
-		}
-	}
-	includeObservationParentSessions(chunk, data.Sessions)
-	chunk.Mutations = append(filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime), filterUnexportedDeleteMutations(localDeletes, exportedDeletes)...)
 	// Store-owned events prove local clear intent even without cloud enrollment.
 	events, err := sy.store.ExportReviewClearEvents()
 	if err != nil {
 		return nil, fmt.Errorf("export review clears: %w", err)
 	}
-	observations := make(map[string]store.Observation)
-	for _, observation := range data.Observations {
-		observations[observation.SyncID] = observation
-	}
-	for _, event := range events {
-		receipt := fmt.Sprintf("%s:%d:%s", event.SyncID, event.ID, event.Key)
-		observation, present := observations[event.SyncID]
-		if !present || exportedClears[receipt] {
-			continue
-		}
-		chunk.ReviewClears = append(chunk.ReviewClears, receipt)
-		mutations := synthesizeMutationsFromChunk(ChunkData{Observations: []store.Observation{observation}})
-		var fields map[string]any
-		if err := json.Unmarshal([]byte(mutations[0].Payload), &fields); err != nil {
-			return nil, fmt.Errorf("encode review reset: %w", err)
-		}
-		fields["review_after"] = nil
-		payload, err := json.Marshal(fields)
-		if err != nil {
-			return nil, fmt.Errorf("encode review reset: %w", err)
-		}
-		mutations[0].Payload = string(payload)
-		chunk.Mutations = append(chunk.Mutations, mutations[0])
+	chunk, err := buildGitExportChunk(data, gitExportInputs{
+		lastChunkTime:          lastChunkTime,
+		includePrompts:         opts.IncludePrompts,
+		historicalPrompts:      historicalPrompts,
+		historicalObservations: historicalObservations,
+		observationUpdates:     observationUpdates,
+		reviewDates:            reviewDates,
+		relationMutations:      relationMutations,
+		exportedRelations:      exportedRelations,
+		localDeletes:           localDeletes,
+		exportedDeletes:        exportedDeletes,
+		events:                 events,
+		exportedClears:         exportedClears,
+	})
+	if err != nil {
+		return nil, err
 	}
 	if err := filterRelationMutationsForEndpointAvailability(chunk, data, exportedObservations, strings.TrimSpace(project) != ""); err != nil {
 		return nil, fmt.Errorf("filter relation endpoints: %w", err)
@@ -1196,7 +1165,7 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 				}
 			}
 
-			if err := sy.importMutationChunk(entry.ID, applyChunk, mode == importModeCloud); err != nil {
+			if err := sy.importChunkWithEvidence(entry.ID, applyChunk, mode, manifestVersion); err != nil {
 				if mode == importModeLocal {
 					recoveredChunk, recovered, recoveryErr := sy.recoverLocalMissingSessionDependencies(chunk, availableSessionIDs)
 					if recoveryErr != nil {
@@ -1313,7 +1282,8 @@ func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData, cloud boo
 // satisfied locally: it exists in the store, or arrives with a manifest chunk
 // still pending in this import run. Its sets are built lazily on the first
 // relation classification, so relation-free imports never pay for extra chunk
-// reads. Already-known chunks may still provide durable delete evidence, but a
+// reads. Known payloads are read only for unresolved endpoints. They may
+// provide durable delete evidence, but a
 // missing or corrupt known chunk is ignored because it cannot invalidate a
 // successful earlier import.
 type importDependencyOracle struct {
@@ -1325,6 +1295,7 @@ type importDependencyOracle struct {
 	deletedObservationIDs map[string]struct{}
 	chunkCache            map[string]ChunkData
 	built                 bool
+	pendingBuilt          bool
 	buildErr              error
 }
 
@@ -1401,7 +1372,7 @@ func (o *importDependencyOracle) endpointPermanentlyMissing(syncID string) (bool
 	if syncID == "" {
 		return false, nil
 	}
-	if err := o.ensureBuilt(); err != nil {
+	if err := o.ensurePendingBuilt(); err != nil {
 		return false, err
 	}
 	if _, pending := o.pendingObservationIDs[syncID]; pending {
@@ -1416,19 +1387,22 @@ func (o *importDependencyOracle) endpointPermanentlyMissing(syncID string) (bool
 	if known {
 		return false, nil
 	}
+	if err := o.ensureBuilt(); err != nil {
+		return false, err
+	}
 	_, deleted := o.deletedObservationIDs[syncID]
 	return deleted, nil
 }
 
-// ensureBuilt builds the manifest observation sets on first use. A pending
+// ensurePendingBuilt freezes the pending observation sets on first use. A pending
 // chunk that cannot be read or parsed fails the import before the first
 // relation-bearing chunk applies, so no edge is ever classified against an
 // incomplete pending set. Known chunks are best-effort delete evidence only.
-func (o *importDependencyOracle) ensureBuilt() error {
-	if o.built {
+func (o *importDependencyOracle) ensurePendingBuilt() error {
+	if o.pendingBuilt {
 		return o.buildErr
 	}
-	o.built = true
+	o.pendingBuilt = true
 	upserts, deletes, err := o.classifyPendingChunks()
 	if err != nil {
 		o.buildErr = err
@@ -1439,44 +1413,88 @@ func (o *importDependencyOracle) ensureBuilt() error {
 	return nil
 }
 
-// classifyPendingChunks collects observation evidence from the manifest. Pending
-// chunks contribute upserts and deletes and remain fail-closed: unreadable or
-// corrupt content aborts classification. Known chunks contribute only delete
-// evidence, because their successful earlier import is already reflected in the
-// local store; an unavailable known chunk therefore cannot newly fail this run.
-// Parsed chunks land in the cache so the apply loop reuses pending chunks instead
-// of re-reading the transport.
+// ensureBuilt supplements the frozen pending sets with historical deletes only
+// for unresolved endpoints. knownChunks grows during apply; cached newly known
+// chunks can contribute deletes again, but never historical upserts.
+func (o *importDependencyOracle) ensureBuilt() error {
+	if err := o.ensurePendingBuilt(); err != nil {
+		return err
+	}
+	if o.built {
+		return nil
+	}
+	o.built = true
+	scope := o.sy.chunkEvidenceScope()
+	var summaries map[string][]string
+	if scope != "" {
+		var err error
+		summaries, err = o.sy.store.GetChunkDeleteEvidence(o.sy.chunkTrackingTargetKey(""), scope, o.manifestVersion)
+		if err != nil {
+			return err
+		}
+	}
+	for _, entry := range o.entries {
+		if !o.knownChunks[entry.ID] {
+			continue
+		}
+		if ids, complete := summaries[entry.ID]; complete {
+			for _, id := range ids {
+				o.deletedObservationIDs[id] = struct{}{}
+			}
+			continue
+		}
+		chunk, err := o.chunkForEntry(entry.ID)
+		if err != nil {
+			// Unavailable history cannot invalidate a successful earlier import.
+			continue
+		}
+		addObservationEvidence(chunk, nil, o.deletedObservationIDs)
+		if scope != "" {
+			if err := o.sy.store.RecordChunkDeleteEvidence(o.sy.chunkTrackingTargetKey(""), entry.ID, chunkDeleteEvidence(scope, o.manifestVersion, chunk)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// classifyPendingChunks validates pending payloads and collects their upserts
+// and deletes. Parsed chunks are cached for reuse by the apply loop. Historical
+// payloads are optional delete evidence, loaded separately by ensureBuilt.
 func (o *importDependencyOracle) classifyPendingChunks() (upserts, deletes map[string]struct{}, err error) {
 	upserts = make(map[string]struct{})
 	deletes = make(map[string]struct{})
 	for _, entry := range o.entries {
-		known := o.knownChunks[entry.ID]
+		if o.knownChunks[entry.ID] {
+			continue
+		}
 		chunk, err := o.chunkForEntry(entry.ID)
 		if err != nil {
-			if known {
-				continue
-			}
 			return nil, nil, err
 		}
-		for _, mutation := range buildImportMutations(chunk) {
-			if mutation.Entity != store.SyncEntityObservation {
-				continue
-			}
-			obsID := observationMutationSyncID(mutation)
-			if obsID == "" {
-				continue
-			}
-			switch mutation.Op {
-			case store.SyncOpUpsert:
-				if !known {
-					upserts[obsID] = struct{}{}
-				}
-			case store.SyncOpDelete:
-				deletes[obsID] = struct{}{}
-			}
-		}
+		addObservationEvidence(chunk, upserts, deletes)
 	}
 	return upserts, deletes, nil
+}
+
+func addObservationEvidence(chunk ChunkData, upserts, deletes map[string]struct{}) {
+	for _, mutation := range buildImportMutations(chunk) {
+		if mutation.Entity != store.SyncEntityObservation {
+			continue
+		}
+		obsID := observationMutationSyncID(mutation)
+		if obsID == "" {
+			continue
+		}
+		switch mutation.Op {
+		case store.SyncOpUpsert:
+			if upserts != nil {
+				upserts[obsID] = struct{}{}
+			}
+		case store.SyncOpDelete:
+			deletes[obsID] = struct{}{}
+		}
+	}
 }
 
 // observationMutationSyncID resolves an observation mutation identity exactly
@@ -2243,7 +2261,7 @@ func (sy *Syncer) lastChunkTime(m *Manifest) string {
 
 // filterNewData returns only data created after the given timestamp.
 // If lastChunkTime is empty, returns everything (first sync).
-func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *ChunkData {
+func filterNewData(data *store.ExportData, lastChunkTime string) *ChunkData {
 	chunk := &ChunkData{}
 
 	if lastChunkTime == "" {
@@ -2280,7 +2298,7 @@ func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *C
 	return chunk
 }
 
-func filterObservationsForExport(observations []store.Observation, historical map[string]struct{}, lastChunkTime string) []store.Observation {
+func filterObservationsForExport(observations []store.Observation, historical map[string]struct{}, lastChunkTime string, updates map[string]string) []store.Observation {
 	if lastChunkTime == "" {
 		return observations
 	}
@@ -2289,7 +2307,18 @@ func filterObservationsForExport(observations []store.Observation, historical ma
 	filtered := make([]store.Observation, 0, len(observations))
 	for _, observation := range observations {
 		_, present := historical[observation.SyncID]
-		if !present || normalizeTime(observation.CreatedAt) > cutoff || normalizeTime(observation.UpdatedAt) > cutoff {
+		observationCutoff := cutoff
+		if updated, known := updates[observation.SyncID]; known {
+			if updated != "" {
+				observationCutoff = normalizeTime(updated)
+			}
+		} else if present {
+			// Presence without a readable version does not prove this edit was
+			// exported. One conservative snapshot establishes that evidence.
+			filtered = append(filtered, observation)
+			continue
+		}
+		if !present || normalizeTime(observation.CreatedAt) > observationCutoff || normalizeTime(observation.UpdatedAt) > observationCutoff {
 			filtered = append(filtered, observation)
 		}
 	}
@@ -2413,21 +2442,22 @@ type historicalReviewState struct {
 	deleted bool
 }
 
-// exportedReviewState follows replay order. Missing fields preserve earlier
-// knowledge, but cannot establish a date or resurrect tombstoned knowledge.
-func (sy *Syncer) exportedReviewState(m *Manifest) (map[string]historicalReviewState, map[string]bool, error) {
+// exportedObservationState follows replay order for review state and retains
+// each observation's newest exported timestamp independently of unrelated chunks.
+func (sy *Syncer) exportedObservationState(m *Manifest) (map[string]historicalReviewState, map[string]bool, map[string]string, error) {
 	dates, clears := make(map[string]historicalReviewState), make(map[string]bool)
+	updates := make(map[string]string)
 	for _, entry := range m.Chunks {
 		raw, err := sy.transport.ReadChunk(entry.ID)
 		if errors.Is(err, ErrChunkNotFound) {
 			continue
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		var chunk ChunkData
 		if err := json.Unmarshal(raw, &chunk); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for _, receipt := range chunk.ReviewClears {
 			clears[receipt] = true
@@ -2438,19 +2468,36 @@ func (sy *Syncer) exportedReviewState(m *Manifest) (map[string]historicalReviewS
 			}
 			if mutation.Op == store.SyncOpDelete {
 				dates[mutation.EntityKey] = historicalReviewState{deleted: true}
+				// Retain a delete floor so a later stale upsert cannot lower it.
+				// Empty means a legacy tombstone: preserve its watermark fallback.
+				updates[mutation.EntityKey] = exportedObservationTime(mutation.OccurredAt)
 				continue
 			}
 			var fields struct {
 				SyncID      string          `json:"sync_id"`
 				ReviewAfter json.RawMessage `json:"review_after"`
+				UpdatedAt   json.RawMessage `json:"updated_at"`
+				CreatedAt   json.RawMessage `json:"created_at"`
 			}
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &fields); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
+			}
+			// Legacy identity-only snapshots establish presence, not a revision.
+			// Do not make their timestamps an additional format requirement.
+			var updated, created string
+			_ = json.Unmarshal(fields.UpdatedAt, &updated)
+			_ = json.Unmarshal(fields.CreatedAt, &created)
+			version := exportedObservationTime(updated)
+			if createdVersion := exportedObservationTime(created); createdVersion > version {
+				version = createdVersion
+			}
+			if version > updates[fields.SyncID] {
+				updates[fields.SyncID] = version
 			}
 			if fields.ReviewAfter != nil {
 				var date *string
 				if err := json.Unmarshal(fields.ReviewAfter, &date); err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				dates[fields.SyncID] = historicalReviewState{date: date}
 			} else if dates[fields.SyncID].deleted {
@@ -2459,7 +2506,18 @@ func (sy *Syncer) exportedReviewState(m *Manifest) (map[string]historicalReviewS
 			}
 		}
 	}
-	return dates, clears, nil
+	return dates, clears, updates, nil
+}
+
+// Only readable timestamps establish a known exported version. Older chunks
+// without one are conservatively re-exported unless history establishes a delete.
+func exportedObservationTime(value string) string {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999"} {
+		if parsed, err := time.Parse(layout, strings.TrimSpace(value)); err == nil {
+			return parsed.UTC().Format("2006-01-02 15:04:05.000000000")
+		}
+	}
+	return ""
 }
 
 // exportedChunkKeys scans manifest chunks for availability and historical
