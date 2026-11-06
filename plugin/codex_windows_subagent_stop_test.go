@@ -181,19 +181,12 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read adapter: %v", err)
 	}
-	pluginRoot := filepath.Join(t.TempDir(), "plugin root with spaces")
-	adapterPath := filepath.Join(pluginRoot, "scripts", "subagent-stop.ps1")
-	if err := os.MkdirAll(filepath.Dir(adapterPath), 0o755); err != nil {
-		t.Fatalf("create adapter directory: %v", err)
-	}
-	if err := os.WriteFile(adapterPath, source, 0o644); err != nil {
-		t.Fatalf("copy adapter: %v", err)
-	}
-
 	input := `{"session_id":"session-1","cwd":"` + strings.ReplaceAll(root, `\`, `\\`) + `","last_assistant_message":"completed normally"}`
 	t.Run("captures through the manifest command", func(t *testing.T) {
+		pluginRoot, _ := newTracedCodexSubagentCopy(t, source, true)
 		fixture := newCodexSubagentCaptureFixture(t, root)
 		command := strings.ReplaceAll(codexSubagentStopWindowsCommand(t, root), "${PLUGIN_ROOT}", pluginRoot)
+		t.Logf("SubagentStop manifest invocation start UTC: %s", time.Now().UTC().Format(time.RFC3339Nano))
 		stdout, stderr, code := runCodexWindowsManifestCommand(t, command, input, fixture.port)
 		assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
 		select {
@@ -207,6 +200,7 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	})
 
 	t.Run("captures stdout when last assistant message is omitted", func(t *testing.T) {
+		_, adapterPath := newTracedCodexSubagentCopy(t, source, true)
 		fixture := newCodexSubagentCaptureFixture(t, root)
 		stdoutFallbackInput := `{"session_id":"session-stdout","cwd":"` + strings.ReplaceAll(root, `\`, `\\`) + `","stdout":"captured from stdout"}`
 		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, stdoutFallbackInput, &fixture.port)
@@ -222,6 +216,7 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	})
 
 	t.Run("enforces a shared network budget", func(t *testing.T) {
+		_, adapterPath := newTracedCodexSubagentCopy(t, source, false)
 		slowListener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatalf("listen for slow server: %v", err)
@@ -264,6 +259,7 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 		{name: "capture unavailable", input: strings.Replace(input, "completed normally", "unavailable capture", 1), wantStderr: "passive capture failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			_, adapterPath := newTracedCodexSubagentCopy(t, source, false)
 			fixture := newCodexSubagentCaptureFixture(t, root)
 			stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, tc.input, &fixture.port)
 			assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
@@ -289,6 +285,7 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 		{name: "rejects padded port", port: " 7437"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			_, adapterPath := newTracedCodexSubagentCopy(t, source, false)
 			fixture := newCodexSubagentCaptureFixture(t, root)
 			stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, input, &tc.port)
 			assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
@@ -306,6 +303,7 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	}
 
 	t.Run("refuses project resolution redirects", func(t *testing.T) {
+		_, adapterPath := newTracedCodexSubagentCopy(t, source, false)
 		fixture := newCodexSubagentCaptureFixture(t, root)
 		redirectInput := `{"session_id":"session-redirect-project","cwd":"redirect-project","last_assistant_message":"captured"}`
 		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, redirectInput, &fixture.port)
@@ -321,6 +319,7 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	})
 
 	t.Run("refuses passive capture redirects", func(t *testing.T) {
+		_, adapterPath := newTracedCodexSubagentCopy(t, source, false)
 		fixture := newCodexSubagentCaptureFixture(t, root)
 		redirectInput := strings.Replace(input, "completed normally", "redirect capture", 1)
 		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, redirectInput, &fixture.port)

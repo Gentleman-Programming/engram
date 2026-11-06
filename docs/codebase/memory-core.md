@@ -124,6 +124,8 @@ Without `--replacement-id`, identity repair retains guidance to supply a canonic
 
 ## Database generation identity checks
 
+Synced chunk-ID reads transfer one aggregated result through the generation-fenced driver, then rebuild the complete target-scoped ID set in Go. This avoids repeating filesystem identity checks for every chunk; it does not bypass the read/iteration guards or limit the number of IDs. IDs use hexadecimal inside the transient JSON result so even non-UTF-8 bytes round-trip unchanged. SQLite still scans all matching IDs, and the aggregate and decoded set use memory proportional to history size.
+
 The store checks database, WAL and SHM identity before and after driver operations,
 including each row read. Replacement or disappearance of an observed file invalidates
 the store until restart; sidecars can first appear after startup. On Windows, identity

@@ -7452,7 +7452,10 @@ func (s *Store) GetSyncedChunks() (map[string]bool, error) {
 // GetSyncedChunksForTarget returns chunk IDs tracked for a specific sync target.
 func (s *Store) GetSyncedChunksForTarget(targetKey string) (map[string]bool, error) {
 	targetKey = normalizeChunkTargetKey(targetKey)
-	rows, err := s.queryItHook(s.db, "SELECT chunk_id FROM sync_chunks WHERE target_key = ?", targetKey)
+	// Transfer one driver row so generation checks protect the read without
+	// repeating filesystem probes for every ID. Hex preserves opaque bytes:
+	// decoding chunk_id directly from JSON would replace invalid UTF-8.
+	rows, err := s.queryItHook(s.db, "SELECT json_group_array(hex(chunk_id)) FROM sync_chunks WHERE target_key = ?", targetKey)
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
 	}
@@ -7460,11 +7463,21 @@ func (s *Store) GetSyncedChunksForTarget(targetKey string) (map[string]bool, err
 
 	chunks := make(map[string]bool)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
 			return nil, err
 		}
-		chunks[id] = true
+		var ids []string
+		if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			decoded, err := hex.DecodeString(id)
+			if err != nil {
+				return nil, err
+			}
+			chunks[string(decoded)] = true
+		}
 	}
 	return chunks, rows.Err()
 }
