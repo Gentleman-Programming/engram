@@ -17,6 +17,9 @@ import (
 func TestClaudeCodeSyntheticPromptCapture(t *testing.T) {
 	for _, route := range []string{"jq", "no-jq", "powershell"} {
 		t.Run(route, func(t *testing.T) {
+			if route != "powershell" {
+				requireHookBinaries(t)
+			}
 			for _, test := range []struct {
 				name, prompt string
 				want         int
@@ -126,7 +129,6 @@ func TestClaudeCodeSyntheticPromptCapture(t *testing.T) {
 					if route == "powershell" {
 						stdout = runClaudeCodeWindowsPromptHook(t, claudeCodePowerShell(t), filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "user-prompt-submit.ps1"), port, newSessionID(t), cwd, test.prompt, true)
 					} else {
-						requireHookBinaries(t)
 						env := map[string]string{"ENGRAM_PORT": port, "TMPDIR": t.TempDir()}
 						if route == "no-jq" {
 							bashEnv := filepath.Join(t.TempDir(), "without-jq.sh")
