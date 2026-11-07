@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
@@ -72,7 +72,15 @@ async function fixture(run) {
         const result = await request("/observations?all_projects=true&limit=100");
         assert.equal(result.status, 200); return result.data;
       };
-      await run({ tool, request, rows, events, ctx, child });
+      const originalFetch = globalThis.fetch, calls = [];
+      // Observe real requests only; every response still comes from production Go handlers.
+      globalThis.fetch = (input, init = {}) => {
+        if (String(input).startsWith(url + "/")) calls.push({ path: new URL(input).pathname,
+          method: init.method ?? "GET", authorized: new Headers(init.headers).get("authorization") === `Bearer ${token}` });
+        return originalFetch(input, init);
+      };
+      try { await run({ tool, request, rows, events, ctx, child, calls }); }
+      finally { globalThis.fetch = originalFetch; }
       bodySucceeded = true;
     } finally {
       try {
@@ -125,6 +133,29 @@ async function save(tool, title, content) {
   assert.ok(Number.isSafeInteger(result.details.data.id));
   return result.details.data.id;
 }
+
+realTest("real runtime metadata binds native requests to the generated authenticated Go contract", async () => {
+  await fixture(async ({ tool, request, rows, calls }) => {
+    const metadata = await request("/runtime-contract", undefined, false);
+    assert.equal(metadata.status, 200, "shared read-only metadata follows health's public policy");
+    const { instance_id: instanceID, ...projection } = metadata.data;
+    assert.deepEqual(projection, JSON.parse(readFileSync(new URL("../runtime-contract.json", import.meta.url), "utf8")));
+    assert.equal(typeof instanceID, "string");
+    assert.ok(instanceID.length > 0);
+    assert.equal((await request("/health")).data.instance_id, instanceID);
+    const before = calls.length;
+    const result = await tool("mem_suggest_topic_key", { type: "architecture", title: "Runtime qualification" });
+    assert.notEqual(result.isError, true, JSON.stringify(result));
+    const native = calls.slice(before);
+    assert.ok(native.every(call => call.authorized), "native qualification and operation retain the shared credential");
+    const qualified = native.findIndex(call => call.path === "/runtime-contract" && call.method === "GET");
+    assert.ok(qualified >= 0);
+    assert.ok(native.findIndex(call => call.path === "/topic-keys/suggest" && call.method === "POST") > qualified);
+    assert.equal((await request("/observations/consolidate", {}, false)).status, 401);
+    assert.deepEqual(await rows(), []);
+    assert.equal((await request("/sessions/real-host")).status, 404);
+  });
+});
 
 realTest("real Pi topic vectors match Go without registering sessions or creating observations", async () => {
   await fixture(async ({ tool, request, rows }) => {

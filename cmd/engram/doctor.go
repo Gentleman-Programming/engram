@@ -162,96 +162,18 @@ func diagnosticOnlyCheckCodes() []string {
 }
 
 func cmdDoctorRepair(cfg store.Config) {
-	project := ""
-	check := ""
-	mode := diagnostic.RepairMode("")
-	modeCount := 0
-	replacementID := ""
-	sourceID := ""
-	sourceSelected := false
-	identityFlags := false
-	replacementSelected := false
-	for i := 3; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--replacement-id", "--source-id":
-			if i+1 >= len(os.Args) {
-				failDoctorRepair(os.Args[i] + " requires a value")
-				return
-			}
-			identityFlags = true
-			if os.Args[i] == "--replacement-id" {
-				replacementSelected = true
-				replacementID = os.Args[i+1]
-			} else {
-				sourceID = os.Args[i+1]
-				sourceSelected = true
-			}
-			i++
-		case "--project":
-			if i+1 >= len(os.Args) {
-				failDoctorRepair("--project requires a value")
-				return
-			}
-			project = os.Args[i+1]
-			i++
-		case "--check":
-			if i+1 >= len(os.Args) {
-				failDoctorRepair("--check requires a value")
-				return
-			}
-			check = os.Args[i+1]
-			i++
-		case "--plan":
-			mode = diagnostic.RepairModePlan
-			modeCount++
-		case "--dry-run":
-			mode = diagnostic.RepairModeDryRun
-			modeCount++
-		case "--apply":
-			mode = diagnostic.RepairModeApply
-			modeCount++
-		case "--help", "-h", "help":
-			printDoctorRepairUsage()
-			return
-		default:
-			failDoctorRepair(fmt.Sprintf("unknown doctor repair argument %q", os.Args[i]))
-			return
-		}
-	}
-
-	project, _ = store.NormalizeProject(project)
-	project = strings.TrimSpace(project)
-	check = strings.TrimSpace(check)
-	if project == "" && check != diagnostic.CheckSyncMutationRequiredFields && check != diagnostic.CheckOrphanedPendingRelations {
-		failDoctorRepair("--project is required")
+	options, err := parseDoctorRepairArgs(os.Args[min(3, len(os.Args)):])
+	if err != nil {
+		failDoctorRepair(err.Error())
 		return
 	}
-	if check == "" {
-		failDoctorRepair("--check is required")
+	if options.help {
+		printDoctorRepairUsage()
 		return
 	}
-	if modeCount == 0 && check == diagnostic.CheckSyncMutationRequiredFields {
-		mode = diagnostic.RepairModeDryRun
-	} else if modeCount != 1 {
-		failDoctorRepair("exactly one of --plan, --dry-run, or --apply is required")
-		return
-	}
-	if identityFlags && check != diagnostic.CheckInvalidSessionIdentity {
-		failDoctorRepair("identity flags require --check invalid_session_identity")
-		return
-	}
-	if sourceSelected && !replacementSelected {
-		failDoctorRepair("--source-id requires --replacement-id")
-		return
-	}
-	if !diagnostic.IsRepairableCode(check) {
-		if _, err := diagnostic.DefaultRegistry().Lookup(check); err == nil {
-			failDoctorRepair(check + " is a diagnostic-only check with no repair; run engram doctor --check " + check)
-			return
-		}
-		failDoctorRepair("unsupported repair check " + check)
-		return
-	}
+	project, check, mode := options.project, options.check, options.mode
+	sourceID, replacementID := options.sourceID, options.replacementID
+	sourceSelected, replacementSelected := options.sourceSelected, options.replacementSelected
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -265,15 +187,7 @@ func cmdDoctorRepair(cfg store.Config) {
 			failDoctorRepair(err.Error())
 			return
 		}
-		writeDoctorRepairJSON(struct {
-			store.SyncMutationQuarantineReport
-			DirectoryRepairs       []store.SyncMutationDirectoryRepairAction  `json:"directory_repairs"`
-			Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`
-			Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
-			SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
-			SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
-			SourceUnrepairable     []store.ObservationSourceUnrepairable      `json:"source_unrepairable"`
-		}{result.Quarantine, result.DirectoryRepairs, result.Repairs, result.Superseded, result.SourceRepairs, result.SourceRepairBackupPath, result.SourceUnrepairable})
+		writeDoctorSyncMutationRepairJSON(result)
 		return
 	}
 
@@ -468,4 +382,17 @@ func renderDoctorText(report diagnostic.Report) {
 			}
 		}
 	}
+}
+
+func writeDoctorSyncMutationRepairJSON(result diagnostic.SyncMutationRepairResult) {
+	writeDoctorRepairJSON(struct {
+		store.SyncMutationQuarantineReport
+		ProjectRepairs         []store.SyncMutationProjectRepairAction    `json:"project_repairs"`
+		DirectoryRepairs       []store.SyncMutationDirectoryRepairAction  `json:"directory_repairs"`
+		Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`
+		Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
+		SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
+		SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
+		SourceUnrepairable     []store.ObservationSourceUnrepairable      `json:"source_unrepairable"`
+	}{result.Quarantine, result.ProjectRepairs, result.DirectoryRepairs, result.Repairs, result.Superseded, result.SourceRepairs, result.SourceRepairBackupPath, result.SourceUnrepairable})
 }

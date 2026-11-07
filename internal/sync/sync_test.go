@@ -1237,12 +1237,12 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 			wantObservation:    true,
 		},
 		{
-			name: "older observation in a direct historical row remains filtered",
+			name: "identity-only history cannot prove an older observation was exported",
 			history: func(observation store.Observation) ChunkData {
 				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
 			},
 			observationUpdated: "2025-01-01 00:00:00",
-			wantEmpty:          true,
+			wantObservation:    true,
 		},
 		{
 			name: "observation tombstone mutation counts as historical presence",
@@ -2085,8 +2085,15 @@ func TestExportErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("store export: %v", err)
 		}
-		chunk := sy.filterNewData(data, "")
+		chunk := filterNewData(data, "")
 		chunk.Prompts = nil // Match the default Git policy in this known-hash fixture.
+		historyJSON, err := json.Marshal(chunk)
+		if err != nil {
+			t.Fatalf("marshal observation history: %v", err)
+		}
+		// Equal observation versions are already exported. The old manifest
+		// timestamp still selects sessions, so hash that remaining candidate.
+		chunk.Observations = []store.Observation{}
 		chunkJSON, err := json.Marshal(chunk)
 		if err != nil {
 			t.Fatalf("marshal chunk: %v", err)
@@ -2095,12 +2102,15 @@ func TestExportErrors(t *testing.T) {
 		chunkID := hex.EncodeToString(hash[:])[:8]
 
 		// A healthy known-ID no-op requires payload bytes, not only a reference.
+		if err := sy.transport.WriteChunk("observation-history", historyJSON, ChunkEntry{ID: "observation-history"}); err != nil {
+			t.Fatalf("write observation history: %v", err)
+		}
 		if err := sy.transport.WriteChunk(chunkID, chunkJSON, ChunkEntry{ID: chunkID}); err != nil {
 			t.Fatalf("write known chunk payload: %v", err)
 		}
 		writeManifestFile(t, sy.syncDir, &Manifest{
 			Version: 1,
-			Chunks: []ChunkEntry{{
+			Chunks: []ChunkEntry{{ID: "observation-history", CreatedAt: "2000-01-01T00:00:00Z"}, {
 				ID:        chunkID,
 				CreatedBy: "alice",
 				CreatedAt: "2000-01-01T00:00:00Z",
@@ -4692,12 +4702,12 @@ func TestFilterFunctionsAndTimeNormalization(t *testing.T) {
 	}
 
 	sy := New(nil, t.TempDir())
-	all := sy.filterNewData(data, "")
+	all := filterNewData(data, "")
 	if len(all.Sessions) != 2 || len(all.Observations) != 2 || len(all.Prompts) != 2 {
 		t.Fatalf("expected first sync to include all data, got %+v", all)
 	}
 
-	newOnly := sy.filterNewData(data, "2025-01-01T10:30:00Z")
+	newOnly := filterNewData(data, "2025-01-01T10:30:00Z")
 	if len(newOnly.Sessions) != 1 || newOnly.Sessions[0].ID != "s2" {
 		t.Fatalf("unexpected new sessions: %+v", newOnly.Sessions)
 	}
@@ -4739,8 +4749,7 @@ func TestFilterNewDataIncludesEditedObservations(t *testing.T) {
 	}
 
 	cutoff := "2025-01-01T10:30:00Z"
-	sy := New(nil, t.TempDir())
-	filtered := sy.filterNewData(data, cutoff)
+	filtered := filterNewData(data, cutoff)
 
 	ids := make([]int64, 0, len(filtered.Observations))
 	for _, o := range filtered.Observations {

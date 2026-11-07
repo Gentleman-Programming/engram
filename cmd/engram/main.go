@@ -119,12 +119,13 @@ var (
 	checkForUpdates         = versioncheck.CheckLatest
 	migrateOrphanedDatabase = migrateOrphanedDB
 
-	setupSupportedAgents         = setup.SupportedAgents
-	setupInstallAgent            = setup.Install
-	setupAddClaudeCodeAllowlist  = setup.AddClaudeCodeAllowlist
-	setupEnsureClaudeCodeUserMCP = setup.EnsureClaudeCodeUserMCP
-	setupVerifyClaudeCodeSlim    = setup.VerifyClaudeCodeSlimCapability
-	scanInputLine                = fmt.Scanln
+	setupSupportedAgents                   = setup.SupportedAgents
+	setupInstallAgent                      = setup.Install
+	setupAddClaudeCodeAllowlist            = setup.AddClaudeCodeAllowlist
+	setupAddClaudeCodeMemoryWriteAllowlist = setup.AddClaudeCodeMemoryWriteAllowlist
+	setupEnsureClaudeCodeUserMCP           = setup.EnsureClaudeCodeUserMCP
+	setupVerifyClaudeCodeSlim              = setup.VerifyClaudeCodeSlimCapability
+	scanInputLine                          = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
@@ -832,6 +833,26 @@ func main() {
 		if err := cmdServe(cfg); err != nil {
 			fatal(err)
 		}
+	case "run":
+		if err := cmdRun(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "ps":
+		if err := cmdPs(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "stop":
+		if err := cmdStop(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "logs":
+		if err := cmdLogs(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "restart":
+		if err := cmdRestart(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
 	case "mcp":
 		cmdMCP(cfg)
 	case "tui":
@@ -887,7 +908,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
+	case "mcp", "serve", "run", "ps", "stop", "logs", "restart", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -938,6 +959,13 @@ func cmdServe(cfg store.Config) error {
 	if err != nil {
 		return err
 	}
+	return serveWith(cfg, options)
+}
+
+// serveWith is the shared serving body behind `engram serve` and `engram run`
+// (foreground mode). It owns the store, server, autosync, and signal loop.
+func serveWith(cfg store.Config, options serveOptions) error {
+	var err error
 
 	// Owned EOF cancels startup lock waits as well as serving. Construction
 	// stays synchronous so cleanup cannot race abandoned live store work.
@@ -972,6 +1000,18 @@ func cmdServe(cfg store.Config) error {
 			default:
 			}
 			return emitOwnedReadiness(addr, s.InstanceID())
+		})
+	}
+	// Daemon child mode (`engram run -d`): publish the pidfile and the parent
+	// handshake record once the listener is bound; errors abort serving so a
+	// half-started daemon never reports success. The start token is also
+	// reported on /health so pidfile owners can confirm this daemon's
+	// identity before signaling its pid.
+	if readyFile, readyToken := os.Getenv("ENGRAM_RUN_READY_FILE"), os.Getenv("ENGRAM_RUN_READY_TOKEN"); readyFile != "" && readyToken != "" && !options.sessionOwned {
+		dataDir := cfg.DataDir
+		srv.SetDaemonToken(readyToken)
+		srv.SetOnReady(func(addr net.Addr) error {
+			return writeRunReadiness(dataDir, readyFile, readyToken, addr)
 		})
 	}
 	srv.SetSocketPath(options.socketPath)
@@ -3175,27 +3215,15 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			return
 		}
 
-		var sources []string
-		if answer == "all" || answer == "a" {
-			for _, sm := range similar {
-				sources = append(sources, sm.Name)
+		plan := planDetectedProjectConsolidation(canonical, similar, answer)
+		if len(plan.invalidSelections) > 0 {
+			fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", plan.invalidSelections[0], len(similar))
+			if dryRun {
+				exitFunc(1)
 			}
-		} else {
-			// Parse comma-separated indices
-			for _, part := range strings.Split(answer, ",") {
-				part = strings.TrimSpace(part)
-				idx := 0
-				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(similar) {
-					fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", part, len(similar))
-					if dryRun {
-						exitFunc(1)
-					}
-					return
-				}
-				sources = append(sources, similar[idx-1].Name)
-			}
+			return
 		}
-
+		sources := plan.sources
 		if len(sources) == 0 {
 			fmt.Println("Nothing selected.")
 			return
@@ -3276,8 +3304,6 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		scanInputLine(&answer)
 		answer = strings.TrimSpace(strings.ToLower(answer))
 
-		canonical := g.Canonical
-
 		if answer == "skip" || answer == "s" || answer == "n" || answer == "" {
 			fmt.Println("  Skipped.")
 			fmt.Println()
@@ -3301,31 +3327,11 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			renameTarget, _ = store.NormalizeProject(input)
 			answer = "all" // after rename, merge everything then migrate
 		}
-		mergeCanonical, _ := store.NormalizeProject(canonical)
-
-		// Determine which sources to merge
-		var sources []string
-		if answer == "all" || answer == "a" || answer == "y" || answer == "yes" {
-			for _, name := range g.Names {
-				if name != mergeCanonical {
-					sources = append(sources, name)
-				}
-			}
-		} else {
-			// Parse comma-separated indices
-			for _, part := range strings.Split(answer, ",") {
-				part = strings.TrimSpace(part)
-				idx := 0
-				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(g.Names) {
-					fmt.Fprintf(os.Stderr, "  Invalid selection: %q (expected 1-%d)\n", part, len(g.Names))
-					fmt.Println()
-					continue
-				}
-				selected := g.Names[idx-1]
-				if selected != mergeCanonical {
-					sources = append(sources, selected)
-				}
-			}
+		plan := planGroupedProjectConsolidation(g, answer, renameTarget)
+		mergeCanonical, sources := plan.canonical, plan.sources
+		for _, part := range plan.invalidSelections {
+			fmt.Fprintf(os.Stderr, "  Invalid selection: %q (expected 1-%d)\n", part, len(g.Names))
+			fmt.Println()
 		}
 		if len(sources) == 0 {
 			fmt.Println("  Nothing to merge.")
@@ -3348,15 +3354,15 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			reportUnmergedSources(sources, result)
 		}
 
-		if renameTarget != "" && renameTarget != mergeCanonical {
-			migrateResult, err := s.MigrateProject(mergeCanonical, renameTarget)
+		if plan.renameTarget != "" && plan.renameTarget != mergeCanonical {
+			migrateResult, err := s.MigrateProject(mergeCanonical, plan.renameTarget)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error renaming %q → %q: %v\n", mergeCanonical, renameTarget, err)
+				fmt.Fprintf(os.Stderr, "  Error renaming %q → %q: %v\n", mergeCanonical, plan.renameTarget, err)
 				fmt.Println()
 				continue
 			}
 			fmt.Printf("  Renamed %q → %q: %d obs, %d sessions, %d prompts\n",
-				mergeCanonical, renameTarget,
+				mergeCanonical, plan.renameTarget,
 				migrateResult.ObservationsUpdated, migrateResult.SessionsUpdated, migrateResult.PromptsUpdated)
 		}
 		fmt.Println()
@@ -3553,14 +3559,15 @@ func cmdSetup(cfg store.Config) {
 	args := os.Args[2:]
 
 	var (
-		helpSeen        bool
-		protocolRaw     string
-		protocolFlag    bool
-		mcpOnly         bool
-		slug            string
-		slugSeen        bool
-		extraBareSeen   bool
-		unknownFlagSeen bool
+		helpSeen          bool
+		protocolRaw       string
+		protocolFlag      bool
+		mcpOnly           bool
+		allowMemoryWrites bool
+		slug              string
+		slugSeen          bool
+		extraBareSeen     bool
+		unknownFlagSeen   bool
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -3584,6 +3591,8 @@ func cmdSetup(cfg store.Config) {
 		case strings.HasPrefix(token, "--protocol="):
 			protocolRaw = strings.TrimPrefix(token, "--protocol=")
 			protocolFlag = true
+		case token == "--allow-memory-writes":
+			allowMemoryWrites = true
 		case token == "--mcp-only":
 			mcpOnly = true
 		case strings.HasPrefix(token, "-"):
@@ -3604,6 +3613,9 @@ func cmdSetup(cfg store.Config) {
 	switch {
 	case helpSeen:
 		printSetupUsage()
+		return
+	case allowMemoryWrites && (!slugSeen || slug != "claude-code" || mcpOnly || extraBareSeen || unknownFlagSeen):
+		fatal(fmt.Errorf("--allow-memory-writes requires claude-code and cannot be combined with --mcp-only, unknown flags or extra arguments"))
 		return
 	case extraBareSeen:
 		fmt.Fprintln(os.Stderr, "usage: engram setup [<agent>] [--protocol=slim|full]")
@@ -3633,6 +3645,17 @@ func cmdSetup(cfg store.Config) {
 		result, err := setupInstallAgent(slug)
 		if err != nil {
 			fatal(err)
+			return
+		}
+		if allowMemoryWrites {
+			if !result.MCPConfigured {
+				fatal(fmt.Errorf("--allow-memory-writes requires successful Claude Code MCP registration; no permissions added"))
+				return
+			}
+			if err := setupAddClaudeCodeMemoryWriteAllowlist(); err != nil {
+				fatal(err)
+				return
+			}
 		}
 		if protocolFlag {
 			mode := resolveProtocolModeFlag(protocolRaw)
@@ -3641,7 +3664,7 @@ func cmdSetup(cfg store.Config) {
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
-		printPostInstall(result)
+		printPostInstallWithMemoryWrites(result, allowMemoryWrites)
 	default:
 		// No slug: interactive menu. Mode (if any) applies to whichever
 		// slug the user selects.
@@ -3714,6 +3737,11 @@ func printSetupUsage() {
 	fmt.Println("                          and only with a clean tagged engram release >= 1.4.0.")
 	fmt.Println("                          Claude Code slim also requires Engram plugin >= 0.1.1;")
 	fmt.Println("                          setup warns, but continues, when it cannot verify it.")
+	fmt.Println("  --allow-memory-writes  Claude Code only: explicitly allow the finite memory-write")
+	fmt.Println("                          tool set for both MCP prefixes, without reading stdin.")
+	fmt.Println("                          Bypasses prompts and auto-mode classification for these tools;")
+	fmt.Println("                          excludes mem_delete and mem_merge_projects. Session checks remain.")
+	fmt.Println("                          Cannot be combined with --mcp-only.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
@@ -3843,6 +3871,11 @@ func meetsProtocolVersionFloor(v string) bool {
 // printPostInstall prints the agent-specific next steps after a successful
 // setup run, including MCP registration status and allowlist prompts.
 func printPostInstall(result *setup.Result) {
+	printPostInstallWithMemoryWrites(result, false)
+}
+
+// memoryWritesAllowed means the explicit, bounded settings write already succeeded.
+func printPostInstallWithMemoryWrites(result *setup.Result, memoryWritesAllowed bool) {
 	switch result.Agent {
 	case "opencode":
 		fmt.Println("\nNext steps:")
@@ -3863,22 +3896,29 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  1. Restart Pi so packages and MCP config are reloaded")
 		fmt.Println("  2. Verify with: pi list")
 	case "claude-code":
-		// Offer to add engram tools to the permissions allowlist
-		fmt.Printf("\nAdd engram tools to %s allowlist?\n", setup.ClaudeCodeSettingsPath())
-		fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
-		fmt.Print("Add to allowlist? (y/N): ")
-		var answer string
-		scanInputLine(&answer)
-		answer = strings.TrimSpace(strings.ToLower(answer))
-		if answer == "y" || answer == "yes" {
-			if err := setupAddClaudeCodeAllowlist(); err != nil {
-				fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
-				fmt.Fprintf(os.Stderr, "  You can add them manually to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
-			} else {
-				fmt.Println("  ✓ Engram tools added to allowlist")
-			}
+		if memoryWritesAllowed {
+			fmt.Println("  Claude Code memory-write permissions added for both Engram MCP prefixes.")
+			fmt.Println("  These tools bypass permission prompts and the auto-mode classifier; session checks still apply.")
+			fmt.Println("  mem_delete and mem_merge_projects were not added; existing permissions remain unchanged.")
 		} else {
-			fmt.Printf("  Skipped. You can add them later to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
+			// Offer to add engram tools to the permissions allowlist
+			fmt.Printf("\nAdd engram tools to %s allowlist?\n", setup.ClaudeCodeSettingsPath())
+			fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
+			fmt.Print("Add to allowlist? (y/N): ")
+			var answer string
+			// EOF or unreadable input leaves the default decision as no consent.
+			_, _ = scanInputLine(&answer)
+			answer = strings.TrimSpace(strings.ToLower(answer))
+			if answer == "y" || answer == "yes" {
+				if err := setupAddClaudeCodeAllowlist(); err != nil {
+					fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
+					fmt.Fprintf(os.Stderr, "  You can add them manually to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
+				} else {
+					fmt.Println("  ✓ Engram tools added to allowlist")
+				}
+			} else {
+				fmt.Printf("  Skipped. You can add them later to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
+			}
 		}
 
 		fmt.Println("\nNext steps:")
@@ -3920,6 +3960,13 @@ Usage:
 Commands:
   serve [port]       Start HTTP API server (default: 7437)
   serve --session-owned  Private ephemeral HTTP server; requires ENGRAM_TOKEN, stops on stdin EOF
+  run [-d] [-p PORT]  Start the HTTP API daemon; -d detaches to the background, records
+                     the pidfile under the data dir and prints PID and port; without -d it
+                     serves in the foreground exactly like serve
+  ps                 Report daemon status: running (pid N) on port P / not running / unreachable
+  stop               Stop the daemon tracked by the pidfile (graceful stop, then force)
+  logs [-f]          Print the daemon log; -f follows it (Ctrl+C to exit)
+  restart [-p PORT]  Stop the daemon if running, then start it detached again
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
                         Profiles: agent (%d tools), admin (%d tools), all (default, %d)

@@ -119,7 +119,7 @@ func TestRemirrorProjectReplaysCurrentStateWithoutRewritingHistory(t *testing.T)
 	}
 }
 
-func TestBackfillSyncDeleteTombstonesReassertsUnknownRemoteFloorAfterAcknowledgement(t *testing.T) {
+func TestBackfillSyncDeleteTombstonesDoesNotReassertAfterAcknowledgement(t *testing.T) {
 	s := newTestStore(t)
 	const project = "reconcile-unknown-floor"
 	if err := s.EnrollProject(project); err != nil {
@@ -127,7 +127,7 @@ func TestBackfillSyncDeleteTombstonesReassertsUnknownRemoteFloorAfterAcknowledge
 	}
 	if _, err := s.db.Exec(`
 		INSERT INTO sync_delete_tombstones (entity, entity_key, project, active, last_mutation_seq)
-		VALUES (?, ?, ?, 1, 100)
+		VALUES (?, ?, ?, 1, 0)
 	`, SyncEntitySession, "reconcile-session", project); err != nil {
 		t.Fatalf("insert tombstone: %v", err)
 	}
@@ -166,14 +166,14 @@ func TestBackfillSyncDeleteTombstonesReassertsUnknownRemoteFloorAfterAcknowledge
 	if got := scalarInt(t, s, `
 		SELECT COUNT(*) FROM sync_mutations
 		WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ?
-	`, DefaultSyncTargetKey, SyncEntitySession, "reconcile-session", SyncOpDelete, SyncSourceLocal); got != 2 {
-		t.Fatalf("total reconciliation deletes after acknowledgement = %d, want 2", got)
+	`, DefaultSyncTargetKey, SyncEntitySession, "reconcile-session", SyncOpDelete, SyncSourceLocal); got != 1 {
+		t.Fatalf("total reconciliation deletes after acknowledgement = %d, want 1", got)
 	}
 	if got := scalarInt(t, s, `
 		SELECT COUNT(*) FROM sync_mutations
 		WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND acked_at IS NULL
-	`, DefaultSyncTargetKey, SyncEntitySession, "reconcile-session", SyncOpDelete, SyncSourceLocal); got != 1 {
-		t.Fatalf("pending reconciliation deletes after acknowledgement = %d, want 1", got)
+	`, DefaultSyncTargetKey, SyncEntitySession, "reconcile-session", SyncOpDelete, SyncSourceLocal); got != 0 {
+		t.Fatalf("pending reconciliation deletes after acknowledgement = %d, want 0", got)
 	}
 }
 

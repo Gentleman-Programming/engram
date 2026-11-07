@@ -1,12 +1,9 @@
 package main
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/sha512"
-	"debug/buildinfo"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -77,10 +74,6 @@ func readStagedArtifacts(ctx context.Context, filename string, want stagingExpec
 	if digest(data) != want.ZIPHash {
 		return fail("ZIP digest mismatch")
 	}
-	z, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return zero, err
-	}
 	expected := map[string]bool{"manifest.json": true, "npm-pack.json": true, "gentle-engram-" + want.PiVersion + ".tgz": true}
 	for _, system := range []string{"linux", "darwin", "windows"} {
 		for _, arch := range []string{"amd64", "arm64"} {
@@ -92,38 +85,9 @@ func readStagedArtifacts(ctx context.Context, filename string, want stagingExpec
 			expected[n+".buildinfo.txt"] = true
 		}
 	}
-	members := make(map[string][]byte)
-	var total uint64
-	for _, entry := range z.File {
-		if err := ctx.Err(); err != nil {
-			return zero, err
-		}
-		if !expected[entry.Name] || members[entry.Name] != nil || !entry.Mode().IsRegular() {
-			return fail("unexpected, duplicate or nonregular member")
-		}
-		total += entry.UncompressedSize64
-		if entry.UncompressedSize64 > 64<<20 || total > 512<<20 {
-			return fail("member size limit")
-		}
-		r, e := entry.Open()
-		if e != nil {
-			return zero, e
-		}
-		b, e := io.ReadAll(io.LimitReader(r, (64<<20)+1))
-		closeErr := r.Close()
-		if e != nil {
-			return zero, e
-		}
-		if closeErr != nil {
-			return zero, closeErr
-		}
-		if uint64(len(b)) != entry.UncompressedSize64 {
-			return fail("member size mismatch")
-		}
-		members[entry.Name] = b
-	}
-	if len(members) != len(expected) {
-		return fail("incomplete inventory")
+	members, err := readArtifactMembers(ctx, data, expected)
+	if err != nil {
+		return zero, err
 	}
 	var manifest struct {
 		WorkflowSHA    string `json:"workflow_sha"`
@@ -184,21 +148,8 @@ func readStagedArtifacts(ctx context.Context, filename string, want stagingExpec
 	if !ok {
 		return fail("unsupported host")
 	}
-	info, err := buildinfo.Read(bytes.NewReader(core))
-	if err != nil {
+	if err := validateArtifactCoreBuild(core, want.CandidateSHA); err != nil {
 		return zero, err
-	}
-	if info.Path != "github.com/Gentleman-Programming/engram/v3/cmd/engram" || info.Main.Path != "github.com/Gentleman-Programming/engram/v3" {
-		return fail("Core module identity mismatch")
-	}
-	settings := map[string]string{}
-	for _, s := range info.Settings {
-		settings[s.Key] = s.Value
-	}
-	for k, v := range map[string]string{"vcs": "git", "vcs.revision": want.CandidateSHA, "vcs.modified": "false", "GOOS": runtime.GOOS, "GOARCH": runtime.GOARCH, "CGO_ENABLED": "0"} {
-		if settings[k] != v {
-			return fail("Core build metadata mismatch: " + k)
-		}
 	}
 	if err := ctx.Err(); err != nil {
 		return zero, err

@@ -97,7 +97,7 @@ const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
 const (
-	piGentleEngramPackage             = "npm:gentle-engram@0.5.1"
+	piGentleEngramPackage             = "npm:gentle-engram@0.6.0"
 	piLegacyGentleEngramPackage       = "npm:gentle-engram@0.1.8"
 	piPreviousGentleEngramPackage     = "npm:gentle-engram@0.1.11"
 	piPriorGentleEngramPackage        = "npm:gentle-engram@0.1.12"
@@ -337,7 +337,7 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		var pkg string
 		if err := json.Unmarshal(raw, &pkg); err == nil {
 			switch pkg {
-			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage, piEarlierGentleEngramPackage, piPriorReleaseGentleEngramPackage, piLastReleaseGentleEngramPackage, "npm:gentle-engram@0.4.0", "npm:gentle-engram@0.4.1", "npm:gentle-engram@0.4.2", "npm:gentle-engram@0.5.0":
+			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage, piEarlierGentleEngramPackage, piPriorReleaseGentleEngramPackage, piLastReleaseGentleEngramPackage, "npm:gentle-engram@0.4.0", "npm:gentle-engram@0.4.1", "npm:gentle-engram@0.4.2", "npm:gentle-engram@0.5.0", "npm:gentle-engram@0.5.1":
 				changed = true
 				continue
 			case piGentleEngramPackage:
@@ -1228,6 +1228,22 @@ func ClaudeCodeSettingsPath() string {
 // permissions.allow so Claude Code doesn't prompt for confirmation on each call.
 // Idempotent: skips tools already present in the list.
 func AddClaudeCodeAllowlist() error {
+	return addClaudeCodePermissionTools(claudeCodeMCPTools)
+}
+
+// AddClaudeCodeMemoryWriteAllowlist is an explicit, finite permission opt-in.
+// Keep this list independent of profiles: new tools must not widen prior consent.
+func AddClaudeCodeMemoryWriteAllowlist() error {
+	tools := map[string]bool{
+		"mem_save": true, "mem_update": true, "mem_review": true,
+		"mem_save_prompt": true, "mem_pin": true, "mem_unpin": true,
+		"mem_session_summary": true, "mem_session_start": true, "mem_session_end": true,
+		"mem_capture_passive": true, "mem_judge": true, "mem_compare": true,
+	}
+	return addClaudeCodePermissionTools(claudeCodePermissionTools(tools))
+}
+
+func addClaudeCodePermissionTools(tools []string) error {
 	settingsPath := ClaudeCodeSettingsPath()
 
 	// Read existing settings (or start fresh)
@@ -1245,6 +1261,10 @@ func AddClaudeCodeAllowlist() error {
 		}
 	}
 
+	if config == nil {
+		return fmt.Errorf("parse settings: expected an object")
+	}
+
 	// Parse or create permissions block
 	var permissions map[string]json.RawMessage
 	if raw, exists := config["permissions"]; exists {
@@ -1253,6 +1273,10 @@ func AddClaudeCodeAllowlist() error {
 		}
 	} else {
 		permissions = make(map[string]json.RawMessage)
+	}
+
+	if permissions == nil {
+		return fmt.Errorf("parse permissions: expected an object")
 	}
 
 	// Parse or create allow list
@@ -1271,7 +1295,7 @@ func AddClaudeCodeAllowlist() error {
 
 	// Add only missing tools
 	added := 0
-	for _, tool := range claudeCodeMCPTools {
+	for _, tool := range tools {
 		if !existing[tool] {
 			allowList = append(allowList, tool)
 			added++

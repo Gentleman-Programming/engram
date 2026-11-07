@@ -23,9 +23,159 @@ function race(text) {
     assert.ok(body.split('\n').some(value => value.trim() === line), line);
   }
   assert.match(body, /permissions:\n      contents: read\n    env:/);
-  assert.doesNotMatch(body, /continue-on-error|needs:|\n\s+if:|\|\| true| -run | -short| -skip|secrets\.|: write|environment:/);
+  // Only the cache writer may be conditional; checkout, preparation and tests never are.
+  const save = raceSteps(body).filter(step => /uses: actions\/cache\/save@/.test(step));
+  if (save.length) raceWriter(text);
+  const guard = save.length === 1 ? save[0].match(/^        if: \$\{\{ .+ \}\}\n/m)?.[0] : undefined;
+  const unconditional = guard ? body.replace(save[0], () => save[0].replace(guard, '')) : body;
+  assert.doesNotMatch(unconditional, /continue-on-error|needs:|\n\s+if:|\|\| true| -run | -short| -skip|secrets\.|: write|environment:/);
   for (const action of body.matchAll(/uses: (.+)/g)) assert.match(action[1], /@[a-f0-9]{40} # v\d+$/);
 }
+
+// This is deliberately the Race step layout, not a general YAML parser.
+const raceSteps = body => body.match(/^      - name: .*\n[\s\S]*?(?=^      - name: |$(?![\s\S]))/gm) ?? [];
+const cachePin = '55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
+function cacheSteps(text) {
+  const steps = raceSteps(job(text, 'race-tests'));
+  const select = action => {
+    const found = steps.filter(step => step.includes(`uses: actions/${action}@`));
+    assert.equal(found.length, 1, `single ${action} owner`);
+    return found[0];
+  };
+  return { steps, restore: select('cache/restore'), save: select('cache/save') };
+}
+function raceOwner(text) {
+  const body = job(text, 'race-tests');
+  const { steps, restore, save } = cacheSteps(text);
+  assert.equal((body.match(/uses: actions\/cache\//g) ?? []).length, 2);
+  assert.doesNotMatch(body, /uses: actions\/cache@|enableCrossOsArchive: true|cache-mode:|(?:lookup-only|fail-on-cache-miss): true/);
+  assert.match(steps.find(s => s.includes('uses: actions/setup-go@')) ?? '', /go-version: "1\.26\.10"\n          cache: false\n/);
+  for (const step of [restore, save]) {
+    assert.match(step, /path: \|\n            \$\{\{ steps\.race-cache\.outputs\.gomodcache \}\}\n            \$\{\{ steps\.race-cache\.outputs\.gocache \}\}/);
+    assert.match(step, /key: \$\{\{ steps\.race-cache\.outputs\.key \}\}/);
+    assert.doesNotMatch(step, /cache-primary-key|retry|continue-on-error/);
+  }
+  assert.match(restore, /id: race-cache-restore\n/);
+  assert.match(restore, /restore-keys: \$\{\{ steps\.race-cache\.outputs\.prefix \}\}\n/);
+  assert.doesNotMatch(save, /restore-keys:/);
+  const prepare = steps.find(s => s.includes('id: race-cache\n'));
+  assert.ok(prepare, 'precomputed cache inputs');
+  assert.ok(steps.indexOf(prepare) < steps.indexOf(restore));
+  assert.ok(body.indexOf(restore) < body.indexOf('run: /usr/bin/time -p go test -race'));
+  assert.ok(body.indexOf(save) > body.indexOf('run: /usr/bin/time -p go test -race'));
+}
+function raceIdentity(text) {
+  const { steps, restore, save } = cacheSteps(text);
+  for (const [step, action] of [[restore, 'restore'], [save, 'save']]) {
+    assert.ok(step.includes(`uses: actions/cache/${action}@${cachePin} # v6\n`), 'verified immutable v6.1.0 pin');
+  }
+  const prepare = steps.find(s => s.includes('id: race-cache\n')) ?? '';
+  // Identity must bind actual toolchain/compiler inputs, not just the label "gcc".
+  for (const input of ['runner.os', 'runner.arch', 'ImageOS', 'ImageVersion',
+    'go env GOVERSION', 'go env GOOS', 'go env GOARCH', 'go env CGO_ENABLED',
+    "hashFiles('go.mod', 'go.sum')", 'command -v', 'readlink -f', 'sha256sum',
+    '-dumpfullversion', '-dumpmachine', '--version', 'go env GOMODCACHE', 'go env GOCACHE',
+    'GITHUB_OUTPUT', 'github.sha', 'race']) assert.ok(prepare.includes(input), `cache identity: ${input}`);
+  assert.match(prepare, /set -euo pipefail/);
+  assert.match(prepare, /\[\[.*\/\*.*\]\]/, 'absolute cache paths validated');
+  assert.match(prepare, /\[\[.*[\\]r.*[\\]n.*\]\]/, 'scalar outputs reject record injection');
+  for (const field of ['gomodcache', 'gocache', 'prefix', 'key']) {
+    assert.ok(prepare.includes(`${field}=%s\\n`), `fixed output record ${field}`);
+  }
+  assert.match(prepare, /prefix=.*(?:compat|identity)/, 'complete compatibility prefix');
+  assert.match(prepare, /key=.*\$\{?prefix\}?.*\$\{?[^\n]*(?:sha|revision)/, 'primary extends same prefix with tested revision');
+  assert.equal((restore.match(/restore-keys:/g) ?? []).length, 1);
+  assert.doesNotMatch(restore, /restore-keys: \|/, 'no additional broad fallback');
+}
+function raceWriter(text) {
+  const { save } = cacheSteps(text);
+  const expression = save.match(/^        if: \$\{\{ (.+) \}\}$/m)?.[1];
+  // Evaluate the declared predicate, constrained to the approved fixed expression.
+  // No disconnected duplicate implementation or arbitrary workflow evaluation.
+  const expected = "success() && github.repository == 'Gentleman-Programming/engram' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.race-cache-restore.outputs.cache-hit != 'true'";
+  assert.equal(expression, expected, 'only trusted successful main misses may save');
+  const executable = expression.replaceAll('steps.race-cache-restore.outputs.cache-hit', 'hit');
+  const evaluate = new Function('success', 'github', 'hit', `return (${executable});`);
+  for (const event_name of ['pull_request', 'merge_group', 'push']) {
+    for (const repository of ['Gentleman-Programming/engram', 'fork/engram']) {
+      for (const ref of ['refs/heads/main', 'refs/heads/feature', 'refs/pull/1/merge']) {
+        for (const outcome of ['success', 'failure', 'cancelled']) {
+          for (const hit of ['true', 'false', '', undefined]) {
+            const allowed = event_name === 'push' && repository === 'Gentleman-Programming/engram'
+              && ref === 'refs/heads/main' && outcome === 'success' && hit !== 'true';
+            assert.equal(evaluate(() => outcome === 'success', { event_name, repository, ref }, hit), allowed,
+              JSON.stringify({ event_name, repository, ref, outcome, hit }));
+          }
+        }
+      }
+    }
+  }
+}
+for (const [name, check] of Object.entries({ raceOwner, raceIdentity, raceWriter })) {
+  test(`${name} explicit Race cache contract (#2192)`, () => check(source));
+}
+test('Race checkout, prerequisites and full suite remain unconditional with cache (#2192)', () => {
+  raceOwner(source);
+  race(source);
+  const original = job(source, 'race-tests');
+  for (const step of raceSteps(original).filter(s => !s.includes('uses: actions/cache/save@'))) {
+    const changed = step.replace(/^(      - name: .*\n)/, '$1        if: false\n');
+    assert.throws(() => race(source.replace(original, () => original.replace(step, () => changed))), undefined, step.split('\n')[0]);
+  }
+});
+test('Race save guard cannot hide forbidden step policies (#2192)', () => {
+  race(source);
+  const original = job(source, 'race-tests');
+  const { save } = cacheSteps(source);
+  for (const inserted of ['env: ${{ secrets.ESCAPE }}', 'permissions: write',
+    'environment: escape', 'if: false', 'continue-on-error: true']) {
+    const changed = save.replace(/^(      - name: .*\n)/, `$1        ${inserted}\n`);
+    assert.throws(() => race(source.replace(original, () => original.replace(save, () => changed))), undefined, inserted);
+  }
+});
+test('Race cache rejects isolated owner, identity, fallback and writer regressions (#2192)', () => {
+  raceOwner(source); raceIdentity(source); raceWriter(source);
+  const original = job(source, 'race-tests');
+  const { restore } = cacheSteps(source);
+  for (const option of ['lookup-only', 'fail-on-cache-miss']) {
+    const withOption = value => restore.replace('        with:\n', () => `        with:\n          ${option}: ${value}\n`);
+    const changed = source.replace(original, () => original.replace(restore, () => withOption('false')));
+    // Bash ANSI-C quoting ($') and positional parameters are literal source, not JS replacement tokens.
+    assert.equal(changed.replace(withOption('false'), () => restore), source, 'only the intended restore option changes');
+    assert.equal(job(changed, 'race-tests').replace(withOption('false'), () => restore), original);
+    raceOwner(changed);
+    assert.throws(() => raceOwner(source.replace(original, () => original.replace(restore, () => withOption('true')))), undefined, option);
+  }
+  for (const [before, after, check] of [
+    ['cache: false', 'cache: true', raceOwner],
+    [cachePin, 'v6', raceIdentity],
+    ["hashFiles('go.mod', 'go.sum')", "hashFiles('go.mod')", raceIdentity],
+    ['-dumpmachine', '-dumpversion', raceIdentity],
+    ['ImageVersion', 'IgnoredImage', raceIdentity],
+    ['ImageOS', 'IgnoredOS', raceIdentity],
+    ['runner.arch', 'runner.name', raceIdentity],
+    ['go env GOVERSION', 'go version', raceIdentity],
+    ['go env CGO_ENABLED', 'echo 1', raceIdentity],
+    ['github.sha', 'github.ref', raceIdentity],
+    ['readlink -f', 'echo', raceIdentity],
+    ['sha256sum', 'echo', raceIdentity],
+    ['-dumpfullversion', '-dumpversion', raceIdentity],
+    ['outputs.gocache', 'outputs.gomodcache', raceOwner],
+    ['outputs.prefix', 'outputs.legacy', raceOwner],
+    ['outputs.key', 'outputs.cache-primary-key', raceOwner],
+    ["success() &&", '', raceWriter],
+    ["github.repository == 'Gentleman-Programming/engram' && ", '', raceWriter],
+    ["github.event_name == 'push' && ", '', raceWriter],
+    ["github.ref == 'refs/heads/main' && ", '', raceWriter],
+    [" != 'true'", " == 'true'", raceWriter],
+  ]) {
+    const target = check === raceIdentity && before !== cachePin
+      ? raceSteps(original).find(step => step.includes('id: race-cache\n')) : original;
+    assert.ok(target?.includes(before), `Race mutation target: ${before}`);
+    const changed = original.replace(target, () => target.replace(before, () => after));
+    assert.throws(() => check(source.replace(original, () => changed)), undefined, before);
+  }
+});
 
 function verification(text) {
   assert.match(text, /on:\n  pull_request:\n  merge_group:\n    types: \[checks_requested\]\n  push:\n    branches:\n      - main\n/);
@@ -139,8 +289,10 @@ for (const [category, cases] of Object.entries(mutations)) {
   const check = { race, verification, concurrency }[category];
   test(`${category} rejects isolated workflow regressions`, () => {
     for (const [before, after] of cases) {
-      assert.ok(source.includes(before), `fixture target: ${before}`);
-      assert.throws(() => check(source.replace(before, after)), undefined, `${before} -> ${after}`);
+      const target = category === 'race' ? job(source, 'race-tests') : source;
+      assert.ok(target.includes(before), `fixture target: ${before}`);
+      const changed = target.replace(before, () => after);
+      assert.throws(() => check(category === 'race' ? source.replace(target, () => changed) : changed), undefined, `${before} -> ${after}`);
     }
   });
 }
@@ -149,11 +301,11 @@ test('verification rejects missing setup and reordered preflight/build stages', 
   const setup = '      - name: Set up Go\n        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6\n        with:\n          go-version: "1.26.10"\n';
   const unit = job(source, 'unit-tests');
   assert.ok(unit.includes(setup));
-  assert.throws(() => verification(source.replace(unit, unit.replace(setup, ''))));
+  assert.throws(() => verification(source.replace(unit, () => unit.replace(setup, ''))));
   for (const [first, second] of [['go mod tidy -diff', 'make templ'], ['make templ', 'make deadcode-check'],
     ['make deadcode-check', 'go test ./...'], ['go test ./...', 'go build -o engram-selftest ./cmd/engram && ./engram-selftest test --quick']]) {
-    const changed = unit.replace(first, '__SWAP__').replace(second, first).replace('__SWAP__', second);
-    assert.throws(() => verification(source.replace(unit, changed)), undefined, `${first} before ${second}`);
+    const changed = unit.replace(first, '__SWAP__').replace(second, () => first).replace('__SWAP__', () => second);
+    assert.throws(() => verification(source.replace(unit, () => changed)), undefined, `${first} before ${second}`);
   }
 });
 
@@ -193,14 +345,15 @@ test('native macOS rejects scope, prerequisites, budget and failure regressions'
     ['if: ${{ !cancelled() }}', 'if: success()'], ['persist-credentials: false', 'persist-credentials: true'],
   ]) {
     assert.ok(original.includes(before), before);
-    assert.throws(() => macos(source.replace(original, original.replace(before, after))), undefined, before);
+    assert.throws(() => macos(source.replace(original, () => original.replace(before, () => after))), undefined, before);
   }
-  assert.throws(() => macos(source.replace(original, original.replace('    steps:', '    continue-on-error: true\n    steps:'))));
+  assert.throws(() => macos(source.replace(original, () => original.replace('    steps:', '    continue-on-error: true\n    steps:'))));
 });
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 function summarize(events, raw, outcome = 'success') {
@@ -236,6 +389,8 @@ function adapters(text) {
     'npm ci --ignore-scripts --legacy-peer-deps', 'go mod download',
     'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-server" ./plugin/pi/test/support/real-server',
     'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
+    'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary',
+    'export ENGRAM_PI_TEST_PATH_BINARY="$RUNNER_TEMP/pi-test-path"',
     piScript.replace('node --test ', 'node --test --test-reporter=tap ') + ' | tee "$RUNNER_TEMP/pi.tap"',
     'node --test --test-reporter=tap plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs | tee "$RUNNER_TEMP/opencode.tap"',
     'PI_OUTCOME: ${{ steps.pi.outcome }}', 'OPENCODE_OUTCOME: ${{ steps.opencode.outcome }}',
@@ -257,19 +412,23 @@ test('native adapter contract rejects weakened placement, prerequisites and exit
     'Darwin arm64', 'go1.26.10', 'darwin/arm64', 'state=$(cd "$state" && pwd -P)',
     'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
     'npm ci --ignore-scripts --legacy-peer-deps', 'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
+    'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary',
+    'export ENGRAM_PI_TEST_PATH_BINARY="$RUNNER_TEMP/pi-test-path"',
     '--test-concurrency=1', 'plugin/opencode/engram.v2.real-server.test.mjs', 'if: ${{ !cancelled() }}']) {
     assert.ok(original.includes(before), before);
-    assert.throws(() => adapters(source.replace(original, original.replace(before, '__REMOVED__'))), undefined, before);
+    assert.throws(() => adapters(source.replace(original, () => original.replace(before, '__REMOVED__'))), undefined, before);
   }
   for (const inserted of ['continue-on-error: true', 'needs: plugin-tests', 'permissions:\n      contents: write']) {
-    assert.throws(() => adapters(source.replace(original, original.replace('    steps:', '    ' + inserted + '\n    steps:'))));
+    assert.throws(() => adapters(source.replace(original, () => original.replace('    steps:', () => '    ' + inserted + '\n    steps:'))));
   }
 });
 
 
-for (const suite of ['Pi', 'OpenCode']) {
-  test(`native ${suite} reporter stays out of child fixtures and preserves failures`, () => {
-    const script = job(source, 'macos-adapter-tests').match(new RegExp(
+for (const platform of ['macos', 'windows']) for (const suite of ['Pi', 'OpenCode']) {
+  test(`native ${platform} ${suite} reporter stays out of child fixtures and preserves failures`, {
+    skip: platform === 'windows' && process.platform !== 'win32' && 'requires native Windows PowerShell',
+  }, () => {
+    const script = job(source, `${platform}-adapter-tests`).match(new RegExp(
       `      - name: Run ${suite} adapters\\n[\\s\\S]*?        run: \\|\\n([\\s\\S]*?)(?=      - name:)`))[1].replace(/^          /gm, '');
     const dir = mkdtempSync(join(tmpdir(), 'adapter-reporter-'));
     try {
@@ -287,7 +446,8 @@ for (const suite of ['Pi', 'OpenCode']) {
       const env = { ...process.env, RUNNER_TEMP: dir.replaceAll('\\', '/'), HOME: dir, NODE_OPTIONS: '--max-old-space-size=128' };
       delete env.NODE_TEST_CONTEXT;
       for (const fail of [false, true]) {
-        const result = spawnSync('bash', ['-c', script], { cwd: dir, encoding: 'utf8',
+        const result = spawnSync(platform === 'windows' ? 'pwsh' : 'bash',
+          platform === 'windows' ? ['-NoProfile', '-NonInteractive', '-Command', script] : ['-c', script], { cwd: dir, encoding: 'utf8',
           env: { ...env, ...(fail ? { ADAPTER_PROBE_FAIL: '1' } : {}) } });
         assert.equal(result.status, fail ? 1 : 0, result.stdout + result.stderr);
         assert.equal(result.stderr, '');
@@ -301,9 +461,121 @@ for (const suite of ['Pi', 'OpenCode']) {
   });
 }
 
-const piRequired = ['Pi native saves persist under separate host sessions and stop on failed registration',
-  'existing CLI verifies real Pi registration without writing',
-  'packaged real workflows run all eight tests with the prebuilt fixture binary'];
+
+function windowsAdapters(text) {
+  const body = job(text, 'windows-adapter-tests');
+  for (const value of ['name: Native Windows x64 Adapter Tests', 'runs-on: windows-2022',
+    'timeout-minutes: 20', 'shell: pwsh', 'GOTOOLCHAIN: local', 'go-version-file: go.mod',
+    'node-version: "24"', 'architecture: x64', 'ref: ${{ github.sha }}', 'persist-credentials: false',
+    "'windows/amd64'", "'go1.26.10'", "'X64'", 'process.platform !== "win32"', 'process.arch !== "x64"',
+    'process.versions.node.split(".")[0] !== "24"', 'node_modules/typebox/package.json',
+    'docs/contracts/agent-contract-v1.json', 'GOMODCACHE', 'GOCACHE', "USERPROFILE = 'home'",
+    "APPDATA = 'appdata'", "LOCALAPPDATA = 'localappdata'", "TEMP = 'tmp'", "TMP = 'tmp'",
+    'npm ci --ignore-scripts --legacy-peer-deps', 'go mod download', 'pi-test-server.exe',
+    'go build -mod=readonly', '$env:ENGRAM_PI_TEST_SERVER_BINARY',
+    'pi-test-path.exe', './plugin/pi/test/support/runtime-path-binary',
+    '$env:ENGRAM_PI_TEST_PATH_BINARY',
+    'node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs',
+    'node --test --test-reporter=tap plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs',
+    'node .github/scripts/adapter-ci-evidence.mjs windows', 'PI_OUTCOME: ${{ steps.pi.outcome }}',
+    'OPENCODE_OUTCOME: ${{ steps.opencode.outcome }}', 'if: ${{ !cancelled() }}',
+    '$LASTEXITCODE', 'Tee-Object', 'Remove-Item "Env:$($_.Name)"']) assert.ok(body.includes(value), value);
+  assert.match(body, /permissions:\n      contents: read\n/);
+  assert.match(body, /name: Build existing Pi fixture\n        timeout-minutes: 2/);
+  for (const name of ['Pi', 'OpenCode']) assert.match(body, new RegExp(`name: Run ${name} adapters\\n        id: \\w+\\n        timeout-minutes: 5`));
+  assert.doesNotMatch(body, /continue-on-error|needs:|services:|: write|secrets\.|bash| -skip| -short|NODE_OPTIONS=|npm install/);
+  for (const action of body.matchAll(/uses: (.+)/g)) assert.match(action[1], /@[a-f0-9]{40} # v\d+$/);
+}
+test('Windows adapter lane preserves native tools, profile isolation, selection and ceilings', () => windowsAdapters(source));
+test('Windows adapter lane rejects prerequisite, budget and failure masking regressions', () => {
+  const original = job(source, 'windows-adapter-tests');
+  for (const before of ['runs-on: windows-2022', 'timeout-minutes: 20', 'timeout-minutes: 2',
+    'timeout-minutes: 5', 'shell: pwsh', 'windows/amd64', 'go1.26.10', 'X64',
+    'go-version-file: go.mod', 'node-version: "24"', 'USERPROFILE', 'APPDATA', 'GOCACHE',
+    'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
+    'npm ci --ignore-scripts --legacy-peer-deps', '--test-concurrency=1', '$LASTEXITCODE',
+    'pi-test-path.exe', './plugin/pi/test/support/runtime-path-binary',
+    '$env:ENGRAM_PI_TEST_PATH_BINARY',
+    'plugin/opencode/engram.v2.real-server.test.mjs', 'if: ${{ !cancelled() }}']) {
+    assert.ok(original.includes(before), before);
+    assert.throws(() => windowsAdapters(source.replace(original, original.replaceAll(before, '__REMOVED__'))), undefined, before);
+  }
+  assert.throws(() => windowsAdapters(source.replace(original, original.replace('    steps:', '    continue-on-error: true\n    steps:'))));
+});
+test('Windows profile isolation preserves caches and creates only private directories', {
+  skip: process.platform !== 'win32' && 'requires native Windows PowerShell',
+}, () => {
+  const block = job(source, 'windows-adapter-tests').match(/name: Verify native prerequisites and isolate profile\n        run: \|\n([\s\S]*?)(?=      - name:)/)[1];
+  const normalized = block.replace(/^          /gm, '');
+  const script = normalized.slice(normalized.indexOf('$state ='));
+  const dir = mkdtempSync(join(tmpdir(), 'adapter profile café '));
+  try {
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+      "$ErrorActionPreference = 'Stop'; $go = @{ GOMODCACHE = 'original modules'; GOCACHE = 'original cache' };\n" + script],
+    { encoding: 'utf8', env: { ...process.env, RUNNER_TEMP: dir, GITHUB_ENV: join(dir, 'env') } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.match(result.stdout, /Private adapter root=/);
+    const entries = Object.fromEntries(readFileSync(join(dir, 'env'), 'utf8').trim().split(/\r?\n/).map(line => line.split(/=(.*)/, 2)));
+    assert.equal(entries.GOMODCACHE, 'original modules');
+    assert.equal(entries.GOCACHE, 'original cache');
+    const keys = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'ENGRAM_DATA_DIR'];
+    assert.equal(Object.keys(entries).length, keys.length + 2);
+    for (const key of keys) assert.ok(entries[key].startsWith(dir) && existsSync(entries[key]), key);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('Windows preflight rejects cross-target Go before creating profile state', {
+  skip: process.platform !== 'win32' && 'requires native Windows PowerShell',
+}, () => {
+  const block = job(source, 'windows-adapter-tests').match(/name: Verify native prerequisites and isolate profile\n        run: \|\n([\s\S]*?)(?=      - name:)/)[1].replace(/^          /gm, '');
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-preflight-'));
+  try {
+    for (const arch of ['amd64', 'arm64']) {
+      const metadata = JSON.stringify({ GOVERSION: 'go1.26.10', GOOS: 'windows', GOARCH: arch,
+        GOHOSTOS: 'windows', GOHOSTARCH: 'amd64', GOMODCACHE: 'original modules', GOCACHE: 'original cache' });
+      const fakeGo = `function go { '${metadata}'; $global:LASTEXITCODE = 0 };\n`;
+      const envFile = join(dir, arch);
+      const before = readdirSync(dir);
+      const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', fakeGo + block],
+        { encoding: 'utf8', env: { ...process.env, RUNNER_TEMP: dir, GITHUB_ENV: envFile } });
+      assert.equal(result.status, arch === 'amd64' ? 0 : 1, result.stderr);
+      assert.equal(existsSync(envFile), arch === 'amd64', 'rejected toolchain writes no profile environment');
+      if (arch === 'amd64') assert.equal(result.stderr, '');
+      else {
+        assert.match(result.stderr, /Native repository Go required/);
+        assert.deepEqual(readdirSync(dir), before, 'rejected toolchain leaves temporary state unchanged');
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('shared reporter rejects missing or unknown platform selectors before writing evidence', () => {
+  for (const arg of [[], ['linux'], ['constructor']]) {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('./adapter-ci-evidence.mjs', import.meta.url)), ...arg], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /Usage: node adapter-ci-evidence.mjs <macos\|windows>/);
+  }
+});
+test('shared reporter selects Windows labels without changing evidence or exclusions', () => {
+  const result = adapterSummary(undefined, undefined, 'success', 'windows');
+  assert.equal(result.status, 0);
+  assert.equal(result.report.scope, 'Windows x64 Pi/OpenCode source adapters');
+  assert.equal(result.report.coverage, 'complete-with-listed-exclusions');
+  assert.deepEqual(result.report.suites.pi.skips, [{ name: host, reason: hostReason }]);
+  assert.equal(adapterSummary(undefined, undefined, 'failure', 'windows').status, 1);
+});
+
+// Read the inline required.pi list the reporter enforces instead of keeping a copy that can drift.
+function requiredPiNames() {
+  const source = readFileSync(new URL('./adapter-ci-evidence.mjs', import.meta.url), 'utf8');
+  const block = source.match(/^ {2}pi: \[([\s\S]*?)\],$/m);
+  assert.ok(block, 'adapter-ci-evidence.mjs must keep its inline required.pi name list; the reporter shape changed');
+  const names = [...block[1].matchAll(/'([^']+)'/g)].map(([, name]) => name);
+  assert.ok(names.length > 0 && new Set(names).size === names.length,
+    'adapter-ci-evidence.mjs required.pi names must stay non-empty and unique');
+  return names;
+}
+const piRequired = requiredPiNames();
 const ocRequired = ['V2 inbox prompts stay idempotent and deleted across real server restarts'];
 const host = 'actual Pi hosts retain attribution through compaction, resume and refusal';
 const hostReason = 'opt-in: set ENGRAM_PI_LIFECYCLE_CLI to the installed Pi CLI entry point';
@@ -312,18 +584,17 @@ function tap(names, skipped = []) {
   return 'TAP version 13\n' + all.map(([name, reason], i) => `ok ${i + 1} - ${name}${reason ? ' # SKIP ' + reason : ''}\n`).join('')
     + `1..${all.length}\n# tests ${all.length}\n# suites 0\n# pass ${names.length}\n# fail 0\n# cancelled 0\n# skipped ${skipped.length}\n# todo 0\n# duration_ms 1\n`;
 }
-function adapterSummary(pi = tap(piRequired, [[host, hostReason]]), oc = tap(ocRequired), outcome = 'success') {
-  const match = job(source, 'macos-adapter-tests').match(/node <<'NODE'\n([\s\S]*?)\n          NODE/);
-  assert.ok(match, 'inline adapter summary');
+function adapterSummary(pi = tap(piRequired, [[host, hostReason]]), oc = tap(ocRequired), outcome = 'success', platform = 'macos') {
+  assert.ok(job(source, `${platform}-adapter-tests`).includes(`node .github/scripts/adapter-ci-evidence.mjs ${platform}`));
   const dir = mkdtempSync(join(tmpdir(), 'adapter-summary-'));
   try {
     if (pi !== null) writeFileSync(join(dir, 'pi.tap'), pi);
     writeFileSync(join(dir, 'opencode.tap'), oc);
-    const result = spawnSync(process.execPath, ['-'], { input: match[1].replace(/^          /gm, ''), encoding: 'utf8',
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('./adapter-ci-evidence.mjs', import.meta.url)), platform], { encoding: 'utf8',
       env: { ...process.env, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: join(dir, 'summary'), PI_OUTCOME: outcome, OPENCODE_OUTCOME: outcome } });
     const report = JSON.parse(result.stdout);
     assert.equal(result.stderr, '');
-    assert.equal(readFileSync(join(dir, 'summary'), 'utf8'), '## Native macOS adapters\n\n```json\n' + result.stdout.trim() + '\n```\n');
+    assert.equal(readFileSync(join(dir, 'summary'), 'utf8'), `## Native ${platform === 'macos' ? 'macOS' : 'Windows'} adapters\n\n\`\`\`json\n` + result.stdout.trim() + '\n```\n');
     return { ...result, report };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
@@ -335,6 +606,20 @@ test('adapter evidence preserves counts, repeated parameterized names and instal
   assert.deepEqual(result.report.suites.pi.skips, [{ name: host, reason: hostReason }]);
   assert.deepEqual(result.report.suites.pi.counts, { tests: 4, suites: 0, pass: 3, fail: 0, cancelled: 0, skipped: 1, todo: 0 });
   assert.deepEqual(result.report.suites.opencode.counts, { tests: 3, suites: 0, pass: 3, fail: 0, cancelled: 0, skipped: 0, todo: 0 });
+});
+
+test('adapter evidence required names follow the packaged workflow the Pi suite declares', () => {
+  const suite = readFileSync(new URL('../../plugin/pi/test/real-workflows-package.test.mjs', import.meta.url), 'utf8');
+  const declared = suite.match(/test\("(packaged real workflows run all [^"]+ with the prebuilt fixture binary)"/);
+  assert.ok(declared?.[1], 'plugin/pi/test/real-workflows-package.test.mjs must declare '
+    + '"packaged real workflows run all <N> tests with the prebuilt fixture binary"; the packaged case was renamed');
+  const packaged = piRequired.filter(name => name.startsWith('packaged real workflows run all '));
+  assert.deepEqual(packaged, [declared[1]],
+    'adapter-ci-evidence.mjs required.pi must enforce the packaged case the Pi suite declares');
+  const result = adapterSummary(tap(piRequired));
+  assert.equal(result.status, 0, result.stdout);
+  const unenforced = piRequired.map(name => name === declared[1] ? declared[1].replace('run all ', 'run all rewritten ') : name);
+  assert.equal(adapterSummary(tap(unenforced)).status, 1, 'a packaged name the reporter does not enforce must not qualify execution');
 });
 test('adapter evidence consumes actual Node24 TAP including nested tests', () => {
   const dir = mkdtempSync(join(tmpdir(), 'adapter-tap-'));
@@ -470,6 +755,18 @@ test('native isolation resolves the real temporary root before deriving fixture 
   };
   check(source);
   assert.throws(() => check(source.replace('state=$(cd "$state" && pwd -P)', 'state="$state"')));
+});
+
+test('native summary classifies only the Windows published-Core execution exclusion', () => {
+  const reason = 'published observation supports Windows amd64 only\n';
+  for (const name of ['TestPublishedCoreAdmission', 'TestPublishedCoreContextMutation', 'TestUnexpectedSkip']) {
+    for (const pkg of ['tools/release-candidate', 'internal/store']) {
+      const events = [...passed, ...[event('output', name, reason), event('skip', name)]
+        .map(e => ({ ...e, Package: `github.com/Gentleman-Programming/engram/v3/${pkg}` }))];
+      const result = summarize(events);
+      assert.equal(result.status, pkg === 'tools/release-candidate' && name === 'TestPublishedCoreContextMutation' ? 0 : 1, result.stdout);
+    }
+  }
 });
 
 for (const [reason, classification] of [

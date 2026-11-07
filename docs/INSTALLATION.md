@@ -7,6 +7,7 @@
 - [Windows](#windows)
 - [Install from source (macOS / Linux)](#install-from-source-macos--linux)
 - [Download binary (all platforms)](#download-binary-all-platforms)
+- [After upgrading](#after-upgrading)
 - [Requirements](#requirements)
 - [Data-directory filesystem safety](#data-directory-filesystem-safety)
 - [Environment Variables](#environment-variables)
@@ -37,7 +38,7 @@ brew update && brew upgrade engram
 > brew uninstall --cask engram 2>/dev/null; brew install gentleman-programming/tap/engram
 > ```
 
-> **Keep `engram serve` running across `brew upgrade`?** On macOS, `brew upgrade engram` replaces the binary and kills any running `engram serve` process — autosync stops silently until you relaunch it. To make autosync survive upgrades and reboots, use the launchd template in [Running as a Service → Using launchd (macOS)](../DOCS.md#using-launchd-macos). Run `engram cloud status` afterwards: the `Local daemon:` line should report `running`.
+> **Upgrading a running server?** Replacing the binary does not guarantee that an existing `engram serve` process exits or restarts. Follow [After upgrading](#after-upgrading) to restart it and verify the running version. For supervised startup on macOS, see [Using launchd](../DOCS.md#using-launchd-macos).
 
 ---
 
@@ -232,6 +233,55 @@ Grab the latest release for your platform from [GitHub Releases](https://github.
 | Linux (ARM64) | `engram_<version>_linux_arm64.tar.gz` |
 | Windows (x86_64) | `engram_<version>_windows_amd64.zip` |
 | Windows (ARM64) | `engram_<version>_windows_arm64.zip` |
+
+---
+
+## After upgrading
+
+These steps apply to Homebrew, source installs, and downloaded binaries. Keep the
+backup and compatibility checks in the [release policy](./RELEASE-POLICY.md#upgrade-deliberately).
+
+1. Confirm that your supervisor or launcher points to the updated executable.
+   `engram version` reports the executable selected by your shell; a service may
+   use a different absolute path.
+2. Restart any already-running `engram serve` HTTP server through the supervisor or launcher
+   that owns it, keeping the same service account and data-directory configuration.
+   Use your configured [systemd service](../DOCS.md#using-systemd-linux),
+   [launchd agent](../DOCS.md#using-launchd-macos), or
+   [Windows scheduled task](../DOCS.md#using-windows-task-scheduler). For a manually
+   started foreground `engram serve`, stop that process and start the updated
+   executable with the same arguments and environment. Replacing a binary alone
+   does not make an older process serve the new code. If a Windows task launches
+   a separate child process, confirm that the previous server has actually stopped;
+   cycling the task alone may leave that child running.
+3. Compare the installed version with the `version` field returned by the HTTP
+   server your client actually uses, then validate that integration again.
+
+For a local server using the default port and no additional authentication,
+read both versions with:
+
+```sh
+engram version
+curl --fail --silent --show-error http://127.0.0.1:7437/health
+```
+
+Use the client's known endpoint, port, and required authentication if configured
+differently. For a server on another host, compare against the executable you
+upgraded on that host. A successful local response includes `"service":"engram"` and a
+`"version"` field. The running version should match the release you just installed.
+If it differs, check the launcher's executable path and restart the intended
+server through its owner. A missing version or `dev` does not confirm which
+release is running.
+
+`engram cloud status` reporting `Local daemon: running` proves liveness only.
+Its `Versions:` line compares the server's reported semantic release version
+with the installed CLI and prints `Restart pending` when both are known and
+differ. `engram ps` shows the same comparison for its identity-confirmed daemon.
+Missing, malformed or development versions are `unknown`; build metadata is
+ignored. This comparison does not authenticate a listener or restart anything.
+Use the intended server's existing supervisor; `engram restart` manages only
+the pidfile-tracked daemon. Successful local CLI, doctor, or direct-store MCP
+operations do not confirm the version of a separate HTTP server.
 
 ---
 

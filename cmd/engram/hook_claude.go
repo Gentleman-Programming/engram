@@ -127,6 +127,21 @@ func guardClaudePreToolUse(input []byte) []byte {
 	if !isClaudeEngramWriteOrSessionTool(tool) {
 		return transformClaudePreToolUse(input)
 	}
+	toolInputRaw, present := payload["tool_input"]
+	if !present {
+		return claudePreToolUseDeny("authoritative Claude tool_input is required")
+	}
+	var toolInput map[string]json.RawMessage
+	if json.Unmarshal(toolInputRaw, &toolInput) != nil || toolInput == nil {
+		return claudePreToolUseDeny("authoritative Claude tool_input must be an object")
+	}
+	isReview := strings.HasSuffix(tool, "__mem_review")
+	if isReview {
+		action, _ := claudeHookRequiredString(toolInput, "action")
+		if strings.TrimSpace(action) == "list" {
+			return []byte("{}")
+		}
+	}
 	id, idOK := claudeHookRequiredString(payload, "session_id")
 	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
 	if !idOK || !cwdOK {
@@ -135,6 +150,15 @@ func guardClaudePreToolUse(input []byte) []byte {
 	effective, err := confirmHookSession(id, cwd, true)
 	if err != nil {
 		return hookSessionConfirmationDeny("Claude", err)
+	}
+	// mem_review mutations retain confirmation, but its handler has no session
+	// argument to bind. An already-correct binding likewise needs no rewrite.
+	// Check only after confirmation, against the live effective continuation.
+	if isReview {
+		return []byte("{}")
+	}
+	if current, ok := claudeHookRequiredString(toolInput, claudeAuthoritativeSessionField(tool)); ok && current == effective {
+		return []byte("{}")
 	}
 	if effective != id {
 		payload["session_id"], _ = json.Marshal(effective)
@@ -173,6 +197,16 @@ func confirmHookSessionForPlatform(id, cwd string, projectOwned bool, platform s
 		}
 		cancel()
 	}()
+	if strings.TrimSpace(os.Getenv("ENGRAM_URL")) == "" {
+		identityErr := confirmHookLocalIdentity(ctx, client, base)
+		if identityErr != nil && hookLocalRecoveryEligible(platform, base, base+"/health", identityErr) {
+			if recovered := recoverHookLocalServer(ctx, client, base); recovered != nil {
+				return "", identityErr
+			}
+		} else if identityErr != nil {
+			return "", identityErr
+		}
+	}
 	// A registered session owns its project: confirm the write against that
 	// owner instead of re-deriving a project from the shell's current cwd
 	// (#1717). The cwd names the project only on first registration, and rows
@@ -180,11 +214,6 @@ func confirmHookSessionForPlatform(id, cwd string, projectOwned bool, platform s
 	// lookup that fails outright denies the write: a degraded answer is not a
 	// first registration.
 	session, known, lookupErr := hookSessionOwnerProject(ctx, client, base, id)
-	if lookupErr != nil && hookLocalRecoveryEligible(platform, base, base+"/sessions/"+url.PathEscape(id), lookupErr) {
-		if recoverHookLocalServer(ctx, client, base) == nil && ctx.Err() == nil {
-			session, known, lookupErr = hookSessionOwnerProject(ctx, client, base, id)
-		}
-	}
 	if lookupErr != nil {
 		return "", lookupErr
 	}

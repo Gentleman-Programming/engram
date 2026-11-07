@@ -19,6 +19,7 @@ type mutationRepairStore struct {
 	appliedCalls []string
 	failAt       int
 	err          error
+	projects     []store.SyncMutationProjectRepairAction
 	directories  []store.SyncMutationDirectoryRepairAction
 	titles       store.SyncMutationTitleRepairReport
 	superseded   store.SyncMutationSupersedeReport
@@ -40,6 +41,9 @@ func (s *mutationRepairStore) record(name, project, target string, apply bool) e
 func (s *mutationRepairStore) RepairPendingSessionDirectories(project string, apply bool) ([]store.SyncMutationDirectoryRepairAction, error) {
 	return s.directories, s.record("directory", project, "", apply)
 }
+func (s *mutationRepairStore) RepairPendingSessionProjects(project string, apply bool) ([]store.SyncMutationProjectRepairAction, error) {
+	return s.projects, s.record("project", project, "", apply)
+}
 func (s *mutationRepairStore) RepairObservationMutationTitles(project string, apply bool) (store.SyncMutationTitleRepairReport, error) {
 	return s.titles, s.record("title", project, "", apply)
 }
@@ -56,11 +60,12 @@ func (s *mutationRepairStore) RepairObservationSourceTitles(project string, appl
 func TestRepairSyncMutationRequiredFieldsOrderModesAndErrors(t *testing.T) {
 	const project = "mixed_case_project"
 	for _, mode := range []RepairMode{RepairModePlan, RepairModeDryRun, RepairModeApply} {
-		for failAt := 0; failAt <= 5; failAt++ {
+		for failAt := 0; failAt <= 6; failAt++ {
 			t.Run(fmt.Sprintf("%s/failure-%d", mode, failAt), func(t *testing.T) {
 				apply := mode == RepairModeApply
 				s := &mutationRepairStore{
 					failAt: failAt, err: errors.New("unchanged repair error"),
+					projects:    []store.SyncMutationProjectRepairAction{{Seq: 6}},
 					directories: []store.SyncMutationDirectoryRepairAction{{Seq: 1}},
 					titles:      store.SyncMutationTitleRepairReport{Actions: []store.SyncMutationTitleRepairAction{{Seq: 2}}},
 					superseded:  store.SyncMutationSupersedeReport{Actions: []store.SyncMutationSupersedeAction{{Seq: 3}}},
@@ -72,6 +77,7 @@ func TestRepairSyncMutationRequiredFieldsOrderModesAndErrors(t *testing.T) {
 				}
 				result, err := RepairSyncMutationRequiredFields(s, project, mode)
 				wantCalls := []mutationRepairCall{
+					{"project", project, "", apply},
 					{"directory", project, "", apply}, {"title", project, "", apply},
 					{"supersede", project, store.DefaultSyncTargetKey, apply},
 					{"quarantine", project, store.DefaultSyncTargetKey, apply}, {"source", project, "", apply},
@@ -91,6 +97,7 @@ func TestRepairSyncMutationRequiredFieldsOrderModesAndErrors(t *testing.T) {
 					}
 					want := SyncMutationRepairResult{
 						Quarantine:       store.SyncMutationQuarantineReport{Project: project, Applied: apply, Actions: wantActions},
+						ProjectRepairs:   s.projects,
 						DirectoryRepairs: s.directories, Repairs: s.titles.Actions, Superseded: s.superseded.Actions,
 						SourceRepairs: s.source.Actions, SourceRepairBackupPath: s.source.BackupPath, SourceUnrepairable: s.source.Unrepairable,
 					}
@@ -120,7 +127,7 @@ func TestRepairSyncMutationRequiredFieldsOrderModesAndErrors(t *testing.T) {
 }
 
 func TestRepairSyncMutationRequiredFieldsAppliedAggregation(t *testing.T) {
-	for _, active := range []string{"none", "directory", "title", "supersede", "quarantine", "source"} {
+	for _, active := range []string{"none", "project", "directory", "title", "supersede", "quarantine", "source"} {
 		t.Run(active, func(t *testing.T) {
 			s := &mutationRepairStore{
 				quarantine: store.SyncMutationQuarantineReport{Applied: true},
@@ -130,6 +137,8 @@ func TestRepairSyncMutationRequiredFieldsAppliedAggregation(t *testing.T) {
 				},
 			}
 			switch active {
+			case "project":
+				s.projects = []store.SyncMutationProjectRepairAction{{Seq: 1}}
 			case "directory":
 				s.directories = []store.SyncMutationDirectoryRepairAction{{Seq: 1}}
 			case "title":
@@ -144,6 +153,9 @@ func TestRepairSyncMutationRequiredFieldsAppliedAggregation(t *testing.T) {
 			result, err := RepairSyncMutationRequiredFields(s, "", RepairModeApply)
 			if err != nil || result.Quarantine.Applied != (active != "none") {
 				t.Fatalf("result=%+v, err=%v; applied should depend only on action lists", result, err)
+			}
+			if !reflect.DeepEqual(result.ProjectRepairs, s.projects) {
+				t.Fatalf("project repairs not forwarded: %+v", result)
 			}
 		})
 	}

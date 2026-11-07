@@ -40,10 +40,12 @@ function contract(text) {
     "'GOPATH'", "'GOCACHE'", "'GOMODCACHE'", 'Add-Content $env:GITHUB_ENV',
     '$PSNativeCommandUseErrorActionPreference = $false',
     '$timer = [Diagnostics.Stopwatch]::StartNew()',
-    '& go test -json ./... 1> "$evidence/suite.json" 2> "$evidence/stderr.txt"',
     '$suiteExit = $LASTEXITCODE', '$timer.Stop()', 'exit_code=$suiteExit',
     'elapsed_seconds=$($timer.Elapsed.TotalSeconds)', 'exit $suiteExit',
     'path: ${{ runner.temp }}/windows-suite/evidence']) assert.ok(body.includes(token), token);
+  assert.ok(body.split('\n').some(line => line.trim() ===
+    '& go test -json -count=1 ./... 1> "$evidence/suite.json" 2> "$evidence/stderr.txt"'),
+  'exact Windows suite command');
   for (const key of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'ENGRAM_DATA_DIR', 'TEMP', 'TMP', 'TMPDIR']) {
     assert.match(body, new RegExp(`(?:^|[ ;])${key} = '(?:home|appdata|localappdata|data|tmp)'`, 'm'), `isolated ${key}`);
   }
@@ -87,9 +89,14 @@ test('installed Git entrypoints resolve to actual usr/bin Bash', {
 });
 
 const mutations = [
-  ['go test -json ./...', 'go test -json ./internal/setup/...'],
-  ['go test -json ./...', 'go test -json -short ./...'],
-  ['go test -json ./...', 'go test -json -p 1 ./...'],
+  ['go test -json -count=1 ./...', 'go test -json ./...'],
+  ['go test -json -count=1 ./...', 'go test -json -count=0 ./...'],
+  ['go test -json -count=1 ./...', 'go test -json -count=2 ./...'],
+  ['& go test -json -count=1 ./... 1> "$evidence/suite.json" 2> "$evidence/stderr.txt"',
+   '& go test -json -count=1 ./... 1> "$evidence/suite.json" 2> "$evidence/stderr.txt" -count=2'],
+  ['go test -json -count=1 ./...', 'go test -json -count=1 ./internal/setup/...'],
+  ['go test -json -count=1 ./...', 'go test -json -count=1 -short ./...'],
+  ['go test -json -count=1 ./...', 'go test -json -count=1 -p 1 ./...'],
   ['exit $suiteExit', 'exit 0'], ['$suiteExit = $LASTEXITCODE', '$suiteExit = 0'],
   ['ENGRAM_PI_SCHEMA_REQUIRE_REAL: "1"', 'ENGRAM_PI_SCHEMA_REQUIRE_REAL: "0"'],
   ['npm ci --ignore-scripts --legacy-peer-deps', 'npm install'],
@@ -132,6 +139,15 @@ for (const [before, after] of mutations) {
     const target = before.startsWith('  merge_group:') ? source : body;
     assert.ok(target.includes(before), `mutation target: ${before}`);
     const changed = target.replace(before, after);
-    assert.throws(() => contract(target === source ? changed : source.replace(body, changed)));
+    assert.throws(() => contract(target === source ? changed : source.replace(body, () => changed)));
   });
 }
+
+test('public Windows recovery builds a fresh binary and requires an executed pass', () => {
+  const body = job(source);
+  assert.ok(body.includes('& go build -o $binary ./cmd/engram'), 'fresh native binary');
+  assert.ok(body.includes('ENGRAM_RECOVERY_PUBLIC_BINARY=$binary'), 'test receives the owned binary');
+  assert.ok(body.indexOf('& go build') < body.indexOf('& go test'), 'build precedes full suite');
+  assert.ok(body.includes('prerequisite-coverage.mjs windows-recovery'), 'named recovery pass required');
+  assert.ok(body.includes('if ($suiteExit -eq 0)'), 'original Go failure is not replaced by evidence success');
+});

@@ -60,7 +60,7 @@ func TestHookSessionConfirmationConfiguredTimeout(t *testing.T) {
 							switch r.URL.Path {
 							case "/health":
 								health++
-								body = `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`
+								body = hookLocalMockHealthBody(t)
 							case "/sessions/host":
 								owners++
 								status = http.StatusNotFound
@@ -113,7 +113,7 @@ func TestHookSessionConfirmationConfiguredTimeout(t *testing.T) {
 						if writes != 1 || exits != 0 {
 							t.Fatalf("unexpected output/exit: writes=%d exits=%d", writes, exits)
 						}
-						if lookups != 1 || posts != 1 || (agent == "claude" && (owners != 1 || health != 0)) || (agent == "codex" && (owners != 0 || health != 1)) {
+						if lookups != 1 || posts != 1 || (agent == "claude" && (owners != 1 || health != 1)) || (agent == "codex" && (owners != 0 || health != 1)) {
 							t.Fatalf("request counters lookup/posts/owners/health=%d/%d/%d/%d", lookups, posts, owners, health)
 						}
 						if tc.deny {

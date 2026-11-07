@@ -406,6 +406,11 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	if err != nil {
 		return CheckResult{}, err
 	}
+	usesCloudSync, err := cloudSyncInUse(scope)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	invalidProjects := make(map[string]bool)
 	blocking := make([]Finding, 0)
 	terminal := make([]Finding, 0)
 	for _, observation := range sourceObservations {
@@ -437,8 +442,22 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			continue
 		}
 		validation := store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey)
+		// Journaling is unconditional, so global rows on local-only installs are
+		// legitimate. Once Cloud is in use, match pushPage's project-column guard.
+		if usesCloudSync && (mutation.Project == "" || strings.TrimSpace(mutation.Project) != mutation.Project) {
+			invalidProjects[mutation.Project] = true
+			if validation.ReasonCode == "" {
+				validation.ReasonCode = "sync_mutation_project_invalid"
+				validation.Message = "Pending cloud mutation has an empty or padded project column."
+				validation.MissingFields = []string{"mutation.project"}
+			}
+		}
 		if validation.ReasonCode == "" {
 			continue
+		}
+		repairProject := scope.Project
+		if invalidProjects[mutation.Project] {
+			repairProject = "" // Raw padded owners require an unscoped repair.
 		}
 		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
@@ -447,7 +466,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              validation.Message,
 			Why:                  "A pending sync mutation with missing required fields can block safe cloud replication and must fail loudly instead of being silently dropped.",
 			Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "target_key": mutation.TargetKey, "project": mutation.Project, "entity": mutation.Entity, "op": mutation.Op, "entity_key": mutation.EntityKey, "missing_fields": validation.MissingFields}),
-			SafeNextStep:         syncMutationRequiredFieldsRepairHint(scope.Project),
+			SafeNextStep:         syncMutationRequiredFieldsRepairHint(repairProject),
 			RequiresConfirmation: true,
 		})
 	}
@@ -470,10 +489,6 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	// while cloud sync is configured and running. The gate is deliberately
 	// placed after the payload/quarantine pass so a local-only install still
 	// gets its quarantined evidence reported instead of silently dropped.
-	usesCloudSync, err := cloudSyncInUse(scope)
-	if err != nil {
-		return CheckResult{}, err
-	}
 	if !usesCloudSync {
 		return resultFromFindings(c.Code(), evidence, rollUp()), nil
 	}
@@ -486,6 +501,9 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	}
 	scopedProject := normalizeProjectName(scope.Project)
 	for _, projectCount := range nonEnrolledCounts {
+		if invalidProjects[projectCount.Project] {
+			continue // Already reported as metadata corruption, not missing enrollment.
+		}
 		project := normalizeProjectName(projectCount.Project)
 		if scopedProject != "" && project != scopedProject {
 			continue

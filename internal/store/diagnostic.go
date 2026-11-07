@@ -685,7 +685,7 @@ func (s *Store) RepairObservationSourceTitles(project string, apply bool) (Obser
 		actions = observationSourceTitleRepairActions(currentRows)
 		report.Unrepairable = observationSourceUnrepairable(currentRows, actions)
 		for _, action := range actions {
-			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = datetime('now') WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, action.ID, action.SyncID)
+			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = ? WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, Now(), action.ID, action.SyncID)
 			if err != nil {
 				return fmt.Errorf("repair source observation title %d: %w", action.ID, err)
 			}
@@ -958,10 +958,6 @@ func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) 
 		FROM sync_mutations
 		WHERE target_key = ? AND acked_at IS NULL`
 	args := []any{DefaultSyncTargetKey}
-	if project != "" {
-		query += ` AND project = ?`
-		args = append(args, project)
-	}
 	query += ` ORDER BY seq ASC`
 	rows, err := q.Query(query, args...)
 	if err != nil {
@@ -973,6 +969,12 @@ func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) 
 		var m SyncMutation
 		if err := rows.Scan(&m.Seq, &m.TargetKey, &m.Entity, &m.EntityKey, &m.Op, &m.Payload, &m.Source, &m.Project, &m.OccurredAt, &m.AckedAt, &m.Disposition, &m.DispositionReason, &m.DispositionEvidence, &m.DispositionAt); err != nil {
 			return nil, err
+		}
+		if project != "" {
+			owner, _ := NormalizeProject(m.Project)
+			if owner != project {
+				continue
+			}
 		}
 		mutations = append(mutations, m)
 	}

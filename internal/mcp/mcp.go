@@ -76,12 +76,24 @@ var suggestTopicKey = store.SuggestTopicKey
 
 var capturePromptForSave = (*store.Store).CapturePromptForSave
 
+var listSaveProjectNames = (*store.Store).ListProjectNames
+
+var hasSaveProjectObservations = (*store.Store).HasObservationsForProject
+
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
 
-var loadContextStats = func(s *store.Store) (*store.Stats, error) {
-	return s.Stats()
+var loadContextStats = func(s *store.Store, project string) (*store.Stats, int, error) {
+	if project == "" {
+		return s.ContextStats("", memContextMaxStatsProjects)
+	}
+	// Scoped lists are already narrow; retain their existing query path.
+	stats, err := s.StatsProject(project)
+	if err != nil {
+		return nil, 0, err
+	}
+	return stats, len(stats.Projects), nil
 }
 
 func truncationWarning(metadata store.TruncationMetadata) string {
@@ -736,6 +748,12 @@ Examples:
 				mcp.WithString("content",
 					mcp.Required(),
 					mcp.Description("The user's prompt text"),
+				),
+				mcp.WithString("directory",
+					mcp.Description("Absolute workspace directory for this call when the server starts elsewhere. Does not replace session or process project authority. Discovery does not bind later writes."),
+				),
+				mcp.WithString("cwd",
+					mcp.Description("Alias for directory; directory takes precedence."),
 				),
 				mcp.WithString("session_id",
 					mcp.Description(sessionIDPropertyDescription),
@@ -1622,20 +1640,23 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Check for similar existing projects (only when this project has no existing observations)
 		var similarWarning string
 		if project != "" {
-			existingNames, _ := s.ListProjectNames()
-			isNew := true
-			for _, e := range existingNames {
-				if e == project {
-					isNew = false
-					break
+			hasObservations, _ := hasSaveProjectObservations(s, project)
+			if !hasObservations {
+				existingNames, _ := listSaveProjectNames(s)
+				isNew := true
+				for _, e := range existingNames {
+					if e == project {
+						isNew = false
+						break
+					}
 				}
-			}
-			if isNew && len(existingNames) > 0 {
-				matches := projectpkg.FindSimilar(project, existingNames, 3)
-				if len(matches) > 0 {
-					bestMatch := matches[0].Name
-					obsCount, _ := s.CountObservationsForProject(bestMatch)
-					similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+				if isNew && len(existingNames) > 0 {
+					matches := projectpkg.FindSimilar(project, existingNames, 3)
+					if len(matches) > 0 {
+						bestMatch := matches[0].Name
+						obsCount, _ := s.CountObservationsForProject(bestMatch)
+						similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+					}
 				}
 			}
 		}
@@ -1980,6 +2001,10 @@ func handleDelete(s *store.Store) server.ToolHandlerFunc {
 func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
+		workspaceDir, workspaceErr := promptWorkspaceDirectory(req.GetArguments())
+		if workspaceErr != nil {
+			return mcp.NewToolResultError("Invalid workspace directory: " + workspaceErr.Error()), nil
+		}
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
@@ -2011,23 +2036,30 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 			}
 			detRes, err = resolveSaveWriteProjectWithProcessOverride(s, projectChoice, strings.TrimSpace(projectChoice) != "", projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
 		} else {
-			detRes, err = resolveWriteProjectWithChoiceAndProcessOverride(s, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
+			detRes, err = resolvePromptWorkspaceProject(s, workspaceDir, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
 		}
 		if err != nil {
 			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
+		provenance := captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject)
+		if workspaceDir != "" {
+			provenance.Directory = workspaceDir
+		}
 		if sessionID == "" {
-			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
+			sessionID, err = resolveFallbackSessionIDAtDirectory(s, project, workspaceDir, provenance)
 			if err != nil {
 				return mcp.NewToolResultError("Failed to save prompt: " + err.Error()), nil
 			}
 		}
 
 		// Capture before registration so a newly created implicit session retains evidence.
-		provenance := captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject)
-		_ = ensureImplicitSessionWithCWD(s, sessionID, project, provenance)
+		if workspaceDir == "" {
+			_ = ensureImplicitSessionWithCWD(s, sessionID, project, provenance)
+		} else {
+			_ = s.CreateSessionWithOwnershipMode(sessionID, project, workspaceDir, store.SessionOwnershipShared, provenance)
+		}
 
 		truncation := s.ContentTruncation(content)
 		_, err = s.AddPrompt(store.AddPromptParams{
@@ -2105,14 +2137,14 @@ const memContextMaxStatsProjects = 8
 // formatContextProjects renders the projects list for the mem_context stats
 // suffix: "none", the full join, or the first memContextMaxStatsProjects
 // names plus a "+N more" overflow marker.
-func formatContextProjects(names []string) string {
+func formatContextProjects(names []string, total int) string {
 	if len(names) == 0 {
 		return "none"
 	}
-	if len(names) <= memContextMaxStatsProjects {
+	if total <= memContextMaxStatsProjects {
 		return strings.Join(names, ", ")
 	}
-	return fmt.Sprintf("%s, +%d more", strings.Join(names[:memContextMaxStatsProjects], ", "), len(names)-memContextMaxStatsProjects)
+	return fmt.Sprintf("%s, +%d more", strings.Join(names[:memContextMaxStatsProjects], ", "), total-memContextMaxStatsProjects)
 }
 
 // clampMemContextResult caps the complete mem_context tool result — context
@@ -2182,17 +2214,17 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		maxBytes := memContextMaxBytes(req.GetArguments()["max_bytes"])
 
 		// #1039 (CodeRabbit major on PR #1074): the budget applies to the
-		// COMPLETE result. The stats suffix joins every project name in the
-		// store (unbounded) and the nudge is appended after the context block,
+		// COMPLETE result. The stats suffix lists bounded project names with
+		// an exact overflow count and the nudge is appended after the context block,
 		// so the suffix is rendered FIRST and its bytes are reserved from the
 		// context budget; a final clamp backstops the pathological case where
 		// the suffix alone meets or exceeds the budget.
-		stats, err := loadContextStats(s)
+		stats, totalProjects, err := loadContextStats(s, contextProject)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
 		}
 		suffix := fmt.Sprintf("\n---\nMemory stats: %d sessions, %d observations across projects: %s",
-			stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects))
+			stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects, totalProjects))
 		suffix += activity.NudgeIfNeededForProject(sessionID, project)
 
 		contextBudget := maxBytes - len(suffix)
@@ -2981,11 +3013,18 @@ func captureProjectDetector(s *store.Store) func(string) projectpkg.DetectionRes
 // resolveWriteProject detects the current project from the process working
 // directory, requiring explicit designation for untracked HOME repository children.
 func resolveWriteProject(s *store.Store) (projectpkg.DetectionResult, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = "."
+	return resolveWriteProjectAtDirectory(s, "")
+}
+
+func resolveWriteProjectAtDirectory(s *store.Store, directory string) (projectpkg.DetectionResult, error) {
+	if directory == "" {
+		var err error
+		directory, err = os.Getwd()
+		if err != nil {
+			directory = "."
+		}
 	}
-	res := captureProjectDetector(s)(cwd)
+	res := captureProjectDetector(s)(directory)
 	if res.Error != nil {
 		return res, res.Error
 	}
@@ -3043,7 +3082,11 @@ func resolveWriteProjectWithChoiceAndProcessOverride(s *store.Store, projectChoi
 // resolveWriteProjectWithChoice preserves normal write resolution authority and
 // only uses an explicit project choice as a recovery path from ErrAmbiguousProject.
 func resolveWriteProjectWithChoice(s *store.Store, projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
-	res, err := resolveWriteProject(s)
+	return resolveWriteProjectWithChoiceAtDirectory(s, projectChoice, reason, validateToken, "")
+}
+
+func resolveWriteProjectWithChoiceAtDirectory(s *store.Store, projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator, directory string) (projectpkg.DetectionResult, error) {
+	res, err := resolveWriteProjectAtDirectory(s, directory)
 	if err == nil {
 		// Non-ambiguous config/git/autodetect remains authoritative. Ignore any
 		// supplied project choice so agents cannot drift writes to arbitrary buckets.
@@ -3835,15 +3878,22 @@ func resolveHostBoundSession(s *store.Store, project string) (string, error) {
 // between concurrent runtime sessions. The working directory only narrows
 // candidates; a persisted session ID remains the sole identity.
 func resolveFallbackSessionID(s *store.Store, project string, evidence ...*store.ProjectProvenance) (string, error) {
+	return resolveFallbackSessionIDAtDirectory(s, project, "", evidence...)
+}
+
+func resolveFallbackSessionIDAtDirectory(s *store.Store, project, directory string, evidence ...*store.ProjectProvenance) (string, error) {
 	if id, err := resolveHostBoundSession(s, project); err != nil || id != "" {
 		return id, err
 	}
+	if directory == "" {
+		directory = currentWorkingDirectory()
+	}
 	if s != nil {
-		ids, err := s.ActiveRuntimeSessions(project, runtimeSessionDirectory(""))
+		ids, err := s.ActiveRuntimeSessions(project, runtimeSessionDirectory(directory))
 		if err == nil {
 			switch len(ids) {
 			case 0:
-				return s.ResolveManualSession(project, currentWorkingDirectory(), evidence...)
+				return s.ResolveManualSession(project, directory, evidence...)
 			case 1:
 				return ids[0], nil
 			default:
@@ -3852,7 +3902,7 @@ func resolveFallbackSessionID(s *store.Store, project string, evidence ...*store
 		}
 	}
 	if s != nil {
-		return s.ResolveManualSession(project, currentWorkingDirectory(), evidence...)
+		return s.ResolveManualSession(project, directory, evidence...)
 	}
 	return defaultSessionID(project), nil
 }

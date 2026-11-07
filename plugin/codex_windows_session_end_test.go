@@ -306,7 +306,12 @@ func runCodexWindowsPowerShell(t *testing.T, adapterPath, input string, port *st
 	var stdout, stderr strings.Builder
 	run.Stdout = &stdout
 	run.Stderr = &stderr
+	t.Logf("PowerShell adapter invocation start UTC: %s", time.Now().UTC().Format(time.RFC3339Nano))
+	started := time.Now()
 	err := run.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("run PowerShell adapter canceled: %v (elapsed: %s, process error: %v), stdout=%q stderr=%q", ctx.Err(), time.Since(started), err, stdout.String(), stderr.String())
+	}
 	if err == nil {
 		return stdout.String(), stderr.String(), 0
 	}
