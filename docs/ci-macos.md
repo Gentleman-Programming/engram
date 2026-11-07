@@ -12,15 +12,19 @@ The lane verifies actual Darwin ARM64 Go/Node execution, records SHA/image/tool
 versions, and requires Go **1.26.10**, Node **24**, npm, the full source checkout,
 contract JSON and locked local TypeBox **1.3.34**. It installs only existing Pi
 test dependencies with `npm ci --ignore-scripts --legacy-peer-deps`, prepares
-repository Go modules, and builds the existing Pi test server:
+repository Go modules, and prebuilds both existing Pi fixtures:
 
 ```bash
 go mod download
 go build -mod=readonly -o "$RUNNER_TEMP/pi-test-server" ./plugin/pi/test/support/real-server
+go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary
 ```
 
 From `plugin/pi`, run the existing `npm test` script with CLI-only TAP reporting:
-`ENGRAM_PI_TEST_SERVER_BINARY="$RUNNER_TEMP/pi-test-server" node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs`.
+`ENGRAM_PI_TEST_SERVER_BINARY="$RUNNER_TEMP/pi-test-server" ENGRAM_PI_TEST_PATH_BINARY="$RUNNER_TEMP/pi-test-path" node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs`.
+Both binary variables are exported inside that step, after its
+`ENGRAM_*`/`GENTLE_*`/`CLOUDSTORE_TEST_DSN`/`NODE_OPTIONS`/`GOFLAGS` isolation loop,
+so sanitization cannot strip them and the tests never compile the path fixture implicitly.
 The contract test pins equivalence to the package script. This also executes the packaged positive
 workflow case. Other existing fixtures keep their own build/startup deadlines.
 From the repository root, reuse the current OpenCode CI selection unchanged:
@@ -33,7 +37,8 @@ The additional OpenCode `engram.test.mts` is not in that selected CI command.
 Each test retains its own store/server/process cleanup; the lane uses a physical
 private temporary HOME/temp/fallback store, preserved Go cache locations and
 sanitized adapter settings. Shared prebuilt bytes never mean shared servers.
-No #1903/PR #1906 fixture/PATH work is copied or integrated.
+The merged #1906 path fixture is prebuilt here from its repository source, not
+replaced by a copied PATH shim; no other fixture/PATH work is integrated.
 
 The **15-minute outer**, **2-minute Pi fixture build**, **5-minute Pi** and
 **5-minute OpenCode** step ceilings are provisional containment, not measured
