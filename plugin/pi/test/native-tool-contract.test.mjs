@@ -282,7 +282,7 @@ for (const capture of [undefined, true, false]) {
   });
 }
 
-test("registered Pi-native mem_save forwards an explicit trimmed org and mem_search accepts org without forwarding it", async () => {
+test("registered Pi-native mem_save and mem_search forward an explicit trimmed org and omit a blank one", async () => {
   const originalFetch = globalThis.fetch;
   const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
   const originalEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
@@ -311,11 +311,16 @@ test("registered Pi-native mem_save forwards an explicit trimmed org and mem_sea
       assert.equal(Object.hasOwn(await save({}), "org"), false, "an omitted org must not be sent");
       assert.equal(Object.hasOwn(await save({ org: "   " }), "org"), false, "a blank org must not be sent");
 
-      const search = await registeredTools.get("mem_search").execute("search-org", { query: "auth", org: "acme" }, undefined, undefined, ctx);
-      assert.equal(search.isError, undefined, JSON.stringify(search));
-      const searchCall = calls.find(({ method, path }) => method === "GET" && path.startsWith("/search"));
-      assert.ok(searchCall, "mem_search must call GET /search");
-      assert.equal(new URL(`http://test${searchCall.path}`).searchParams.has("org"), false, "GET /search has no org filter yet");
+      const search = async (params) => {
+        const result = await registeredTools.get("mem_search").execute("search-org", { query: "auth", ...params }, undefined, undefined, ctx);
+        assert.equal(result.isError, undefined, JSON.stringify(result));
+        const searchCall = calls.filter(({ method, path }) => method === "GET" && path.startsWith("/search")).at(-1);
+        assert.ok(searchCall, "mem_search must call GET /search");
+        return new URL(`http://test${searchCall.path}`).searchParams;
+      };
+      assert.equal((await search({ org: "  acme  " })).get("org"), "acme");
+      assert.equal((await search({})).has("org"), false, "an omitted org must not be sent to GET /search");
+      assert.equal((await search({ org: "   " })).has("org"), false, "a blank org must not be sent to GET /search");
     });
   } finally {
     globalThis.fetch = originalFetch;

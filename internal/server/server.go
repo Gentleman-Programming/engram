@@ -898,6 +898,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Type:      params.Get("type"),
 		Project:   resolved.Project,
 		Scope:     params.Get("scope"),
+		Org:       strings.TrimSpace(params.Get("org")),
 		Limit:     queryInt(r, "limit", 10),
 		MatchMode: matchMode,
 	}
