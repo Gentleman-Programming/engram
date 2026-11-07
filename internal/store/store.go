@@ -1573,6 +1573,7 @@ func (s *Store) migrate() error {
 				active                   BOOLEAN NOT NULL DEFAULT 1,
 				last_mutation_seq        INTEGER NOT NULL DEFAULT 0,
 				last_remote_mutation_seq INTEGER,
+				superseded_by_sync_id    TEXT,
 				PRIMARY KEY (entity, entity_key)
 			);
 
@@ -1645,6 +1646,7 @@ func (s *Store) migrate() error {
 				disposition_reason TEXT,
 				disposition_evidence TEXT,
 				disposition_at TEXT,
+				project TEXT NOT NULL DEFAULT '',
 				FOREIGN KEY (target_key) REFERENCES sync_state(target_key)
 			);
 
