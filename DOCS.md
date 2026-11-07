@@ -452,7 +452,8 @@ The Claude native PreToolUse gate verifies the local `/health` instance ID again
 
 ### Search
 
-- `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N&match_mode=all&response_format=compact`
+- `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&org=ORG&limit=N&match_mode=all&response_format=compact`
+  - `org` is trimmed; a nonblank value returns only observations with that org, and an omitted or blank value applies no org filter.
   - With `response_format` omitted or empty: `200` with the existing JSON array of full search results.
   - No-result example: `GET /search?q=definitely-no-hit` returns `200` with `[]` (never `null`).
   - Opt in with `response_format=compact`: `200` with `{"result":"Found N memories.","results":[...]}`. Each entry has `id`, `sync_id`, `title`, `type`, `state`, `scope`, `pinned`, `preview`, and `truncated`; `project`, nonempty `topic_key`, and `review_after` are conditional. Optional `relations` contains `as_source` and `as_target` annotations, matching MCP compact search semantics.

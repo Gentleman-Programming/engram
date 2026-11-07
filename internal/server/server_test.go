@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -4724,6 +4725,60 @@ func TestListProjectsEndpointOrgFilter(t *testing.T) {
 	}
 	if body.Projects[0].Name != "alpha" {
 		t.Fatalf("expected project alpha for org acme, got %q", body.Projects[0].Name)
+	}
+}
+
+func TestSearchEndpointOrgFilter(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("s-1", "alpha", t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	for _, p := range []store.AddObservationParams{
+		{SessionID: "s-1", Type: "note", Title: "acme aurora", Content: "aurora content", Project: "alpha", Org: "acme"},
+		{SessionID: "s-1", Type: "note", Title: "globex aurora", Content: "aurora content", Project: "alpha", Org: "globex"},
+		{SessionID: "s-1", Type: "note", Title: "unset aurora", Content: "aurora content", Project: "alpha"},
+	} {
+		if _, err := st.AddObservation(p); err != nil {
+			t.Fatalf("AddObservation: %v", err)
+		}
+	}
+
+	h := New(st, 0).Handler()
+	search := func(path string) []string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d: %s", path, rec.Code, rec.Body.String())
+		}
+		var results []store.SearchResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+			t.Fatalf("decode %s response: %v", path, err)
+		}
+		titles := make([]string, 0, len(results))
+		for _, r := range results {
+			titles = append(titles, r.Title)
+		}
+		sort.Strings(titles)
+		return titles
+	}
+
+	tests := []struct {
+		name string
+		path string
+		want []string
+	}{
+		{name: "org filters results", path: "/search?q=aurora&project=alpha&org=acme", want: []string{"acme aurora"}},
+		{name: "org is trimmed", path: "/search?q=aurora&project=alpha&org=%20globex%20", want: []string{"globex aurora"}},
+		{name: "omitted org is unfiltered", path: "/search?q=aurora&project=alpha", want: []string{"acme aurora", "globex aurora", "unset aurora"}},
+		{name: "blank org is unfiltered", path: "/search?q=aurora&project=alpha&org=%20%20", want: []string{"acme aurora", "globex aurora", "unset aurora"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := search(tt.path); !slices.Equal(got, tt.want) {
+				t.Fatalf("GET %s titles = %v, want %v", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 
