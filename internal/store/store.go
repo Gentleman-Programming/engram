@@ -1626,7 +1626,9 @@ func (s *Store) migrate() error {
 				lease_until          TEXT,
 				last_error           TEXT,
 				last_success_at      TEXT,
-				updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+				updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
+				reason_code          TEXT,
+				reason_message       TEXT
 			);
 
 			CREATE TABLE IF NOT EXISTS sync_mutations (
