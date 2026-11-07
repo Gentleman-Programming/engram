@@ -24,6 +24,7 @@ const (
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 	CheckAmbiguousActiveRuntimeSessions   = "ambiguous_active_runtime_sessions"
+	CheckEndedSessionPostEndActivity      = "ended_session_post_end_activity"
 )
 
 // ReasonQuarantinedPulledSessionIdentity marks a finding of
@@ -53,6 +54,7 @@ type OrphanedPendingRelationsCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
 type AmbiguousActiveRuntimeSessionsCheck struct{}
+type EndedSessionPostEndActivityCheck struct{}
 
 func (SessionProjectDirectoryMismatchCheck) Code() string {
 	return CheckSessionProjectDirectoryMismatch
@@ -69,6 +71,46 @@ func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessio
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 func (AmbiguousActiveRuntimeSessionsCheck) Code() string {
 	return CheckAmbiguousActiveRuntimeSessions
+}
+func (EndedSessionPostEndActivityCheck) Code() string {
+	return CheckEndedSessionPostEndActivity
+}
+
+// EndedSessionPostEndActivityCheck warns when a host conversation kept
+// working after its Engram session ended and no open continuation can accept
+// its writes. The check is read-only: it never ends, registers, or reopens a
+// session, and it never selects one.
+func (c EndedSessionPostEndActivityCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	activity, err := scope.Store.ListEndedSessionActivity(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
+
+	findings := make([]Finding, 0, len(activity))
+	for _, item := range activity {
+		findings = append(findings, Finding{
+			CheckID:    c.Code(),
+			Severity:   SeverityWarning,
+			ReasonCode: c.Code() + "_no_open_continuation",
+			Message: fmt.Sprintf(
+				"Conversation %q ended at %s and kept receiving %d prompt(s) with no open continuation.",
+				item.SessionID, item.EndedAt, item.PostEndPromptCount,
+			),
+			Why: "Writes to an ended session are denied, so the host is still working while its Engram session is closed; without an open continuation those writes cannot land.",
+			Evidence: mustJSON(map[string]any{
+				"session_id":              item.SessionID,
+				"project":                 item.Project,
+				"ended_at":                item.EndedAt,
+				"post_end_prompt_count":   item.PostEndPromptCount,
+				"last_post_end_prompt_at": item.LastPostEndPromptAt,
+				"closed_session_ids":      item.SessionIDs,
+			}),
+			SafeNextStep:         "Resume the conversation or start a new one so SessionStart can open a continuation, and update the agent plugin or hook binary if it predates the resume fix. Doctor is diagnostic-only: it never ends, registers, or reopens a session.",
+			RequiresConfirmation: false,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{"conversations_evaluated": len(activity)}, findings), nil
 }
 
 func (c AmbiguousActiveRuntimeSessionsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
