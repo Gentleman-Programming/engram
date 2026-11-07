@@ -49,7 +49,7 @@ const ARG_KEYS = {
   mem_judge_many: [],
   mem_compare: ["memory_id_a", "memory_id_b"],
   mem_review: ["action", "project", "limit", "observation_id", "id"],
-  mem_list_projects: [],
+  mem_list_projects: ["org"],
   mem_pin: ["id"],
   mem_unpin: ["id"],
 };

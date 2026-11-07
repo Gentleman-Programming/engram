@@ -753,7 +753,7 @@ production CLI startup, model quality, external providers or other integrations.
 
 - Pi coding agent with npm package support.
 - Engram installed as `engram` on `PATH`, or `ENGRAM_BIN` pointing at the binary.
-- For Pi-native `mem_list_projects`, a running Engram core server v2.1.0 or later, which provides HTTP `GET /projects`. If `/health` returns 200 but this tool gets a 404, upgrade and restart the server; updating `gentle-engram` alone does not add the route.
+- For Pi-native `mem_list_projects`, a running Engram core server v2.1.0 or later, which provides HTTP `GET /projects`. If `/health` returns 200 but this tool gets a 404, upgrade and restart the server; updating `gentle-engram` alone does not add the route. The optional `org` input is forwarded as `GET /projects?org=...`; a server that predates org filtering ignores it and returns the unfiltered list. Pi-native `mem_save` sends an explicit `org` in the `POST /observations` body but does not inherit it from `.engram/config.json` the way MCP `mem_save` does. Pi-native `mem_search` accepts `org` for schema parity only: `GET /search` has no org filter yet, so it is not forwarded.
 - No MCP extension: Pi-native `mem_*` tools come from `gentle-engram`. Pi 0.99.0 and later provide built-in MCP for other servers.
 
 If you only want HTTP session capture against an already running Engram server, set `ENGRAM_URL` and the extension will not auto-start a local `engram serve` process.
