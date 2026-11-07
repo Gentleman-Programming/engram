@@ -63,6 +63,13 @@ for (const action of ['labeled', 'unlabeled']) test(`${action} requests the real
   ]);
   assert.equal(state.reads.get(7), 3);
 });
+test('a Refs-linked PR is selected for refresh', async () => {
+  const { github, state } = fixture();
+  state.pages = [[pull(7, 'Refs #8')]];
+  state.pulls = new Map([[7, pull(7, 'Refs #8')]]);
+  assert.deepEqual(await (await load())(github, context(), trusted), [{ status: 'requested', runId: 90, headSha: head, sourceSha: source, trustedSha: trusted, attempt: 2 }]);
+  assert.deepEqual(writes(state), [{ route: 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun', params: { ...repo, run_id: 90 } }]);
+});
 test('approval event dispatch admits marker-backed empty native fork association only', async () => {
   const { github, state } = fixture(); state.emptyAssociation = true;
   assert.equal((await (await load())(github, context(), trusted)).length, 1);

@@ -187,8 +187,9 @@ retirement stays blocked: fresh T4 probe consent and live evidence are required
 before rollout claims or retirement. See the
 [native-policy scope and rollout boundary](docs/ci-issue-native-policy.md).
 
-Closing references also support `Closes OWNER/REPO#N`, `Fixes OWNER/REPO#N`
-and `Resolves OWNER/REPO#N` for the current repository or
+Recognized references also support the qualified forms `Closes OWNER/REPO#N`,
+`Fixes OWNER/REPO#N`, `Resolves OWNER/REPO#N` and non-closing `Refs OWNER/REPO#N`
+for the current repository or
 `Gentleman-Programming/engram` (repository identity is case-insensitive).
 Every recognized reference must be approved and assigned in its own repository;
 a recognized reference to another repository rejects both issue checks before

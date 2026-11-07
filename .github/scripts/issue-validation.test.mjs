@@ -100,6 +100,32 @@ for (const context of [prEvent(), issueEvent()]) {
     f.unchanged();
   });
 }
+for (const context of [prEvent(), issueEvent()]) {
+  test(`${context.eventName} accepts a Refs-only reference`, async () => {
+    const f = fake({ pulls: [pull(1, 'Refs #9')] });
+    conclusions(await evaluateIssueValidation(f.github, context), sha, 'success', 'success');
+    assert.deepEqual(f.journal, [...(context.eventName === 'issues' ? [list(), get()] : [get()]), issueGet(), get()]);
+    f.unchanged();
+  });
+}
+test('mixed Closes and Refs references are all validated', async () => {
+  const f = fake({ pulls: [pull(1, 'Closes #10; Refs #9')], issues: {
+    9: { labels: [{ name: 'status:approved' }], assignees: [{ login: 'owner-not-author' }] },
+    10: { labels: [{ name: 'status:approved' }], assignees: [{ login: 'owner-not-author' }] },
+  } });
+  conclusions(await evaluateIssueValidation(f.github, prEvent()), sha, 'success', 'success');
+  assert.deepEqual(f.journal, [get(), issueGet(10), issueGet(9), get()]);
+  f.unchanged();
+});
+test('a Refs-only reference still requires an approved issue', async () => {
+  const f = fake({ pulls: [pull(1, 'Refs #9')], issues: { 9: { labels: [], assignees: [{ login: 'owner-not-author' }] } } });
+  assert.deepEqual(await evaluateIssueValidation(f.github, prEvent()), [{ headSha: sha,
+    reference: { conclusion: 'success', summary: 'Validation passed.' },
+    approved: { conclusion: 'failure', summary: 'PR #1: issue #9 lacks status:approved' },
+  }]);
+  assert.deepEqual(f.journal, [get(), issueGet(), get()]);
+  f.unchanged();
+});
 test('ordinary PR without references fails both checks', async () => {
   const f = fake({ pulls: [pull(1, 'mentions #9')] });
   conclusions(await evaluateIssueValidation(f.github, prEvent()), sha, 'failure', 'failure');
