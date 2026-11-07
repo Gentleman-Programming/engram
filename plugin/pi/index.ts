@@ -2124,6 +2124,8 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     type: optionalString("Filter by observation type"),
     project: optionalString("Filter by project name"),
     scope: optionalString("Filter by scope: project, personal, or global. Omit to apply no scope filter."),
+    // Declared for MCP schema parity; GET /search has no org filter yet, so it is not forwarded.
+    org: optionalString("Filter by org — a free-text grouping axis orthogonal to scope. Omit to apply no org filter."),
     limit: optionalNumber("Max results"),
     all_projects: optionalBoolean("Search across every project; when true project is ignored"),
     match_mode: optionalString("Match mode: all (default) or any for broader recall"),
@@ -2136,6 +2138,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     scope: optionalString("Scope: project, personal, or global"),
     topic_key: optionalString("Stable, deliberate topic key; reuse via mem_update rather than duplicating"),
     project: optionalString("Optional explicit project"),
+    org: optionalString("Optional org — a free-text grouping axis orthogonal to scope"),
     cwd: optionalString("Optional directory whose Engram project receives this write; must agree with project when both are set"),
     capture_prompt: optionalBoolean("Capture the available session/project prompt for this save (default true); does not disable lifecycle capture"),
   }),
@@ -2258,7 +2261,9 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     reasoning: Type.String({ description: "Brief explanation of the verdict" }),
     model: optionalString("Model identifier for provenance"),
   }),
-  mem_list_projects: Type.Object({}),
+  mem_list_projects: Type.Object({
+    org: optionalString("Filter by org — a free-text grouping axis orthogonal to scope. Omit to apply no org filter."),
+  }),
   mem_pin: Type.Object({
     id: Type.Number({ description: "Observation ID to pin" }),
   }),
@@ -2478,6 +2483,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           project: activeProject,
           scope: params.scope || "project",
           topic_key: params.topic_key,
+          org: typeof params.org === "string" ? params.org.trim() || undefined : undefined,
           capture_prompt: params.capture_prompt,
           current_prompt: params.capture_prompt !== false && currentPrompt
             && writeState?.currentPrompt === currentPrompt
@@ -2762,7 +2768,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         },
       });
     case "mem_list_projects":
-      return fetch("/projects");
+      return fetch(`/projects${queryString({ org: params.org })}`);
     case "mem_pin":
       return fetch(`/observations/${encodeURIComponent(String(params.id))}/pin`, { method: "PUT" });
     case "mem_unpin":
