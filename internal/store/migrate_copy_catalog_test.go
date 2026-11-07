@@ -157,6 +157,71 @@ func copyLogicalState(t *testing.T, db *sql.DB) map[string]string {
 	}
 	return state
 }
+
+// stripObservationsOrgColumn removes the "org" field from a copyLogicalState
+// "observations" record (the {Columns,Rows} JSON produced by copyLogicalState),
+// without touching any other table in the map or copyLogicalState itself.
+//
+// This PR (#776) adds observations.org. Migrating a genuinely pre-org v3.6.0
+// catalog legitimately ADDS that column, NULL on every historical row — it is
+// not unchanged data, and it must not be. For this one historical fixture the
+// correct invariant is therefore "every pre-existing table/column/row is
+// preserved byte-for-byte, plus the new org column is appended as NULL" — not
+// "schema unchanged". stripObservationsOrgColumn removes exactly the one
+// expected, additive delta before the strict historical-preservation
+// comparison runs, so that comparison still catches any OTHER drift exactly
+// as before. The current-catalog test keeps comparing raw copyLogicalState
+// output with no exception.
+func stripObservationsOrgColumn(t *testing.T, state map[string]string) map[string]string {
+	t.Helper()
+	raw, ok := state["observations"]
+	if !ok {
+		return state
+	}
+	var record struct{ Columns, Rows []string }
+	if err := json.Unmarshal([]byte(raw), &record); err != nil {
+		t.Fatal(err)
+	}
+	orgIndex := -1
+	for i, col := range record.Columns {
+		if col == "org" {
+			orgIndex = i
+			break
+		}
+	}
+	if orgIndex == -1 {
+		return state
+	}
+	columns := append(append([]string{}, record.Columns[:orgIndex]...), record.Columns[orgIndex+1:]...)
+	rows := make([]string, 0, len(record.Rows))
+	for _, rowJSON := range record.Rows {
+		var values []json.RawMessage
+		if err := json.Unmarshal([]byte(rowJSON), &values); err != nil {
+			t.Fatal(err)
+		}
+		if orgIndex >= len(values) {
+			t.Fatalf("observations row has fewer values than columns: %s", rowJSON)
+		}
+		values = append(append([]json.RawMessage{}, values[:orgIndex]...), values[orgIndex+1:]...)
+		encoded, err := json.Marshal(values)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, string(encoded))
+	}
+	sort.Strings(rows)
+	encoded, err := json.Marshal(struct{ Columns, Rows []string }{columns, rows})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(map[string]string, len(state))
+	for k, v := range state {
+		out[k] = v
+	}
+	out["observations"] = string(encoded)
+	return out
+}
+
 func TestMigrateCopyV360CompleteCatalog(t *testing.T) {
 	for _, wal := range []bool{false, true} {
 		t.Run(fmt.Sprintf("wal=%v", wal), func(t *testing.T) {
@@ -212,7 +277,37 @@ func TestMigrateCopyV360CompleteCatalog(t *testing.T) {
 				t.Fatalf("unexpected migrated delete evidence: %s", after["sync_chunk_delete_evidence"])
 			}
 			delete(after, "sync_chunk_delete_evidence")
-			if !reflect.DeepEqual(state, after) {
+			// This historical v3.6.0 catalog predates observations.org (PR #776).
+			// Migrating it must ADD that column as NULL on every historical row
+			// -- verify that positively -- and must change nothing else, which
+			// stripObservationsOrgColumn isolates for the comparison below.
+			orgRows, err := migrated.Query(`SELECT org FROM observations`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var historicalRowCount int
+			for orgRows.Next() {
+				var org sql.NullString
+				if err = orgRows.Scan(&org); err != nil {
+					t.Fatal(err)
+				}
+				if org.Valid {
+					t.Fatalf("expected migrated org to be NULL for historical row, got %q", org.String)
+				}
+				historicalRowCount++
+			}
+			if err = orgRows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err = orgRows.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if historicalRowCount == 0 {
+				t.Fatal("no historical observations rows to verify org against")
+			}
+			// Strip both additive deltas (the new evidence table above, the org
+			// column here) before the strict historical-preservation comparison.
+			if !reflect.DeepEqual(state, stripObservationsOrgColumn(t, after)) {
 				t.Fatal("logical state changed during migration")
 			}
 			for _, name := range []string{"idx_prompts_project_lower", "idx_sessions_project_lower"} {

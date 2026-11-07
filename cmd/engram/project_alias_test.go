@@ -357,7 +357,7 @@ func TestProjectsAliasRootOnly(t *testing.T) {
 				capture(s.CaptureProjectProvenance("observation", strconv.FormatInt(observationID, 10)))
 				capture(s.CaptureProjectProvenance("prompt", strconv.FormatInt(promptID, 10)))
 				capture(s.Stats())
-				capture(s.ListProjectsWithStats())
+				capture(s.ListProjectsWithStats(""))
 				capture(s.ListEnrolledProjects())
 				states, err := s.ListSyncStates()
 				capture(states, err)

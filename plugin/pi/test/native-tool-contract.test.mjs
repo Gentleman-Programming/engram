@@ -282,6 +282,52 @@ for (const capture of [undefined, true, false]) {
   });
 }
 
+test("registered Pi-native mem_save and mem_search forward an explicit trimmed org and omit a blank one", async () => {
+  const originalFetch = globalThis.fetch;
+  const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
+  const originalEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  delete process.env.ENGRAM_PROJECT;
+  delete process.env.GENTLE_PI_AGENTS_CHILD;
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/health", body: { capabilities: { isolated_session_registration: true } } },
+    { method: "GET", path: "/project/current", body: { project: "engram" } },
+    { method: "POST", path: "/sessions", body: {} },
+    { method: "POST", path: "/observations", status: 201, body: { id: 2, status: "saved" } },
+    { method: "GET", path: "/search", body: { results: [] } },
+  ]);
+  globalThis.fetch = fetchStub;
+  try {
+    await withPluginSandbox("engram-pi-save-org-", async ({ sandbox }) => {
+      const { eventHandlers, registeredTools } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("save-org");
+      await eventHandlers.get("session_start")({}, ctx);
+      const save = async (params) => {
+        const result = await registeredTools.get("mem_save").execute("save-org", { title: "saved", content: "observation", ...params }, undefined, undefined, ctx);
+        assert.equal(result.isError, undefined, JSON.stringify(result));
+        return calls.filter(({ path }) => path === "/observations").at(-1).body;
+      };
+      assert.equal((await save({ org: "  acme  " })).org, "acme");
+      assert.equal(Object.hasOwn(await save({}), "org"), false, "an omitted org must not be sent");
+      assert.equal(Object.hasOwn(await save({ org: "   " }), "org"), false, "a blank org must not be sent");
+
+      const search = async (params) => {
+        const result = await registeredTools.get("mem_search").execute("search-org", { query: "auth", ...params }, undefined, undefined, ctx);
+        assert.equal(result.isError, undefined, JSON.stringify(result));
+        const searchCall = calls.filter(({ method, path }) => method === "GET" && path.startsWith("/search")).at(-1);
+        assert.ok(searchCall, "mem_search must call GET /search");
+        return new URL(`http://test${searchCall.path}`).searchParams;
+      };
+      assert.equal((await search({ org: "  acme  " })).get("org"), "acme");
+      assert.equal((await search({})).has("org"), false, "an omitted org must not be sent to GET /search");
+      assert.equal((await search({ org: "   " })).has("org"), false, "a blank org must not be sent to GET /search");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const key of keys) { if (originalEnv[key] === undefined) delete process.env[key]; else process.env[key] = originalEnv[key]; }
+  }
+});
+
 for (const streamingBehavior of ["steer", "followUp"]) {
   test(`mem_save prompt capture queued consumption: ${streamingBehavior}`, async () => {
     const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
@@ -4376,6 +4422,36 @@ test("registered Pi-native mem_list_projects enumerates every known project with
       const listing = calls.find((call) => call.method === "GET" && call.path.startsWith("/projects"));
       assert.ok(listing, "mem_list_projects must call GET /projects");
       assert.equal(new URL(`http://test${listing.path}`).search, "");
+      assert.ok(JSON.stringify(result).includes("engram"));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("registered Pi-native mem_list_projects forwards the optional org filter to GET /projects", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/health", body: { status: "ok" } },
+    { method: "GET", path: "/projects", body: { projects: [{ name: "engram", observation_count: 3 }], count: 1 } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("list-projects-org-session");
+
+      const result = await registeredTools.get("mem_list_projects").execute("list-projects-org", { org: "acme corp" }, undefined, undefined, ctx);
+
+      const listing = calls.find((call) => call.method === "GET" && call.path.startsWith("/projects"));
+      assert.ok(listing, "mem_list_projects must call GET /projects");
+      const query = new URL(`http://test${listing.path}`).searchParams;
+      assert.deepEqual([...query.entries()], [["org", "acme corp"]]);
       assert.ok(JSON.stringify(result).includes("engram"));
     });
   } finally {
