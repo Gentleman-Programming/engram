@@ -1,12 +1,66 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
+
+func TestCompatibilityFixtureCleanupRetryPolicy(t *testing.T) {
+	other := errors.New("unrelated failure")
+	for _, tc := range []struct {
+		name, goos            string
+		failure               error
+		persistent            bool
+		wantCalls, wantSleeps int
+	}{
+		{"access-denied", "windows", syscall.Errno(5), false, 2, 1},
+		{"sharing-violation", "windows", syscall.Errno(32), false, 2, 1},
+		{"directory-not-empty", "windows", syscall.Errno(145), false, 2, 1},
+		{"persistent-denial", "windows", syscall.Errno(5), true, 20, 19},
+		{"persistent-sharing", "windows", syscall.Errno(32), true, 20, 19},
+		{"other-error", "windows", other, true, 1, 0},
+		{"unix-error", "linux", syscall.Errno(5), true, 1, 0},
+		{"success", "windows", nil, false, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, sleeps := 0, 0
+			var lastErr error
+			err := removeCompatibilityFixture("owned-fixture", tc.goos, func(dir string) error {
+				calls++
+				if dir != "owned-fixture" {
+					t.Fatalf("unexpected cleanup path %q", dir)
+				}
+				if tc.failure != nil && (tc.persistent || calls == 1) {
+					lastErr = &os.PathError{Op: "remove", Path: dir, Err: fmt.Errorf("wrapped: %w", tc.failure)}
+					return lastErr
+				}
+				return nil
+			}, func(delay time.Duration) {
+				sleeps++
+				if delay != 50*time.Millisecond {
+					t.Fatalf("delay=%v", delay)
+				}
+			})
+			if calls != tc.wantCalls || sleeps != tc.wantSleeps {
+				t.Fatalf("calls=%d sleeps=%d, want %d/%d", calls, sleeps, tc.wantCalls, tc.wantSleeps)
+			}
+			if tc.persistent {
+				if err != lastErr || !errors.Is(err, tc.failure) {
+					t.Fatalf("lost final error: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func TestCompatibilityFixtureSurvivesConsumerCleanup(t *testing.T) {
 	var first string
