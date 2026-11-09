@@ -4,15 +4,25 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 )
 
 func TestExplicitMergeCanonicalizationRollback(t *testing.T) {
+	testExplicitMergeRollback(t, "Acme-api", "acme-api")
+}
+
+func TestExplicitMergeSpaceRollback(t *testing.T) {
+	testExplicitMergeRollback(t, "plugin obsidian", "plugin-obsidian")
+}
+
+func testExplicitMergeRollback(t *testing.T, source, canonical string) {
+	t.Helper()
 	s := newTestStore(t)
-	seedLegacyMergeRecords(t, s, "Acme-api")
-	seedPendingLegacyMutations(t, s, "Acme-api")
-	if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES ('Acme-api')`); err != nil {
+	seedLegacyMergeRecords(t, s, source)
+	seedPendingLegacyMutations(t, s, source)
+	if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES (?)`, source); err != nil {
 		t.Fatal(err)
 	}
 	before, err := s.Export()
@@ -30,7 +40,7 @@ func TestExplicitMergeCanonicalizationRollback(t *testing.T) {
 	injected := errors.New("canonicalization commit failure")
 	// Fail at commit after record and journal migration have both executed.
 	s.hooks.commit = func(tx *sql.Tx) error { return injected }
-	if _, err := s.MergeExplicitProjectVariants([]string{"Acme-api"}, "acme-api"); !errors.Is(err, injected) {
+	if _, err := s.MergeExplicitProjectVariants([]string{source}, canonical); !errors.Is(err, injected) {
 		t.Fatalf("merge error = %v", err)
 	}
 	s.hooks.commit = nil
@@ -53,7 +63,38 @@ func TestExplicitMergeCanonicalizationRollback(t *testing.T) {
 }
 
 func TestExplicitMergeCanonicalization(t *testing.T) {
-	const source, canonical = "Acme-api", "acme-api"
+	testExplicitMergeRecordsAndSync(t, "Acme-api", "acme-api")
+}
+
+func TestExplicitMergeSpaceVariant(t *testing.T) {
+	for _, pair := range [][2]string{{"plugin obsidian", "plugin-obsidian"}, {"plugin  obsidian", "plugin_obsidian"}, {"plugin-obsidian", "plugin obsidian"}} {
+		t.Run(pair[0]+"->"+pair[1], func(t *testing.T) { testExplicitMergeRecordsAndSync(t, pair[0], pair[1]) })
+	}
+}
+
+func TestExplicitMergeSpaceSelectsOnlyNamedSource(t *testing.T) {
+	s := newTestStore(t)
+	projects := map[string]string{"selected": "plugin obsidian", "other-case": "Plugin Obsidian", "other-separator": "plugin_obsidian", "target": "plugin-obsidian"}
+	for id, project := range projects {
+		if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, '')`, id, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{"plugin obsidian"}, "plugin-obsidian")
+	if err != nil || result.SessionsUpdated != 1 {
+		t.Fatalf("merge = %+v, %v", result, err)
+	}
+	projects["selected"] = "plugin-obsidian"
+	for id, want := range projects {
+		var got string
+		if err := s.db.QueryRow(`SELECT project FROM sessions WHERE id = ?`, id).Scan(&got); err != nil || got != want {
+			t.Fatalf("%s project = %q, want %q; %v", id, got, want, err)
+		}
+	}
+}
+
+func testExplicitMergeRecordsAndSync(t *testing.T, source, canonical string) {
+	t.Helper()
 	for _, enrolled := range []bool{false, true} {
 		name := "local-only"
 		if enrolled {
@@ -73,7 +114,7 @@ func TestExplicitMergeCanonicalization(t *testing.T) {
 			}
 			// No public API lists acknowledged journal history; inspect this fixture
 			// by named fields while all pending assertions use the public API.
-			if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, acked_at) VALUES (?, 'session', 'acked-history', 'upsert', '{"project":"Acme-api","extra":"preserve"}', 'local', ?, '2026-01-01 00:00:00')`, DefaultSyncTargetKey, source); err != nil {
+			if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, acked_at) VALUES (?, 'session', 'acked-history', 'upsert', ?, 'local', ?, '2026-01-01 00:00:00')`, DefaultSyncTargetKey, fmt.Sprintf(`{"project":%q,"extra":"preserve"}`, source), source); err != nil {
 				t.Fatal(err)
 			}
 			readHistory := func() SyncMutation {
