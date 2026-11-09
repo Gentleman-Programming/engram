@@ -40,6 +40,9 @@ test("a pinned server binding late captures the first prompt exactly once", asyn
       ready = new Promise((resolve, reject) => {
         setTimeout(() => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); }, 1500);
       });
+      // Observe a bind failure immediately; the original promise still rejects
+      // when cleanup awaits it, even if the hook has not finished yet.
+      void ready.catch(() => {});
       try {
         await hooks.get("before_agent_start")({ systemPrompt: "", prompt: "Preserve the first synthetic startup prompt." }, ctx);
         assert.equal(prompts.length, 1, "the original hook must wait and capture its prompt");

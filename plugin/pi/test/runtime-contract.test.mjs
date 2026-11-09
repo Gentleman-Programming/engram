@@ -41,27 +41,44 @@ async function withConsumer(contract, run, endpoint = 'http://127.0.0.1:17437') 
   }
 }
 
-test('consumer refusal preserves unavailable transport and self-heal without private data or writes', async () => {
+test('consumer refusal preserves unavailable transport and self-heal without private data or writes', async (t) => {
   const refused = () => {
     const cause = Object.assign(new Error('private-bearer'), { code: 'ECONNREFUSED' });
     throw new TypeError('private-password private-query', { cause });
   };
   await withConsumer(refused, async ({ tool, calls, clock }) => {
-    const started = performance.now();
-    const result = await tool();
-    const elapsed = performance.now() - started;
-    assert.equal(result.isError, true);
-    assert.equal(result.content[0].text, 'gentle-engram could not reach the Engram HTTP server. Run mem_doctor or restart Engram.');
-    assert.doesNotMatch(JSON.stringify(result), /private-password|private-query|private-bearer/);
-    assert.ok(calls.length > 1, 'initial refusal polls only the pinned contract endpoint');
-    assert.ok(elapsed >= 9500 && elapsed < 15000, `one 10s startup budget, observed ${elapsed}ms`);
-    const startupCalls = calls.length;
-    assert.ok(calls.every(call => call.metadata && call.method === 'GET'));
-    assert.equal(clock.pending(), 1, 'typed unavailability must schedule the existing self-heal probe');
-    await clock.advance();
-    assert.equal(calls.filter(call => call.health).length, 1, 'self-heal must perform exactly one health probe');
-    assert.equal(calls.length, startupCalls + 1, 'only qualification and the existing health probe may be dispatched');
-    assert.ok(calls.every(call => call.method === 'GET'), 'qualification failure must not send lifecycle or memory writes');
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+    try {
+      let settled = false;
+      const pending = tool().then(result => { settled = true; return result; });
+      // Let fetch rejections and timer cleanup settle between ticks, just as the
+      // event loop does. Advancing Date alone would leave the retry sleeps pending.
+      await new Promise(resolve => setImmediate(resolve));
+      for (let tick = 0; tick < 99; tick++) {
+        t.mock.timers.tick(100);
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      assert.equal(settled, false, 'startup remains pending before its 10s deadline');
+      t.mock.timers.tick(100);
+      const result = await pending;
+      assert.equal(Date.now(), 10000, 'expiry uses one shared startup budget');
+      assert.equal(result.isError, true);
+      assert.equal(result.content[0].text, 'gentle-engram could not reach the Engram HTTP server. Run mem_doctor or restart Engram.');
+      assert.doesNotMatch(JSON.stringify(result), /private-password|private-query|private-bearer/);
+      assert.ok(calls.length > 1, 'initial refusal polls only the pinned contract endpoint');
+      const startupCalls = calls.length;
+      t.mock.timers.tick(1000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(calls.length, startupCalls, 'no startup probes continue after expiry');
+      assert.ok(calls.every(call => call.metadata && call.method === 'GET'));
+      assert.equal(clock.pending(), 1, 'typed unavailability must schedule the existing self-heal probe');
+      await clock.advance();
+      assert.equal(calls.filter(call => call.health).length, 1, 'self-heal must perform exactly one health probe');
+      assert.equal(calls.length, startupCalls + 1, 'only qualification and the existing health probe may be dispatched');
+      assert.ok(calls.every(call => call.method === 'GET'), 'qualification failure must not send lifecycle or memory writes');
+    } finally {
+      t.mock.timers.reset();
+    }
   }, 'http://user:private-password@127.0.0.1:17437/?token=private-query');
 });
 
