@@ -1066,7 +1066,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 	if shouldRegister("mem_merge_projects", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_merge_projects",
-				mcp.WithDescription("Merge explicitly named project variants into one canonical name, including names differing only by '-' versus '_' at matching positions (e.g. 'foo-bar' to 'foo_bar'). Unrelated names are rejected. DESTRUCTIVE — moves all records from source names to the canonical name."),
+				mcp.WithDescription("Merge explicitly named project variants into one canonical name, including ASCII-space, '-' and '_' separator variants (e.g. 'foo bar' to 'foo-bar'). Unrelated names are rejected. DESTRUCTIVE — moves all records from source names to the canonical name."),
 				mcp.WithDeferLoading(true),
 				mcp.WithTitleAnnotation("Merge Projects"),
 				mcp.WithReadOnlyHintAnnotation(false),

@@ -14078,6 +14078,10 @@ func TestExplicitMergePreviewCases(t *testing.T) {
 		allowed                 bool
 	}{
 		{"inserted separator", "acmeapi", "acme-api", true},
+		{"ASCII space", "plugin obsidian", "plugin-obsidian", true},
+		{"tab is not a separator", "plugin\tobsidian", "plugin-obsidian", false},
+		{"nonbreaking space is not a separator", "plugin\u00a0obsidian", "plugin-obsidian", false},
+		{"unrelated words", "plugin obsidian", "plugin-other", false},
 		{"Unicode separator", "caféapi", "café-api", true},
 		{"Unicode mismatch", "caféapi", "cafe-api", false},
 		{"normalized equal case", "Acme-api", "acme-api", true},
@@ -14290,10 +14294,13 @@ func TestExplicitMergeProjectsSyncOnlySources(t *testing.T) {
 }
 
 func TestExplicitMergeRejectsReservedInboxWithoutMutation(t *testing.T) {
-	for _, method := range []string{"preview", "explicit", "strict"} {
+	for _, method := range []string{"preview", "explicit", "space preview", "space explicit", "strict"} {
 		t.Run(method, func(t *testing.T) {
 			s := newTestStore(t)
 			source := "in-box"
+			if strings.HasPrefix(method, "space ") {
+				source = "in box"
+			}
 			if method == "strict" {
 				source = "INBOX"
 			}
@@ -14308,10 +14315,10 @@ func TestExplicitMergeRejectsReservedInboxWithoutMutation(t *testing.T) {
 			}
 			var err error
 			switch method {
-			case "preview":
-				_, err = s.PreviewExplicitProjectMerge("in-box", " INBOX ")
-			case "explicit":
-				_, err = s.MergeExplicitProjectVariants([]string{"in-box"}, " INBOX ")
+			case "preview", "space preview":
+				_, err = s.PreviewExplicitProjectMerge(source, " INBOX ")
+			case "explicit", "space explicit":
+				_, err = s.MergeExplicitProjectVariants([]string{source}, " INBOX ")
 			case "strict":
 				_, err = s.MergeProjects([]string{"INBOX"}, " INBOX ")
 			}
@@ -14349,6 +14356,9 @@ func TestMergeProjectsRejectsSeparatorVariants(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.MergeProjects([]string{"foo-bar"}, "foo_bar"); err == nil || !strings.Contains(err.Error(), "must normalize") {
 		t.Fatalf("MergeProjects error = %v, want separator variant rejection", err)
+	}
+	if _, err := s.MergeProjects([]string{"foo bar"}, "foo-bar"); err == nil || !strings.Contains(err.Error(), "must normalize") {
+		t.Fatalf("MergeProjects error = %v, want ASCII-space variant rejection", err)
 	}
 }
 

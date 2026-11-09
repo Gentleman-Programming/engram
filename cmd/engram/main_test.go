@@ -2878,6 +2878,7 @@ func TestGroupSimilarProjectsUsesNormalizationEquivalenceAndNormalizedCanonical(
 		{Name: "engram", ObservationCount: 1, Directories: []string{"/shared"}},
 		{Name: "ENGRAM", ObservationCount: 1, Directories: []string{"/shared"}},
 		{Name: "engram-memory", ObservationCount: 100, Directories: []string{"/shared"}},
+		{Name: "engram memory", ObservationCount: 100, Directories: []string{"/shared"}},
 	})
 
 	if len(groups) != 1 {

@@ -9970,7 +9970,7 @@ func mergeProjectEligible(source, canonical string, explicit bool) bool {
 	}
 	strip := func(name string) string {
 		return strings.Map(func(r rune) rune {
-			if r == '-' || r == '_' {
+			if r == '-' || r == '_' || r == ' ' {
 				return -1
 			}
 			return r
@@ -10057,7 +10057,7 @@ func (s *Store) mergeProjects(sources []string, canonical string, explicit bool)
 		}
 		if !mergeProjectEligible(normalizedSource, canonical, explicit) {
 			if explicit {
-				return nil, fmt.Errorf("source project %q must normalize to canonical project %q or differ only by corresponding '-' and '_' separators", source, canonical)
+				return nil, fmt.Errorf("source project %q must normalize to canonical project %q or differ only by ASCII spaces, '-' and '_' separators", source, canonical)
 			}
 			return nil, fmt.Errorf("source project %q must normalize to canonical project %q", source, canonical)
 		}

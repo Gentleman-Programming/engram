@@ -4660,6 +4660,9 @@ func TestHandleMergeProjectsExplicitSeparatorAndNoop(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('explicit-session', 'foo-bar', '')`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('space-session', 'foo bar', '')`); err != nil {
+		t.Fatal(err)
+	}
 	h := handleMergeProjects(s)
 	call := func(from string) string {
 		t.Helper()
@@ -4671,6 +4674,16 @@ func TestHandleMergeProjectsExplicitSeparatorAndNoop(t *testing.T) {
 	}
 	if text := call("foo-bar"); !strings.Contains(text, `into "foo_bar"`) {
 		t.Fatalf("wrong destination: %q", text)
+	}
+	var source string
+	if err := db.QueryRow(`SELECT project FROM sessions WHERE id = 'space-session'`).Scan(&source); err != nil || source != "foo bar" {
+		t.Fatalf("merge rewrote an unnamed source: %q, %v", source, err)
+	}
+	if text := call("foo bar"); !strings.Contains(text, `into "foo_bar"`) {
+		t.Fatalf("space variant destination: %q", text)
+	}
+	if err := db.QueryRow(`SELECT project FROM sessions WHERE id = 'space-session'`).Scan(&source); err != nil || source != "foo_bar" {
+		t.Fatalf("space source was not merged: %q, %v", source, err)
 	}
 	if text := call("foo_bar"); !strings.Contains(text, "No records moved") {
 		t.Fatalf("ambiguous no-op: %q", text)
