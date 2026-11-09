@@ -905,6 +905,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if responseFormat == "compact" {
 		previews, searchErr := s.store.SearchPreviewsContext(r.Context(), query, opts)
 		if searchErr != nil {
+			if errors.Is(searchErr, store.ErrFTSQueryTooLarge) {
+				jsonError(w, http.StatusBadRequest, searchErr.Error())
+				return
+			}
 			jsonError(w, http.StatusInternalServerError, searchErr.Error())
 			return
 		}
@@ -922,6 +926,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	results, err := s.store.Search(query, opts)
 	if err != nil {
+		if errors.Is(err, store.ErrFTSQueryTooLarge) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1347,6 +1355,10 @@ func (s *Server) handleSearchPrompts(w http.ResponseWriter, r *http.Request) {
 		queryInt(r, "limit", 10),
 	)
 	if err != nil {
+		if errors.Is(err, store.ErrFTSQueryTooLarge) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

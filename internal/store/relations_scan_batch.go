@@ -86,6 +86,13 @@ func (s *Store) scanCandidateBatch(sources []scanSourceRow, candidateLimit int) 
 	if len(sources) == 0 {
 		return result, nil
 	}
+	// Match FindCandidates' effective-title bound before tokenizing any source
+	// or issuing FTS work. This also keeps fallback errors free of title text.
+	for _, src := range sources {
+		if err := validateFTSQueryLength(src.title); err != nil {
+			return nil, fmt.Errorf("scanCandidateBatch: %w", err)
+		}
+	}
 	if candidateLimit <= 0 {
 		// Mirror the legacy FindCandidates default so a zero limit can never
 		// silently return no candidates where the legacy path returned three.

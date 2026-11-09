@@ -452,6 +452,16 @@ The Claude native PreToolUse gate verifies the local `/health` instance ID again
 
 ### Search
 
+Observation and prompt searches accept at most **65,536 raw UTF-8 bytes** before
+query sanitization. When a query contains a term shorter than three characters
+and uses the LIKE fallback, at most **768 terms** are accepted. Exceeding an
+applicable limit returns HTTP `400` with a JSON `error` telling the caller to
+shorten the query and retry; unrelated store failures still return `500`.
+This applies to both full and compact HTTP searches and the corresponding MCP
+search tools (which return a tool error). Relation-candidate queries and batched
+conflict-scan source titles share the byte bound; their FTS-only path does not
+use the LIKE term cap. Valid inputs are not silently truncated by this policy.
+
 - `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&org=ORG&limit=N&match_mode=all&response_format=compact`
   - `org` is trimmed; a nonblank value returns only observations with that org, and an omitted or blank value applies no org filter.
   - With `response_format` omitted or empty: `200` with the existing JSON array of full search results.
