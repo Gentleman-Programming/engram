@@ -17,11 +17,16 @@ import (
 // not a current database with selected DDL removed. See the provenance fixture.
 func copyV360Fixture(t *testing.T) (string, *sql.DB) {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/migrate_copy_v3.6.0_catalog.json")
+	return copyHistoricalCatalogFixture(t, "testdata/migrate_copy_v3.6.0_catalog.json", "7eeef253728d505221a2cd38ddd579f4b1e66d4eab50b6433fb0bae756d55535")
+}
+
+func copyHistoricalCatalogFixture(t *testing.T, path, digest string) (string, *sql.DB) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprintf("%x", sha256.Sum256(raw)) != "7eeef253728d505221a2cd38ddd579f4b1e66d4eab50b6433fb0bae756d55535" {
+	if fmt.Sprintf("%x", sha256.Sum256(raw)) != digest {
 		t.Fatal("historical raw catalog changed")
 	}
 	var expected map[string]copyCatalogObject

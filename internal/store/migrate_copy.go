@@ -365,7 +365,7 @@ func copyCatalog(db *sql.DB) (map[string]copyCatalogObject, error) {
 
 // Supported catalogs are the current migration catalog, the existing derived
 // legacy compatibility shape originally based on the v3.3.2 -> b81ea5e diff,
-// and one frozen complete v3.6.0 catalog. Schema version equality alone is never
+// and frozen complete v3.4.0/v3.6.0 catalogs. Schema version equality alone is never
 // admission. Unknown objects, columns, triggers and constraints fail closed.
 func copyValidateDB(db *sql.DB) error {
 	var v int
@@ -425,7 +425,9 @@ func copyValidateDB(db *sql.DB) error {
 	if e != nil {
 		return e
 	}
-	if fmt.Sprintf("%x", sha256.Sum256(encoded)) == "1f217c73a6f4949a5e84e92a5e79c5096e3e18e1c4e8f97b0af9067d6d1abf95" {
+	historicalDigest := fmt.Sprintf("%x", sha256.Sum256(encoded))
+	if historicalDigest == "1f217c73a6f4949a5e84e92a5e79c5096e3e18e1c4e8f97b0af9067d6d1abf95" ||
+		historicalDigest == "01b3bb3b2c114bd2ddf0ddb7ccdc40b664afb2ef4490de583739f414b3e07037" {
 		return nil
 	}
 	delete(current, "session_finalizations")
