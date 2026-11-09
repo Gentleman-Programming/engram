@@ -357,6 +357,16 @@ projections block dispatch with upgrade/restart guidance, including with explici
 authorize local restart. Qualification privately pins URL, effective transport
 credential and instance identity; an identity change requires restarting Pi.
 Concurrent callers share bounded read-only probes, with independent cancellation.
+During initial shared-mode startup with `ENGRAM_URL` configured, a refused connection
+to that endpoint is polled every 100 ms within one 10-second startup budget. Each
+contract probe keeps its 3-second maximum, capped by the remaining startup time.
+The original hook waits for qualification before registration and prompt capture,
+so a listener that binds within that budget does not lose the first prompt.
+HTTP errors (including authentication failures), invalid contracts, identity
+changes and other transport failures do not enter this poll. Later requests keep
+their existing qualification behavior. Canceling a caller stops its wait while
+shared startup can still finish for another caller; it never spawns or restarts
+the configured server or grants additional memory-write retries.
 This does not establish SDK or schema-semantic parity, successful pending-batch
 writes, or release eligibility.
 
@@ -755,7 +765,7 @@ production CLI startup, model quality, external providers or other integrations.
 - For Pi-native `mem_list_projects`, a running Engram core server v2.1.0 or later, which provides HTTP `GET /projects`. If `/health` returns 200 but this tool gets a 404, upgrade and restart the server; updating `gentle-engram` alone does not add the route. The optional `org` input is forwarded as `GET /projects?org=...`; a server that predates org filtering ignores it and returns the unfiltered list. Pi-native `mem_save` sends a nonblank explicit `org` in the `POST /observations` body; when omitted or blank, it inherits the nearest applicable `.engram/config.json` org from core's existing project detection for the caller cwd (or an explicitly supplied `cwd`), independently of an explicit project override. The default label follows the session's project-detection snapshot; restart Pi after changing that configuration, or pass `org`/`cwd` explicitly. The resolved org is frozen with the existing save/recovery payload. This inheritance requires a core that exposes the optional `org` metadata; an older core omits it. `mem_current_project` exposes that same optional label. Pi-native `mem_search` forwards a nonblank, trimmed `org` as `GET /search?org=...`; a server that predates the `/search` org filter ignores it and returns unfiltered results.
 - No MCP extension: Pi-native `mem_*` tools come from `gentle-engram`. Pi 0.99.0 and later provide built-in MCP for other servers.
 
-If you only want HTTP session capture against an already running Engram server, set `ENGRAM_URL` and the extension will not auto-start a local `engram serve` process.
+For HTTP session capture against a separately managed Engram server, set `ENGRAM_URL`. The extension will not auto-start a local `engram serve` process; initial connection refusal waits within the bounded startup policy above.
 
 Background session registration reports exhausted timeout or unknown transport outcomes with safe-retry guidance, separately from invalid acknowledgement identities. Both failures block passive observations until registration is confirmed.
 

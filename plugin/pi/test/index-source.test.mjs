@@ -1777,7 +1777,7 @@ async function controlledOwnedQualification() {
       localEngramInstanceID = contract.instance_id;
     }
     function recoverImplicitEngramServer() { ${extractFunctionBody("recoverImplicitEngramServer", "{\n  const generation")} }
-    async function ensureRuntimeQualification(signal) { ${extractFunctionBody("ensureRuntimeQualification", "{\n  throwIfAborted")} }
+    async function ensureRuntimeQualification(signal, startupDeadline) { ${extractFunctionBody("ensureRuntimeQualification", "{\n  throwIfAborted")} }
     return async () => {
       await ensureRuntimeQualification();
       refuse = true;

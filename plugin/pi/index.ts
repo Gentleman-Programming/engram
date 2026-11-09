@@ -764,7 +764,7 @@ function runtimeContractFailure(reason: string): RuntimeContractError {
   return new RuntimeContractError(`gentle-engram rejected the Engram runtime contract: ${reason}. Expected ${runtimeContractID}. Upgrade Engram and restart its server and Pi; verify ENGRAM_URL/ENGRAM_BIN. Memory dispatch was blocked.`);
 }
 
-async function ensureRuntimeQualification(signal?: AbortSignal): Promise<void> {
+async function ensureRuntimeQualification(signal?: AbortSignal, startupDeadline?: number): Promise<void> {
   throwIfAborted(signal);
   const endpoint = ENGRAM_URL, token = effectiveTransportToken();
   let flight = runtimeQualificationFlight;
@@ -777,7 +777,8 @@ async function ensureRuntimeQualification(signal?: AbortSignal): Promise<void> {
         timer = setTimeout(() => {
           controller.abort();
           reject(runtimeContractFailure("contract probe timed out"));
-        }, ENGRAM_WRITE_TIMEOUT_MS);
+        }, startupDeadline === undefined ? ENGRAM_WRITE_TIMEOUT_MS
+          : Math.max(1, Math.min(ENGRAM_WRITE_TIMEOUT_MS, startupDeadline - Date.now())));
       });
       try {
         const probe = (async () => {
@@ -2028,7 +2029,22 @@ async function initialize(cwd: string): Promise<void> {
   project = fallbackProjectName(cwd);
 
   await initializeEngramServer();
-  await ensureRuntimeQualification();
+  // A pinned server may still be binding its listener. Retry only definite
+  // refusal during shared initialization; contract and HTTP failures stay fatal.
+  const deadline = CONFIGURED_ENGRAM_URL !== undefined && !SESSION_OWNED
+    ? Date.now() + ENGRAM_STARTUP_TIMEOUT_MS : undefined;
+  for (;;) {
+    try {
+      await ensureRuntimeQualification(undefined, deadline);
+      break;
+    } catch (error) {
+      if (!(error instanceof EngramUnavailableError) || deadline === undefined) throw error;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw error;
+      await wait(Math.min(ENGRAM_STARTUP_POLL_MS, remaining));
+      if (Date.now() >= deadline) throw error;
+    }
+  }
 
   applyDetectedProject(await detectServerProject(cwd));
 }
