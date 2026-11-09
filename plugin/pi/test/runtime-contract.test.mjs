@@ -47,22 +47,29 @@ test('consumer refusal preserves unavailable transport and self-heal without pri
     throw new TypeError('private-password private-query', { cause });
   };
   await withConsumer(refused, async ({ tool, calls, clock }) => {
+    const started = performance.now();
     const result = await tool();
+    const elapsed = performance.now() - started;
     assert.equal(result.isError, true);
     assert.equal(result.content[0].text, 'gentle-engram could not reach the Engram HTTP server. Run mem_doctor or restart Engram.');
     assert.doesNotMatch(JSON.stringify(result), /private-password|private-query|private-bearer/);
-    assert.equal(calls.length, 1, 'an explicit endpoint never authorizes a recovery request');
+    assert.ok(calls.length > 1, 'initial refusal polls only the pinned contract endpoint');
+    assert.ok(elapsed >= 9500 && elapsed < 15000, `one 10s startup budget, observed ${elapsed}ms`);
+    const startupCalls = calls.length;
     assert.ok(calls.every(call => call.metadata && call.method === 'GET'));
     assert.equal(clock.pending(), 1, 'typed unavailability must schedule the existing self-heal probe');
     await clock.advance();
     assert.equal(calls.filter(call => call.health).length, 1, 'self-heal must perform exactly one health probe');
-    assert.equal(calls.length, 2, 'only qualification and the health probe may be dispatched');
+    assert.equal(calls.length, startupCalls + 1, 'only qualification and the existing health probe may be dispatched');
     assert.ok(calls.every(call => call.method === 'GET'), 'qualification failure must not send lifecycle or memory writes');
   }, 'http://user:private-password@127.0.0.1:17437/?token=private-query');
 });
 
 for (const [name, contract] of [
   ['missing endpoint', () => new Response('', { status: 404 })],
+  ['unauthorized endpoint', () => new Response('', { status: 401 })],
+  ['forbidden endpoint', () => new Response('', { status: 403 })],
+  ['unhealthy HTTP endpoint', () => new Response('', { status: 503 })],
   ['malformed JSON', () => new Response('{')],
   ['private transport error', () => { throw new Error('private-password private-query private-bearer'); }],
   ['unknown contract', { ...fixtureContract(), contract_id: 'unknown' }],
@@ -80,6 +87,7 @@ for (const [name, contract] of [
       assert.match(result.content[0].text, /upgrade|restart/i);
       assert.doesNotMatch(JSON.stringify(result), /private-password|private-query|private-bearer/);
       assert.ok(calls.length > 0);
+      assert.equal(calls.length, 1, 'received HTTP and invalid contracts never enter startup polling');
       assert.ok(calls.every(call => call.method === 'GET' && call.metadata), 'only metadata may be requested');
       assert.equal(clock.pending(), 0, 'contract failures must not schedule transport self-heal');
     }, 'http://user:private-password@127.0.0.1:17437/?token=private-query');
@@ -116,6 +124,66 @@ test('consumer cancellation retires only its waiter while another caller shares 
     assert.equal(probes, 1, 'concurrent initialization shares one metadata request');
     release();
     assert.notEqual((await survivor).isError, true);
+  });
+});
+
+test('cancellation during pinned refusal polling preserves a surviving startup caller', async () => {
+  let refused;
+  const refusal = new Promise(resolve => { refused = resolve; });
+  let available = false;
+  await withConsumer(() => {
+    if (!available) { refused(); throw Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }); }
+    return Response.json(fixtureContract());
+  }, async ({ tool, calls }) => {
+    const controller = new AbortController();
+    const canceled = tool(controller.signal);
+    await refusal;
+    const survivor = tool();
+    controller.abort(new DOMException('caller stopped during startup', 'AbortError'));
+    await assert.rejects(canceled, /caller stopped during startup/);
+    available = true;
+    assert.notEqual((await survivor).isError, true);
+    assert.equal(calls.filter(call => call.path === '/topic-keys/suggest' && call.method === 'POST').length, 1);
+    assert.ok(calls.filter(call => call.metadata).length > 1);
+  });
+});
+
+test('a late stalled contract probe is capped by the remaining pinned startup budget', async (t) => {
+  let now = Date.now();
+  let probes = 0;
+  let canceled = false;
+  await withConsumer(() => {
+    probes++;
+    if (probes === 1) {
+      now += 9800;
+      throw Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' });
+    }
+    return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode('{')); },
+      cancel() { canceled = true; },
+    }));
+  }, async ({ tool, calls }) => {
+    t.mock.method(Date, 'now', () => now);
+    const started = performance.now();
+    const result = await tool();
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /contract probe timed out/);
+    assert.ok(performance.now() - started < 2000, 'remaining 200ms must not become a fresh 3s probe');
+    assert.equal(probes, 2);
+    assert.equal(canceled, true, 'the timed-out response reader is canceled');
+    assert.ok(calls.every(call => call.metadata && call.method === 'GET'));
+  });
+});
+
+test('a refusal after successful initialization never enters the startup polling window', async () => {
+  await withConsumer(fixtureContract(), async ({ tool, calls, setContract }) => {
+    assert.notEqual((await tool()).isError, true);
+    const before = calls.length;
+    setContract(() => { throw Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }); });
+    const result = await tool();
+    assert.equal(result.isError, true);
+    assert.equal(calls.length, before + 1, 'post-startup qualification remains single attempt');
+    assert.ok(calls.slice(before).every(call => call.metadata && call.method === 'GET'));
   });
 });
 
