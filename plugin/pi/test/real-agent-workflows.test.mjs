@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
@@ -135,7 +135,9 @@ async function save(tool, title, content) {
 }
 
 realTest("real runtime metadata binds native requests to the generated authenticated Go contract", async () => {
-  await fixture(async ({ tool, request, rows, calls }) => {
+  await fixture(async ({ tool, request, rows, calls, ctx }) => {
+    mkdirSync(join(ctx.cwd, ".engram"));
+    writeFileSync(join(ctx.cwd, ".engram/config.json"), JSON.stringify({ project_name: "caller-repo", org: "caller-org" }));
     const metadata = await request("/runtime-contract", undefined, false);
     assert.equal(metadata.status, 200, "shared read-only metadata follows health's public policy");
     const { instance_id: instanceID, ...projection } = metadata.data;
@@ -154,6 +156,18 @@ realTest("real runtime metadata binds native requests to the generated authentic
     assert.equal((await request("/observations/consolidate", {}, false)).status, 401);
     assert.deepEqual(await rows(), []);
     assert.equal((await request("/sessions/real-host")).status, 404);
+
+    // Exercise Pi -> real Go detection -> frozen observation payload -> SQLite.
+    // The fixture's process-level project override must not hide the caller's org.
+    const current = await tool("mem_current_project", {});
+    assert.equal(current.details.data.org, "caller-org");
+    assert.equal(current.details.data.project, project);
+    const inheritedID = await save(tool, "Inherited org", "Configured caller organization");
+    const inherited = await tool("mem_get_observation", { id: inheritedID });
+    assert.equal(inherited.details.data.org, "caller-org");
+    const explicit = await tool("mem_save", { title: "Explicit org", content: "Explicit organization wins", org: "explicit-org" });
+    assert.notEqual(explicit.isError, true, JSON.stringify(explicit));
+    assert.equal((await tool("mem_get_observation", { id: explicit.details.data.id })).details.data.org, "explicit-org");
   });
 });
 

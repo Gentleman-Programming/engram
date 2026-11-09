@@ -305,6 +305,7 @@ interface PassiveCaptureBody {
 
 interface CurrentProjectResponse {
   project?: string;
+  org?: string;
   project_source?: string;
   raw_project?: string;
   project_path?: string;
@@ -2469,6 +2470,11 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       })}`);
     case "mem_save": {
       if (!requestedProject) requireResolvedProject();
+      // Reuse core detection, including an explicit cwd's per-call evidence.
+      // Project overrides do not change the caller directory's org label.
+      const detected = writeTarget?.evidence ?? detectedProjectEvidence;
+      const org = (typeof params.org === "string" ? params.org.trim() : "")
+        || (typeof detected?.org === "string" ? detected.org.trim() : "");
       if (writeState) assertOpen(writeState, writeEpoch!);
       const activeSessionId = await registeredSessionForWrite(activeProject);
       if (writeState) assertOpen(writeState, writeEpoch!);
@@ -2483,7 +2489,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           project: activeProject,
           scope: params.scope || "project",
           topic_key: params.topic_key,
-          org: typeof params.org === "string" ? params.org.trim() || undefined : undefined,
+          org: org || undefined,
           capture_prompt: params.capture_prompt,
           current_prompt: params.capture_prompt !== false && currentPrompt
             && writeState?.currentPrompt === currentPrompt
