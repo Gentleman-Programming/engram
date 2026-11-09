@@ -13,7 +13,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
@@ -103,7 +105,26 @@ func (f *compatibilityBinaryFixture) close() error {
 	if f.dir == "" {
 		return nil
 	}
-	return os.RemoveAll(f.dir)
+	return removeCompatibilityFixture(f.dir, runtime.GOOS, os.RemoveAll, time.Sleep)
+}
+
+// Windows may briefly deny deletion after an executable has been used. Retry
+// only these native deletion errors, and still report a persistent failure.
+func removeCompatibilityFixture(dir, goos string, removeAll func(string) error, sleep func(time.Duration)) error {
+	const attempts = 20
+	for attempt := 1; ; attempt++ {
+		err := removeAll(dir)
+		if err == nil {
+			return nil
+		}
+		retryable := errors.Is(err, syscall.Errno(5)) || // ERROR_ACCESS_DENIED
+			errors.Is(err, syscall.Errno(32)) || // ERROR_SHARING_VIOLATION
+			errors.Is(err, syscall.Errno(145)) // ERROR_DIR_NOT_EMPTY
+		if goos != "windows" || !retryable || attempt == attempts {
+			return err
+		}
+		sleep(50 * time.Millisecond)
+	}
 }
 
 // buildCompatibilityBinary builds the current candidate once per test process.
