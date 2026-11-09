@@ -1,0 +1,18 @@
+{
+  "base": "b6b1a70aca70295e2ece11396f6abb64f8a96349",
+  "historical_tag": "v3.4.0",
+  "historical_commit": "5c4171845958f046968c14d7d57a325eb4a83b7e",
+  "historical_tag_verified_against": "https://github.com/Gentleman-Programming/engram.git refs/tags/v3.4.0",
+  "source_hash_format": "SHA256 of raw files in the unchanged Windows Git worktree; checkout line endings may differ from Git blobs",
+  "store_go_sha256": "1583c2da30a8bd81c683ddd303ae1df0179bbfe40b3d0af2a063f982e29b06d6",
+  "go_mod_sha256": "42560820f8465e22277205145e16f4ebc04e7c5afd28ca1bc2e3017682ddefeb",
+  "go_sum_sha256": "12ab41e4e8d3c981c469dbaa96f91bf7ce023dff018e218ff3ff4a829a1de358",
+  "toolchain": "go1.26.10 windows/amd64",
+  "sqlite_module": "modernc.org/sqlite v1.46.2",
+  "sqlite_runtime": "3.51.3",
+  "helper_sha256": "5f43d533bd23b7e7260423fc167bc66ef22077414ed6bf72a97e9c3edc88ca91",
+  "raw_catalog_sha256": "56f7bd60f1a2ef4b82076dfbe825f1b4ab1ad74b375578aeedf2674026d0d562",
+  "normalized_full_catalog_sha256": "01b3bb3b2c114bd2ddf0ddb7ccdc40b664afb2ef4490de583739f414b3e07037",
+  "objects": {"table": 28, "index": 47, "trigger": 8},
+  "generation": "Detached official-tag worktree; an untracked helper calls historical Store.New with FallbackConfig on a new absolute synthetic directory, queries name,type,tbl_name,ifnull(sql,'') from every sqlite_schema object ordered by name, serializes name -> Kind/Table/SQL with JSON indentation, and closes the store. Original migration source, go.mod and go.sum are unchanged. No existing database or catalog DDL was edited. This is historical source execution, not an official release binary or a reported user store. All 83 object names/types/owners match issue #2278's inventory; full reporter DDL remains unavailable."
+}
