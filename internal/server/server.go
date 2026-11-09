@@ -1674,6 +1674,11 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 		s.writeProjectResolutionError(w, res, err)
 		return
 	}
+	// A process override chooses the project, independently of the caller's org.
+	// Inspection reads that label without establishing an implicit Git binding.
+	if res.Source == projectpkg.SourceProcessOverride {
+		res.Org = s.store.InspectProject(cwd).Org
+	}
 	jsonResponse(w, http.StatusOK, currentProjectPayload(cwd, res))
 }
 
@@ -1696,6 +1701,9 @@ func currentProjectPayload(cwd string, res projectpkg.DetectionResult) map[strin
 		"project_path":       res.Path,
 		"cwd":                cwd,
 		"available_projects": res.AvailableProjects,
+	}
+	if res.Org != "" {
+		payload["org"] = res.Org
 	}
 	if res.Warning != "" {
 		payload["warning"] = res.Warning
