@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 )
 
 // cloudRuntimeAuthenticator is the single Authenticator wired into
@@ -24,8 +24,7 @@ import (
 // a deliberate, safe deviation from design.md migration step 3's
 // "managed-first" wording.
 //
-// This is the fix for the runtime gap flagged in PR5's apply-progress
-// Discovery section: newCloudRuntime previously only ever constructed
+// This fixes a runtime gap: newCloudRuntime previously only ever constructed
 // *auth.Service directly as the Authenticator, and auth.Service's own
 // ResolveBearerToken only ever resolves the legacy sync token — so a
 // managed token minted via `engram cloud bootstrap admin --issue-token` (or
@@ -63,6 +62,7 @@ func (a *cloudRuntimeAuthenticator) ResolveBearerToken(ctx context.Context, toke
 // field-mapping/error-mapping logic can be proven without a Postgres
 // connection (see cloud_runtime_auth_test.go).
 type cloudManagedTokenHashStore interface {
+	MarkPrincipalTokenUsed(ctx context.Context, tokenID string) error
 	FindPrincipalTokenByHash(ctx context.Context, tokenHash string) (cloudstore.PrincipalToken, cloudstore.Principal, error)
 }
 
@@ -75,6 +75,20 @@ type cloudManagedTokenHashStore interface {
 // WithManagedTokenHasher are already wired here.
 type cloudstoreManagedTokenLookup struct {
 	store cloudManagedTokenHashStore
+}
+
+func (l cloudstoreManagedTokenLookup) MarkManagedTokenUsed(ctx context.Context, tokenID string) error {
+	err := l.store.MarkPrincipalTokenUsed(ctx, tokenID)
+	switch {
+	case errors.Is(err, cloudstore.ErrPrincipalTokenNotFound), errors.Is(err, cloudstore.ErrPrincipalNotFound):
+		return auth.ErrUnknownToken
+	case errors.Is(err, cloudstore.ErrPrincipalTokenRevoked):
+		return auth.ErrTokenRevoked
+	case errors.Is(err, cloudstore.ErrPrincipalDisabled):
+		return auth.ErrPrincipalDisabled
+	default:
+		return err
+	}
 }
 
 func (l cloudstoreManagedTokenLookup) FindManagedTokenByHash(ctx context.Context, hash string) (auth.ManagedTokenRecord, auth.Principal, error) {

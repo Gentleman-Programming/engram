@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 )
 
 // fakeManagedTokenHashStore is an in-memory stand-in for the narrow storage
@@ -27,6 +27,34 @@ type fakeManagedTokenHashStore struct {
 	// of consulting byHash, so tests can prove a generic (non-not-found)
 	// storage error is propagated rather than swallowed or misreported.
 	forceErr error
+	usageID  string
+	usageErr error
+}
+
+func (f *fakeManagedTokenHashStore) MarkPrincipalTokenUsed(_ context.Context, id string) error {
+	f.usageID = id
+	return f.usageErr
+}
+
+func TestManagedTokenUsageAdapter(t *testing.T) {
+	failure := errors.New("storage unavailable")
+	for _, want := range []error{nil, failure, cloudstore.ErrPrincipalTokenNotFound, cloudstore.ErrPrincipalNotFound, cloudstore.ErrPrincipalTokenRevoked, cloudstore.ErrPrincipalDisabled} {
+		store := &fakeManagedTokenHashStore{usageErr: want}
+		lookup := cloudstoreManagedTokenLookup{store: store}
+		err := lookup.MarkManagedTokenUsed(context.Background(), "token-id")
+		mapped := want
+		switch want {
+		case cloudstore.ErrPrincipalTokenNotFound, cloudstore.ErrPrincipalNotFound:
+			mapped = auth.ErrUnknownToken
+		case cloudstore.ErrPrincipalTokenRevoked:
+			mapped = auth.ErrTokenRevoked
+		case cloudstore.ErrPrincipalDisabled:
+			mapped = auth.ErrPrincipalDisabled
+		}
+		if store.usageID != "token-id" || !errors.Is(err, mapped) {
+			t.Fatalf("id=%q error=%v want=%v", store.usageID, err, mapped)
+		}
+	}
 }
 
 func (f *fakeManagedTokenHashStore) FindPrincipalTokenByHash(_ context.Context, hash string) (cloudstore.PrincipalToken, cloudstore.Principal, error) {
@@ -401,7 +429,7 @@ func TestCloudRuntimeAuthenticatorRejectsPrincipalTokenMismatch(t *testing.T) {
 		principal: cloudstore.Principal{ID: "p-mismatched", Kind: cloudstore.PrincipalKindHuman, DisplayName: "Alice", Role: cloudstore.PrincipalRoleAdmin, Enabled: true},
 	})
 
-	if _, err := runtimeAuth.ResolveBearerToken(context.Background(), rawToken); !errors.Is(err, auth.ErrInvalidPrincipal) {
-		t.Fatalf("expected a token/principal ID mismatch to be rejected with auth.ErrInvalidPrincipal, got %v", err)
+	if _, err := runtimeAuth.ResolveBearerToken(context.Background(), rawToken); !errors.Is(err, auth.ErrTokenPrincipalMismatch) {
+		t.Fatalf("expected a token/principal ID mismatch to be rejected with auth.ErrTokenPrincipalMismatch, got %v", err)
 	}
 }

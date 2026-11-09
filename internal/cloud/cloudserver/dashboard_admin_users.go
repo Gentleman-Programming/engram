@@ -8,9 +8,9 @@ import (
 
 	"github.com/a-h/templ"
 
-	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/dashboard"
 )
 
 // This file implements the dashboard-rendered Managed Users surface
@@ -120,7 +120,7 @@ func parseDashboardMutationForm(w http.ResponseWriter, r *http.Request) bool {
 // (s.dashboardDisplayName, s.isDashboardAdmin) so the two surfaces are
 // visually consistent.
 func (s *CloudServer) dashboardAdminLayout(r *http.Request, title string, component templ.Component) templ.Component {
-	return dashboard.Layout(title, s.dashboardDisplayName(r), "admin", s.isDashboardAdmin(r), component)
+	return dashboard.Layout(title, s.dashboardDisplayName(r), "admin", s.isDashboardAdmin(r), s.version, component)
 }
 
 // handleDashboardCreateManagedUser handles POST /dashboard/admin/users.
@@ -244,7 +244,7 @@ func (s *CloudServer) handleDashboardManagedUserDetail(w http.ResponseWriter, r 
 		http.Error(w, fmt.Sprintf("list grants: %v", err), http.StatusInternalServerError)
 		return
 	}
-	renderDashboardAdminComponent(w, r, s.dashboardAdminLayout(r, "Managed User", dashboard.ManagedUserDetailPage(user, tokens, grants)))
+	renderDashboardAdminComponent(w, r, s.dashboardAdminLayout(r, "Managed User", dashboard.ManagedUserDetailPage(user, tokens, grants, s.canManageManagedUsers(r))))
 }
 
 // handleDashboardCreateManagedToken handles POST /dashboard/admin/users/{principalID}/tokens.

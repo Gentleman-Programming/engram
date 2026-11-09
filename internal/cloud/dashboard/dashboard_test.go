@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 	nethtml "golang.org/x/net/html"
 )
 
@@ -1288,9 +1288,10 @@ func newAuthedAdminMux(store DashboardStore) *http.ServeMux {
 			}
 			return errUnauthorized
 		},
-		IsAdmin:        func(_ *http.Request) bool { return true },
-		GetDisplayName: func(_ *http.Request) string { return "OPERATOR" },
-		Store:          store,
+		IsAdmin:               func(_ *http.Request) bool { return true },
+		CanManageManagedUsers: func(_ *http.Request) bool { return true },
+		GetDisplayName:        func(_ *http.Request) string { return "OPERATOR" },
+		Store:                 store,
 	}
 	if managed, ok := store.(ManagedUsersStore); ok {
 		cfg.ManagedUsers = managed
@@ -2612,6 +2613,35 @@ func TestDashboardStatsFullPageShowsStatusRibbon(t *testing.T) {
 	}
 }
 
+func TestDashboardActivityFormatsAndEscapesCreatedAt(t *testing.T) {
+	withEngramTimezone(t, "America/Bogota")
+	store := parityStoreStub{observations: []cloudstore.DashboardObservationRow{
+		{Project: "proj", SessionID: "s1", CreatedAt: "2026-05-22T14:00:00+02:00"},
+		{Project: "proj", SessionID: "s2", CreatedAt: `<script>alert("x")</script>`},
+	}}
+	for _, htmx := range []bool{false, true} {
+		t.Run(fmt.Sprintf("htmx=%t", htmx), func(t *testing.T) {
+			mux := newAuthedMux(store, false)
+			req := httptest.NewRequest(http.MethodGet, "/dashboard/activity?auth=ok", nil)
+			if htmx {
+				req.Header.Set("HX-Request", "true")
+			}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, "22 May 2026 07:00") || strings.Contains(body, "2026-05-22T14:00:00+02:00") {
+				t.Errorf("created timestamp not localized: %q", body)
+			}
+			if !strings.Contains(body, html.EscapeString(`<script>alert("x")</script>`)) || strings.Contains(body, `<script>alert("x")</script>`) {
+				t.Errorf("malformed timestamp not escaped: %q", body)
+			}
+		})
+	}
+}
+
 // TestDashboardActivityFullPageShowsStatusRibbon (R5-1) asserts the same for /dashboard/activity.
 func TestDashboardActivityFullPageShowsStatusRibbon(t *testing.T) {
 	mux := newAuthedMux(parityStoreStub{}, false)
@@ -3194,5 +3224,34 @@ func TestAdminAuditLogListIsPartialOnlyNoLayoutWrapper(t *testing.T) {
 	// Partial-only: must NOT contain <html> tag (that would be a full Layout wrapper).
 	if strings.Contains(body, "<html") {
 		t.Errorf("handleAdminAuditLogList returned full Layout wrapper for non-HTMX request; got <html> in body")
+	}
+}
+
+func TestDashboardPrincipalSyncControlsHandlersSurfaceErrors(t *testing.T) {
+	mux := newAuthedAdminMux(parityStoreStub{errSyncControls: errors.New("invalid sync control")})
+	tests := []struct {
+		name string
+		path string
+		htmx bool
+		want int
+	}{
+		{name: "admin full page", path: "/dashboard/admin?auth=ok", want: http.StatusServiceUnavailable},
+		{name: "admin htmx", path: "/dashboard/admin?auth=ok", htmx: true, want: http.StatusServiceUnavailable},
+		{name: "admin projects full page", path: "/dashboard/admin/projects?auth=ok", want: http.StatusServiceUnavailable},
+		{name: "admin projects htmx", path: "/dashboard/admin/projects?auth=ok", htmx: true, want: http.StatusServiceUnavailable},
+		{name: "projects list fragment", path: "/dashboard/projects/list?auth=ok", htmx: true, want: http.StatusBadGateway},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if tt.htmx {
+				req.Header.Set("HX-Request", "true")
+			}
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("expected %d, got %d body=%q", tt.want, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

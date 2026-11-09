@@ -3,7 +3,36 @@ package timeutil
 import (
 	"os"
 	"testing"
+	"time"
 )
+
+func TestFormatTimeWithLayoutMatchesParsedInstant(t *testing.T) {
+	t.Setenv("ENGRAM_TIMEZONE", "America/Bogota")
+	instant := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	for _, input := range []string{"2026-05-22 12:00:00", "2026-05-22T14:00:00+02:00"} {
+		if got := FormatLocalWithLayout(input, defaultLayout); got != "2026-05-22 07:00:00" {
+			t.Errorf("FormatLocalWithLayout(%q) = %q", input, got)
+		}
+	}
+	if got := FormatTimeWithLayout(instant, defaultLayout); got != "2026-05-22 07:00:00" {
+		t.Errorf("FormatTimeWithLayout = %q", got)
+	}
+}
+
+func TestFormatTimeWithLayoutFallback(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.FixedZone("test-local", 2*60*60)
+	t.Cleanup(func() { time.Local = oldLocal })
+	instant := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	for _, zone := range []string{"", "Not/A_Zone"} {
+		t.Run(zone, func(t *testing.T) {
+			t.Setenv("ENGRAM_TIMEZONE", zone)
+			if got := FormatTimeWithLayout(instant, defaultLayout); got != "2026-05-22 14:00:00" {
+				t.Errorf("fallback = %q", got)
+			}
+		})
+	}
+}
 
 func TestFormatLocal(t *testing.T) {
 	// Original tz

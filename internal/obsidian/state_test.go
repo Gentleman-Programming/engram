@@ -6,6 +6,25 @@ import (
 	"testing"
 )
 
+func TestOldStatePendingCompatibility(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"files":{"1":"live.md"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	state, err := ReadState(path)
+	if err != nil || state.PendingRetirements == nil || state.Files[1] != "live.md" {
+		t.Fatalf("old state: %+v %v", state, err)
+	}
+	state.PendingRetirements[1] = []string{"old.md", "older.md"}
+	if err := WriteState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	state, err = ReadState(path)
+	if err != nil || len(state.PendingRetirements[1]) != 2 || state.PendingRetirements[1][1] != "older.md" {
+		t.Fatalf("pending roundtrip: %+v %v", state, err)
+	}
+}
+
 func TestSyncStateRoundTrip(t *testing.T) {
 	t.Run("write then read returns identical state", func(t *testing.T) {
 		dir := t.TempDir()
@@ -22,7 +41,7 @@ func TestSyncStateRoundTrip(t *testing.T) {
 				"sess-001": "_sessions/sess-001.md",
 			},
 			TopicHubs: map[string]string{
-				"sdd": "_topics/sdd.md",
+				"architecture": "_topics/architecture.md",
 			},
 			Version: 1,
 		}
@@ -51,8 +70,8 @@ func TestSyncStateRoundTrip(t *testing.T) {
 		if got.SessionHubs["sess-001"] != "_sessions/sess-001.md" {
 			t.Errorf("SessionHubs[sess-001]: got %q, want %q", got.SessionHubs["sess-001"], "_sessions/sess-001.md")
 		}
-		if got.TopicHubs["sdd"] != "_topics/sdd.md" {
-			t.Errorf("TopicHubs[sdd]: got %q, want %q", got.TopicHubs["sdd"], "_topics/sdd.md")
+		if got.TopicHubs["architecture"] != "_topics/architecture.md" {
+			t.Errorf("TopicHubs[architecture]: got %q, want %q", got.TopicHubs["architecture"], "_topics/architecture.md")
 		}
 	})
 

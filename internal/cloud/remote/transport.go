@@ -12,16 +12,29 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
+)
+
+const (
+	ordinaryOperationTimeout = 30 * time.Second
+	writeChunkTimeout        = 5 * time.Minute
 )
 
 type RemoteTransport struct {
-	baseURL    string
-	token      string
-	project    string
-	httpClient *http.Client
+	baseURL         string
+	token           string
+	project         string
+	httpClient      *http.Client
+	writeHTTPClient *http.Client
+}
+
+// ChunkEvidenceScope identifies immutable cloud chunks without persisting the
+// bearer token. Cloud assigns content-derived IDs and never overwrites an
+// existing (project, chunk ID) payload.
+func (rt *RemoteTransport) ChunkEvidenceScope() string {
+	return rt.baseURL + "\n" + rt.project
 }
 
 type HTTPStatusError struct {
@@ -78,7 +91,7 @@ func newHTTPStatusError(operation string, statusCode int, body []byte) error {
 }
 
 func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error) {
-	normalized, err := validateBaseURL(baseURL)
+	normalized, token, err := validateBearerBaseURL(baseURL, token)
 	if err != nil {
 		return nil, err
 	}
@@ -88,13 +101,37 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 		return nil, fmt.Errorf("cloud: project is required")
 	}
 	return &RemoteTransport{
-		baseURL: normalized,
-		token:   strings.TrimSpace(token),
-		project: project,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:         normalized,
+		token:           token,
+		project:         project,
+		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, token),
+		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, token),
 	}, nil
+}
+
+func validateBearerBaseURL(baseURL, token string) (string, string, error) {
+	normalized, err := validateBaseURL(baseURL)
+	if err != nil {
+		return "", "", err
+	}
+	token = strings.TrimSpace(token)
+	if token != "" && !strings.HasPrefix(normalized, "https://") {
+		return "", "", fmt.Errorf("cloud: bearer token requires an HTTPS remote URL")
+	}
+	return normalized, token, nil
+}
+
+func newRemoteHTTPClient(timeout time.Duration, token string) *http.Client {
+	client := &http.Client{Timeout: timeout}
+	if token != "" {
+		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("cloud: bearer token redirect requires HTTPS")
+			}
+			return nil
+		}
+	}
+	return client
 }
 
 func validateBaseURL(raw string) (string, error) {
@@ -189,7 +226,7 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 		chunkID = canonicalChunkID
 	}
 
-	body, err := json.Marshal(map[string]any{
+	pushPayload, err := json.Marshal(map[string]any{
 		"chunk_id":          canonicalChunkID,
 		"created_by":        entry.CreatedBy,
 		"client_created_at": strings.TrimSpace(entry.CreatedAt),
@@ -199,6 +236,10 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 	if err != nil {
 		return fmt.Errorf("cloud: marshal push request: %w", err)
 	}
+	body, err := chunkcodec.EncodeCompressedEnvelope(pushPayload)
+	if err != nil {
+		return fmt.Errorf("cloud: compress push request: %w", err)
+	}
 	pushURL, err := rt.endpointURL(nil, "sync", "push")
 	if err != nil {
 		return err
@@ -207,10 +248,10 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 	if err != nil {
 		return fmt.Errorf("cloud: build push request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
 	rt.setAuthorization(req)
 
-	resp, err := rt.httpClient.Do(req)
+	resp, err := rt.writeHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("cloud: push chunk %s: %w", chunkID, err)
 	}
@@ -231,6 +272,7 @@ func (rt *RemoteTransport) ReadChunk(chunkID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloud: build pull request: %w", err)
 	}
+	req.Header.Set("Accept", chunkcodec.CompressedEnvelopeContentType())
 	rt.setAuthorization(req)
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
@@ -250,6 +292,16 @@ func (rt *RemoteTransport) ReadChunk(chunkID string) ([]byte, error) {
 	}
 	if len(data) == 0 {
 		return nil, errors.New("cloud: empty chunk payload")
+	}
+	compressed, err := chunkcodec.IsCompressedEnvelopeContentType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return nil, fmt.Errorf("cloud: parse chunk response encoding: %w", err)
+	}
+	if compressed {
+		data, err = chunkcodec.DecodeCompressedEnvelope(data, chunkcodec.DefaultMaxDecodedBytes)
+		if err != nil {
+			return nil, fmt.Errorf("cloud: decode compressed chunk %s: %w", chunkID, err)
+		}
 	}
 	return data, nil
 }
@@ -301,20 +353,130 @@ type MutationTransport struct {
 	httpClient *http.Client
 }
 
-// NewMutationTransport creates a MutationTransport. baseURL must be a valid http/https URL.
-// BW6: Reuses validateBaseURL to reject empty/malformed URLs.
+// NewMutationTransport creates a MutationTransport. baseURL must be a valid HTTP(S) URL;
+// bearer-token transports require HTTPS.
 func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
-	normalized, err := validateBaseURL(baseURL)
+	normalized, token, err := validateBearerBaseURL(baseURL, token)
 	if err != nil {
 		return nil, err
 	}
 	return &MutationTransport{
-		baseURL: normalized,
-		token:   strings.TrimSpace(token),
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:    normalized,
+		token:      token,
+		httpClient: newRemoteHTTPClient(ordinaryOperationTimeout, token),
 	}, nil
+}
+
+// RegisterSessionAuthority registers a session under its owner project.
+func (mt *MutationTransport) RegisterSessionAuthority(sessionID, ownerProject string) error {
+	return mt.postProvenance("register session authority", "session-authorities", struct {
+		SessionID string `json:"session_id"`
+		Project   string `json:"project"`
+	}{sessionID, ownerProject})
+}
+
+// ClaimPromptPair binds a source inbox to a prompt sync identity.
+func (mt *MutationTransport) ClaimPromptPair(sessionID, sourceInboxID, syncID, ownerProject, promptProject string) error {
+	return mt.postProvenance("claim prompt pair", "prompt-pair-claims", struct {
+		SessionID     string `json:"session_id"`
+		SourceInboxID string `json:"source_inbox_id"`
+		SyncID        string `json:"sync_id"`
+		OwnerProject  string `json:"owner_project"`
+		Project       string `json:"project"`
+	}{sessionID, sourceInboxID, syncID, ownerProject, promptProject})
+}
+
+// AttestPromptSource records the server-issued identity for a prompt source.
+func (mt *MutationTransport) AttestPromptSource(sessionID, sourceInboxID, syncID, ownerProject, promptProject string) (int64, error) {
+	const operation = "attest prompt source"
+	for _, field := range []string{sessionID, sourceInboxID, syncID, ownerProject, promptProject} {
+		if strings.TrimSpace(field) == "" {
+			return 0, fmt.Errorf("cloud: %s: all fields are required", operation)
+		}
+	}
+	body, err := json.Marshal(struct {
+		SessionID     string `json:"session_id"`
+		SourceInboxID string `json:"source_inbox_id"`
+		SyncID        string `json:"sync_id"`
+		OwnerProject  string `json:"owner_project"`
+		PromptProject string `json:"prompt_project"`
+	}{sessionID, sourceInboxID, syncID, ownerProject, promptProject})
+	if err != nil {
+		return 0, fmt.Errorf("cloud: marshal %s: %w", operation, err)
+	}
+	req, err := http.NewRequest(http.MethodPost, mt.baseURL+"/sync/prompt-source-attestations", bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("cloud: build %s request", operation)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	mt.setAuthorization(req)
+	resp, err := mt.httpClient.Do(req)
+	if err != nil {
+		// HTTP client errors may include server-controlled URLs or redirect text.
+		return 0, fmt.Errorf("cloud: %s request failed", operation)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, &HTTPStatusError{Operation: operation, StatusCode: resp.StatusCode, Body: http.StatusText(resp.StatusCode)}
+	}
+	const maxResponseBytes = 64 << 10
+	response, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil || len(response) > maxResponseBytes {
+		return 0, fmt.Errorf("cloud: invalid %s response", operation)
+	}
+	var result struct {
+		Status        string `json:"status"`
+		AttestationID int64  `json:"attestation_id"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(response))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil || result.Status != "ok" || result.AttestationID <= 0 {
+		return 0, fmt.Errorf("cloud: invalid %s response", operation)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return 0, fmt.Errorf("cloud: invalid %s response", operation)
+	}
+	return result.AttestationID, nil
+}
+
+func (mt *MutationTransport) postProvenance(operation, path string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("cloud: marshal %s: %w", operation, err)
+	}
+	req, err := http.NewRequest(http.MethodPost, mt.baseURL+"/sync/"+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("cloud: build %s request: %w", operation, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	mt.setAuthorization(req)
+	resp, err := mt.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("cloud: %s: %w", operation, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		response, _ := io.ReadAll(resp.Body)
+		return newProvenanceHTTPStatusError(operation, resp.StatusCode, response)
+	}
+	var result struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Status != "ok" {
+		return fmt.Errorf("cloud: invalid %s response", operation)
+	}
+	return nil
+}
+
+// Recognize only the claim route's explicit authority code; retain the existing
+// mutation 404 mapping for absent routes and every other response.
+func newProvenanceHTTPStatusError(operation string, status int, body []byte) error {
+	parsed := newHTTPStatusError(operation, status, body).(*HTTPStatusError)
+	if status == http.StatusNotFound && parsed.ErrorCode == "session_authority_unavailable" && operation == "claim prompt pair" {
+		return parsed
+	}
+	return newMutationHTTPStatusError(operation, status, body)
 }
 
 func (mt *MutationTransport) setAuthorization(req *http.Request) {

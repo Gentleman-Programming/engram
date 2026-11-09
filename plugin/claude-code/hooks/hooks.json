@@ -1,15 +1,39 @@
 {
   "description": "Engram persistent memory hooks — session tracking, auto-import, compaction recovery, and passive capture",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(mcp__engram__|mcp__plugin_engram_engram__)(mem_save|mem_update|mem_review|mem_delete|mem_save_prompt|mem_pin|mem_unpin|mem_session_summary|mem_session_start|mem_session_end|mem_capture_passive|mem_merge_projects|mem_judge|mem_compare)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engram hook claude-pre-tool-use",
+            "onFailure": "block",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
-        "matcher": "startup|clear",
+        "matcher": "startup|resume|clear|fork",
         "hooks": [
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh\"",
             "timeout": 10,
             "statusMessage": "Loading engram memory..."
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume|clear|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engram",
+            "args": ["hook", "claude-bind-session"],
+            "timeout": 5
           }
         ]
       },
@@ -31,7 +55,19 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.sh\"",
-            "timeout": 2
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^SubagentHandback$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-stop.sh\"",
+            "timeout": 10
           }
         ]
       }
@@ -48,14 +84,13 @@
         ]
       }
     ],
-    "Stop": [
+    "SessionEnd": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/session-stop.sh\"",
-            "timeout": 5,
-            "async": true
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-end.sh\"",
+            "timeout": 5
           }
         ]
       }

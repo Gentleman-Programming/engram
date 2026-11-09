@@ -6,16 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
-	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/dashboard"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
 )
 
 type fakeStore struct {
@@ -165,7 +169,7 @@ func TestHandlerMountsDashboardAndHealth(t *testing.T) {
 }
 
 func TestHandlerSyncPushPullRoundTrip(t *testing.T) {
-	st := &fakeStore{}
+	st := &fakeStore{manifest: engramsync.Manifest{Version: 2}}
 	srv := New(st, fakeAuth{}, 0)
 
 	payload := []byte(`{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}]}`)
@@ -191,6 +195,9 @@ func TestHandlerSyncPushPullRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(pullManifest.Body.Bytes(), &manifest); err != nil {
 		t.Fatalf("decode manifest: %v", err)
 	}
+	if manifest.Version != 2 {
+		t.Fatalf("expected /sync/pull manifest version 2, got %d", manifest.Version)
+	}
 	if len(manifest.Chunks) != 1 || manifest.Chunks[0].ID != chunkID {
 		t.Fatalf("unexpected manifest %+v", manifest.Chunks)
 	}
@@ -206,6 +213,250 @@ func TestHandlerSyncPushPullRoundTrip(t *testing.T) {
 	if string(bytes.TrimSpace(pullChunk.Body.Bytes())) != string(normalizedPayload) {
 		t.Fatalf("unexpected chunk body=%q", pullChunk.Body.String())
 	}
+}
+
+func TestRemoteTransportReadsV2ManifestAndBootstrapProjectVerifies(t *testing.T) {
+	server := httptest.NewServer(New(&fakeStore{manifest: engramsync.Manifest{Version: 2}}, fakeAuth{}, 0).Handler())
+	t.Cleanup(server.Close)
+
+	transport, err := remote.NewRemoteTransport(server.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("create remote transport: %v", err)
+	}
+	manifest, err := transport.ReadManifest()
+	if err != nil {
+		t.Fatalf("read manifest through remote transport: %v", err)
+	}
+	if manifest.Version != 2 {
+		t.Fatalf("remote manifest version = %d, want 2", manifest.Version)
+	}
+
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("default store config: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	local, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("create local store: %v", err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	if err := local.CreateSessionWithOwnershipMode("project-owned", "proj-a", "/tmp/project-owned", store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create project-owned session: %v", err)
+	}
+
+	result, err := engramsync.BootstrapProject(local, transport, engramsync.UpgradeBootstrapOptions{Project: "proj-a", CreatedBy: "test"})
+	if err != nil {
+		t.Fatalf("bootstrap project through remote transport: %v", err)
+	}
+	if result.Stage != store.UpgradeStageBootstrapVerified {
+		t.Fatalf("bootstrap stage = %q, want %q", result.Stage, store.UpgradeStageBootstrapVerified)
+	}
+}
+
+func TestHandlerSyncCompressedPushPullRoundTrip(t *testing.T) {
+	st := &fakeStore{}
+	srv := New(st, fakeAuth{}, 0)
+	const sentinel = "WAF-SENTINEL-738"
+	payload := []byte(`{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}],"observations":[{"sync_id":"o-1","session_id":"s-1","type":"discovery","title":"sentinel observation","content":"` + sentinel + `","scope":"project"}]}`)
+	pushPayload := []byte(`{"project":"proj-a","created_by":"tester","data":` + string(payload) + `}`)
+	wireBody, err := chunkcodec.EncodeCompressedEnvelope(pushPayload)
+	if err != nil {
+		t.Fatalf("EncodeCompressedEnvelope: %v", err)
+	}
+	if bytes.Contains(wireBody, []byte(sentinel)) {
+		t.Fatal("compressed push body exposed observation text")
+	}
+
+	pushRec := httptest.NewRecorder()
+	pushReq := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewReader(wireBody))
+	pushReq.Header.Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
+	srv.Handler().ServeHTTP(pushRec, pushReq)
+	if pushRec.Code != http.StatusOK {
+		t.Fatalf("expected compressed /sync/push=200, got %d body=%q", pushRec.Code, pushRec.Body.String())
+	}
+
+	normalizedPayload, err := coerceChunkProject(payload, "proj-a")
+	if err != nil {
+		t.Fatalf("coerce payload: %v", err)
+	}
+	chunkID := chunkIDFromPayload(normalizedPayload)
+	pullRec := httptest.NewRecorder()
+	pullReq := httptest.NewRequest(http.MethodGet, "/sync/pull/"+chunkID+"?project=proj-a", nil)
+	pullReq.Header.Set("Accept", chunkcodec.CompressedEnvelopeContentType())
+	srv.Handler().ServeHTTP(pullRec, pullReq)
+	if pullRec.Code != http.StatusOK {
+		t.Fatalf("expected compressed /sync/pull=200, got %d body=%q", pullRec.Code, pullRec.Body.String())
+	}
+	if pullRec.Header().Get("Content-Type") != chunkcodec.CompressedEnvelopeContentType() {
+		t.Fatalf("Content-Type = %q, want compressed envelope", pullRec.Header().Get("Content-Type"))
+	}
+	if bytes.Contains(pullRec.Body.Bytes(), []byte(sentinel)) {
+		t.Fatal("compressed pull body exposed observation text")
+	}
+	decoded, err := chunkcodec.DecodeCompressedEnvelope(pullRec.Body.Bytes(), chunkcodec.DefaultMaxDecodedBytes)
+	if err != nil {
+		t.Fatalf("DecodeCompressedEnvelope: %v", err)
+	}
+	if !bytes.Equal(decoded, normalizedPayload) {
+		t.Fatalf("decoded pull payload = %q, want %q", decoded, normalizedPayload)
+	}
+}
+
+func TestHandlerPullChunkCompressionNegotiationAndDecodedSizeLimit(t *testing.T) {
+	const chunkID = "chunk-1"
+	makePayload := func(size int) []byte {
+		prefix := []byte(`{"padding":"`)
+		suffix := []byte(`"}`)
+		return append(append(prefix, bytes.Repeat([]byte("x"), size-len(prefix)-len(suffix))...), suffix...)
+	}
+
+	tests := []struct {
+		name             string
+		accept           string
+		payload          []byte
+		wantContentType  string
+		wantVary         string
+		wantCacheControl string
+	}{
+		{
+			name:             "decoded payload at client limit is compressed",
+			accept:           chunkcodec.CompressedEnvelopeContentType(),
+			payload:          makePayload(int(chunkcodec.DefaultMaxDecodedBytes)),
+			wantContentType:  chunkcodec.CompressedEnvelopeContentType(),
+			wantVary:         "Accept",
+			wantCacheControl: "no-store",
+		},
+		{
+			name:             "decoded payload over client limit falls back to legacy JSON",
+			accept:           chunkcodec.CompressedEnvelopeContentType(),
+			payload:          makePayload(int(chunkcodec.DefaultMaxDecodedBytes) + 1),
+			wantContentType:  "application/json",
+			wantVary:         "Accept",
+			wantCacheControl: "no-store",
+		},
+		{
+			name:             "quality zero falls back to legacy JSON",
+			accept:           chunkcodec.CompressedEnvelopeContentType() + "; q=0",
+			payload:          []byte(`{"sessions":[]}`),
+			wantContentType:  "application/json",
+			wantVary:         "Accept",
+			wantCacheControl: "no-store",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{chunks: map[string][]byte{chunkID: tt.payload}}, fakeAuth{}, 0)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/sync/pull/"+chunkID+"?project=proj-a", nil)
+			req.Header.Set("Accept", tt.accept)
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d body=%q", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != tt.wantContentType {
+				t.Fatalf("Content-Type = %q, want %q", got, tt.wantContentType)
+			}
+			if got := rec.Header().Get("Vary"); got != tt.wantVary {
+				t.Fatalf("Vary = %q, want %q", got, tt.wantVary)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != tt.wantCacheControl {
+				t.Fatalf("Cache-Control = %q, want %q", got, tt.wantCacheControl)
+			}
+			body := rec.Body.Bytes()
+			if tt.wantContentType == chunkcodec.CompressedEnvelopeContentType() {
+				var err error
+				body, err = chunkcodec.DecodeCompressedEnvelope(body, chunkcodec.DefaultMaxDecodedBytes)
+				if err != nil {
+					t.Fatalf("DecodeCompressedEnvelope: %v", err)
+				}
+			}
+			if !bytes.Equal(body, tt.payload) {
+				t.Fatalf("response payload length = %d, want %d", len(body), len(tt.payload))
+			}
+		})
+	}
+}
+
+func TestHandlerCompressedPushRejectsMalformedUnsupportedAndDecodedSizeLimitedPayloads(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        []byte
+		contentType string
+		limit       int64
+		wantStatus  int
+	}{
+		{
+			name:        "malformed compressed payload",
+			body:        []byte("not-gzip"),
+			contentType: chunkcodec.CompressedEnvelopeContentType(),
+			limit:       1024,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "unsupported envelope version",
+			body:        []byte(`{}`),
+			contentType: chunkcodec.CompressedEnvelopeMediaType + "; version=2",
+			limit:       1024,
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "decoded payload exceeds limit",
+			body:        mustEncodeCompressedEnvelope(t, []byte(`{"project":"proj-a","data":"`+strings.Repeat("a", 512)+`"}`)),
+			contentType: chunkcodec.CompressedEnvelopeContentType(),
+			limit:       128,
+			wantStatus:  http.StatusRequestEntityTooLarge,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{}, fakeAuth{}, 0, WithMaxPushBodyBytes(tt.limit))
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewReader(tt.body))
+			req.Header.Set("Content-Type", tt.contentType)
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d body=%q", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlerCompressedPushRejectsCompressedWireBodyOverLimit(t *testing.T) {
+	const wireLimit = int64(128)
+	const lowCompressibilityAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+	fixtureData := make([]byte, 384)
+	state := uint32(1)
+	for i := range fixtureData {
+		state = state*1664525 + 1013904223
+		fixtureData[i] = lowCompressibilityAlphabet[(state>>24)%uint32(len(lowCompressibilityAlphabet))]
+	}
+	wireBody := mustEncodeCompressedEnvelope(t, []byte(`{"project":"proj-a","data":"`+string(fixtureData)+`"}`))
+	if int64(len(wireBody)) <= wireLimit {
+		t.Fatalf("compressed wire fixture = %d bytes, must exceed configured wire limit %d", len(wireBody), wireLimit)
+	}
+
+	srv := New(&fakeStore{}, fakeAuth{}, 0, WithMaxPushBodyBytes(wireLimit))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewReader(wireBody))
+	req.Header.Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d body=%q", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+}
+
+func mustEncodeCompressedEnvelope(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	encoded, err := chunkcodec.EncodeCompressedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("EncodeCompressedEnvelope: %v", err)
+	}
+	return encoded
 }
 
 func TestHandlerReturnsUnauthorizedWhenAuthFails(t *testing.T) {
@@ -772,6 +1023,9 @@ func TestHandlerProjectScopeForbiddenReturnsPolicyClassPayload(t *testing.T) {
 	if payload.ErrorCode != "policy_forbidden" {
 		t.Fatalf("expected policy_forbidden error code, got %q", payload.ErrorCode)
 	}
+	if payload.Error != `forbidden: project "proj-a" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", payload.Error)
+	}
 }
 
 func TestHandlerPushRejectsOversizedPayload(t *testing.T) {
@@ -807,8 +1061,15 @@ func TestHandlerEnforcesProjectAllowlistWithoutBearerAuth(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 with auth disabled but allowlist enforced, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), "proj-a") || strings.Contains(rec.Body.String(), "proj-b") {
-		t.Fatalf("forbidden response must not leak allowlist details, got body=%q", rec.Body.String())
+	payload := decodeActionableError(t, rec)
+	if payload.ErrorClass != "policy" || payload.ErrorCode != "policy_forbidden" {
+		t.Fatalf("expected policy_forbidden response, got class=%q code=%q", payload.ErrorClass, payload.ErrorCode)
+	}
+	if payload.Error != `forbidden: project "proj-a" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", payload.Error)
+	}
+	if strings.Contains(rec.Body.String(), "proj-b") || strings.Contains(rec.Body.String(), "allowed:") || strings.Contains(rec.Body.String(), "for this token") {
+		t.Fatalf("forbidden response must not leak allowlist details or authorization internals, got body=%q", rec.Body.String())
 	}
 }
 
@@ -1059,6 +1320,11 @@ func TestHandlerPushRejectsMutationUpsertsMissingRequiredFields(t *testing.T) {
 			wantErr: "session payload directory is required for upsert",
 		},
 		{
+			name:    "session upsert blank directory",
+			payload: `{"mutations":[{"entity":"session","entity_key":"s-1","op":"upsert","payload":"{\"id\":\"s-1\",\"directory\":\"   \"}"}]}`,
+			wantErr: "session payload directory is required for upsert",
+		},
+		{
 			name:    "observation upsert missing title",
 			payload: `{"mutations":[{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"s-1\",\"type\":\"decision\",\"content\":\"c\",\"scope\":\"project\"}"}]}`,
 			wantErr: "observation payload title is required for upsert",
@@ -1097,6 +1363,11 @@ func TestHandlerPushRejectsDirectChunkArraysMissingRequiredFields(t *testing.T) 
 		{
 			name:    "session missing directory",
 			payload: `{"sessions":[{"id":"s-1"}]}`,
+			wantErr: "sessions[0].directory is required",
+		},
+		{
+			name:    "session blank directory",
+			payload: `{"sessions":[{"id":"s-1","directory":"   "}]}`,
 			wantErr: "sessions[0].directory is required",
 		},
 		{
@@ -1618,5 +1889,520 @@ func TestInsecureModeLoginRedirects(t *testing.T) {
 	}
 	if loc := rec.Header().Get("Location"); loc != "/dashboard/" {
 		t.Fatalf("expected redirect to /dashboard/, got %q", loc)
+	}
+}
+
+// --- engram#1134: failed request-auth middleware auditing (cloud_auth_audit_log) ---
+
+// requestAuthAuditContextStore captures the context passed to request-auth audit
+// inserts while promoting the rest of adminTestStore's identity-store interface.
+type requestAuthAuditContextStore struct {
+	*adminTestStore
+	hasDeadline    bool
+	deadline       time.Time
+	block          bool
+	done           chan struct{}
+	insertErr      error
+	requiresActive bool
+}
+
+func (s *requestAuthAuditContextStore) InsertAuthAuditEvent(ctx context.Context, event cloudstore.AuthAuditEvent) error {
+	s.deadline, s.hasDeadline = ctx.Deadline()
+	if s.requiresActive && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if s.block {
+		<-ctx.Done()
+		s.insertErr = ctx.Err()
+		close(s.done)
+		return s.insertErr
+	}
+	return s.adminTestStore.InsertAuthAuditEvent(ctx, event)
+}
+
+func TestRequestAuthDeniedAuditInsertUsesBoundedContext(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	store := &requestAuthAuditContextStore{adminTestStore: newAdminTestStore()}
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	requestStarted := time.Now()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if !store.hasDeadline {
+		t.Fatal("request auth audit insert context must have a deadline")
+	}
+	// The insert context must carry the bounded requestAuthAuditInsertTimeout
+	// budget, not merely any deadline: a regression to a longer timeout (e.g. 9s)
+	// must fail here. Monotonic-clock comparisons with a narrow tolerance band
+	// absorb scheduling jitter without accepting a different timeout value.
+	minDeadline := requestStarted.Add(requestAuthAuditInsertTimeout - 25*time.Millisecond)
+	maxDeadline := requestStarted.Add(requestAuthAuditInsertTimeout + 250*time.Millisecond)
+	if store.deadline.Before(minDeadline) || store.deadline.After(maxDeadline) {
+		t.Fatalf("request auth audit insert deadline = %v, want approximately requestStarted+%v (allowed band [%v, %v])", store.deadline, requestAuthAuditInsertTimeout, minDeadline, maxDeadline)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), "unauthorized: unknown token\n"; got != want {
+		t.Fatalf("401 body = %q, want %q", got, want)
+	}
+}
+
+func TestRequestAuthDeniedAuditInsertTimeoutStillRejects(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+
+	baselineStore := newAdminTestStore()
+	baselineSrv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(baselineStore))
+	baselineRec := httptest.NewRecorder()
+	baselineReq := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	baselineReq.Header.Set("Authorization", "Bearer unknown-token")
+	baselineSrv.Handler().ServeHTTP(baselineRec, baselineReq)
+
+	store := &requestAuthAuditContextStore{
+		adminTestStore: newAdminTestStore(),
+		block:          true,
+		done:           make(chan struct{}),
+	}
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	var logBuf bytes.Buffer
+	origLog := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origLog)
+
+	parentCtx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil).WithContext(parentCtx)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.Bytes(), baselineRec.Body.Bytes(); !bytes.Equal(got, want) {
+		t.Fatalf("401 body = %q, want byte-identical baseline %q", got, want)
+	}
+	select {
+	case <-store.done:
+	default:
+		t.Fatal("request auth audit insert did not terminate after its context was done")
+	}
+	if !errors.Is(store.insertErr, context.DeadlineExceeded) {
+		t.Fatalf("request auth audit insert error = %v, want %v", store.insertErr, context.DeadlineExceeded)
+	}
+	if !strings.Contains(logBuf.String(), "request auth audit insert failed") {
+		t.Fatalf("expected best-effort audit insert failure log line, got %q", logBuf.String())
+	}
+}
+
+// assertRequestAuthDeniedEvent verifies the audit event contract for a
+// rejected sync/auth request: action sync.auth, outcome denied, the mapped
+// reason code, and a null actor principal with the "request" actor source
+// (matching the claim in engram#1134).
+func assertRequestAuthDeniedEvent(t *testing.T, event cloudstore.AuthAuditEvent, wantReason string) {
+	t.Helper()
+	if event.Action != "sync.auth" {
+		t.Fatalf("audit action = %q, want %q", event.Action, "sync.auth")
+	}
+	if event.Outcome != authAuditOutcomeDenied {
+		t.Fatalf("audit outcome = %q, want %q", event.Outcome, authAuditOutcomeDenied)
+	}
+	if event.ReasonCode != wantReason {
+		t.Fatalf("audit reason_code = %q, want %q", event.ReasonCode, wantReason)
+	}
+	if event.ActorPrincipalID != "" {
+		t.Fatalf("rejected request auth must not reference an actor principal, got %q", event.ActorPrincipalID)
+	}
+	if event.ActorSource != "request" {
+		t.Fatalf("audit actor_source = %q, want %q", event.ActorSource, "request")
+	}
+	if event.Project != "" {
+		t.Fatalf("request auth audit must not claim a project, got %q", event.Project)
+	}
+	assertNoSensitiveAuditMetadata(t, event)
+}
+
+// TestRequestAuthDeniedAuditsUnknownToken is the engram#1134 regression test:
+// a sync request rejected by the principal resolver must still produce a
+// cloud_auth_audit_log row (best-effort) alongside the 401.
+func TestRequestAuthDeniedAuditsUnknownToken(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	store := newAdminTestStore()
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(store.auditEvents) != 1 {
+		t.Fatalf("expected exactly one auth audit event for the rejected request, got %d: %+v", len(store.auditEvents), store.auditEvents)
+	}
+	assertRequestAuthDeniedEvent(t, store.auditEvents[0], "unknown_token")
+}
+
+// TestRequestAuthDeniedAuditReasonMapping pins the error-class-to-reason_code
+// mapping for every rejection path of the request auth middleware.
+func TestRequestAuthDeniedAuditReasonMapping(t *testing.T) {
+	cases := []struct {
+		name       string
+		header     string
+		sendHeader bool
+		tokenErr   error
+		wantReason string
+		wantBody   string
+	}{
+		{name: "missing authorization header", sendHeader: false, wantReason: "missing_header"},
+		{name: "malformed bearer prefix", header: "Token abc", sendHeader: true, wantReason: "malformed_bearer"},
+		{name: "empty bearer credentials", header: "Bearer ", sendHeader: true, wantReason: "malformed_bearer", wantBody: "unauthorized: authorization must use Bearer token\n"},
+		{name: "bare bearer scheme", header: "Bearer", sendHeader: true, wantReason: "malformed_bearer", wantBody: "unauthorized: authorization must use Bearer token\n"},
+		{name: "surplus bearer credentials", header: "Bearer rejected-token surplus", sendHeader: true, wantReason: "malformed_bearer", wantBody: "unauthorized: authorization must use Bearer token\n"},
+		{name: "unknown token", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrUnknownToken, wantReason: "unknown_token"},
+		{name: "revoked token", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrTokenRevoked, wantReason: "token_revoked"},
+		{name: "disabled principal", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrPrincipalDisabled, wantReason: "principal_disabled"},
+		{name: "token principal mismatch", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrTokenPrincipalMismatch, wantReason: "token_principal_mismatch"},
+		{name: "invalid stored principal", header: "Bearer rejected-token", sendHeader: true, tokenErr: fmt.Errorf("%w: invalid role", cloudauth.ErrInvalidPrincipal), wantReason: "resolver_error"},
+		{name: "pepper missing", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrTokenPepperRequired, wantReason: "pepper_missing"},
+		{name: "resolver failure", header: "Bearer rejected-token", sendHeader: true, tokenErr: errors.New("resolver unavailable"), wantReason: "resolver_error"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authn := resolvingAuth{}
+			if tc.tokenErr != nil {
+				authn.errors = map[string]error{"rejected-token": tc.tokenErr}
+			}
+			store := newAdminTestStore()
+			srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+			if tc.sendHeader {
+				req.Header.Set("Authorization", tc.header)
+			}
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+			}
+			if len(store.auditEvents) != 1 {
+				t.Fatalf("expected exactly one auth audit event, got %d: %+v", len(store.auditEvents), store.auditEvents)
+			}
+			assertRequestAuthDeniedEvent(t, store.auditEvents[0], tc.wantReason)
+			if tc.wantBody != "" && rec.Body.String() != tc.wantBody {
+				t.Fatalf("401 body = %q, want %q", rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
+}
+
+// TestBearerTokenFromRequest pins the pre-PR Authorization parser contract:
+// strings.Fields accepts ordinary spaces and tabs, matching Bearer is
+// case-insensitive, and exactly two fields are required. Every malformed shape
+// maps to errAuthorizationNotBearer so its established 401 body remains
+// byte-identical.
+func TestBearerTokenFromRequest(t *testing.T) {
+	cases := []struct {
+		name      string
+		header    string
+		setHeader bool
+		wantToken string
+		wantErr   error
+	}{
+		{name: "missing header", setHeader: false, wantErr: errMissingAuthorizationHeader},
+		{name: "blank header", header: "   ", setHeader: true, wantErr: errMissingAuthorizationHeader},
+		{name: "valid bearer token", header: "Bearer sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "lowercase scheme", header: "bearer sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "tab separator", header: "Bearer\tsync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "extra inner spaces", header: "Bearer   sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "outer whitespace", header: " \tBearer sync-token\t ", setHeader: true, wantToken: "sync-token"},
+		{name: "mixed separator whitespace", header: "Bearer \t  sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "whitespace inside credential", header: "Bearer sync-\ttoken", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "surplus credentials", header: "Bearer sync-token surplus", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "non-bearer scheme", header: "Token sync-token", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "scheme glued to token", header: "Bearersync-token", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "bearer with trailing space", header: "Bearer ", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "bare bearer scheme", header: "Bearer", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "bearer with only spaces", header: "Bearer    ", setHeader: true, wantErr: errAuthorizationNotBearer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+			if tc.setHeader {
+				req.Header.Set("Authorization", tc.header)
+			}
+			token, err := bearerTokenFromRequest(req)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("bearerTokenFromRequest(%q) error = %v, want %v", tc.header, err, tc.wantErr)
+			}
+			if token != tc.wantToken {
+				t.Fatalf("bearerTokenFromRequest(%q) token = %q, want %q", tc.header, token, tc.wantToken)
+			}
+		})
+	}
+}
+
+// TestRequestAuthDenyReasonClassifiesPrincipalValidationErrors pins the
+// sentinel split between a token/record principal mismatch and a stored
+// principal that fails Validate(): only the former is
+// token_principal_mismatch; the latter falls to the generic resolver_error
+// bucket.
+func TestRequestAuthDenyReasonClassifiesPrincipalValidationErrors(t *testing.T) {
+	if got := requestAuthDenyReason(fmt.Errorf("%w: invalid role", cloudauth.ErrInvalidPrincipal)); got != authAuditReasonResolverError {
+		t.Fatalf("requestAuthDenyReason(principal Validate failure) = %q, want %q", got, authAuditReasonResolverError)
+	}
+	if got := requestAuthDenyReason(cloudauth.ErrTokenPrincipalMismatch); got != authAuditReasonTokenPrincipalMismatch {
+		t.Fatalf("requestAuthDenyReason(ErrTokenPrincipalMismatch) = %q, want %q", got, authAuditReasonTokenPrincipalMismatch)
+	}
+}
+
+// TestRequestAuthDeniedAuditInsertFailureStillRejects proves the audit write
+// is best-effort: a failing audit insert must not turn the rejection into a
+// 500 and must surface both the per-rejection line and the insert failure.
+func TestRequestAuthDeniedAuditInsertFailureStillRejects(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	store := newAdminTestStore()
+	store.auditErr = errors.New("audit table unavailable")
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	var logBuf bytes.Buffer
+	origLog := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origLog)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("audit insert failure must not change the rejection status, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(store.auditEvents) != 0 {
+		t.Fatalf("failed audit inserts must not be recorded, got %+v", store.auditEvents)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "request auth denied") || !strings.Contains(logged, "reason=unknown_token") {
+		t.Fatalf("expected per-rejection log line with mapped reason, got %q", logged)
+	}
+	if !strings.Contains(logged, "request auth audit insert failed") {
+		t.Fatalf("expected best-effort audit insert failure log line, got %q", logged)
+	}
+}
+
+// TestRequestAuthSuccessWritesNoAuditEvent pins the volume rule from the
+// engram#1134 claim: successful request auth stays unaudited per request.
+func TestRequestAuthSuccessWritesNoAuditEvent(t *testing.T) {
+	principal := cloudauth.Principal{ID: "p-managed", Kind: cloudauth.PrincipalKindHuman, Role: cloudauth.RoleMember, Source: cloudauth.PrincipalSourceManagedToken, Enabled: true}
+	authn := resolvingAuth{principals: map[string]cloudauth.Principal{"managed-token": principal}}
+	store := newAdminTestStore()
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer managed-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(store.auditEvents) != 0 {
+		t.Fatalf("successful request auth must not write audit events, got %+v", store.auditEvents)
+	}
+}
+
+// TestLegacyAuthorizeDeniedAuditsAuthorizeError pins the legacy (non-principal)
+// auth branch: its failures are audited best-effort with reason authorize_error.
+func TestLegacyAuthorizeDeniedAuditsAuthorizeError(t *testing.T) {
+	authn := fakeAuth{err: errors.New("legacy token rejected")}
+	store := newAdminTestStore()
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer legacy-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(store.auditEvents) != 1 {
+		t.Fatalf("expected exactly one auth audit event for the legacy rejection, got %d: %+v", len(store.auditEvents), store.auditEvents)
+	}
+	assertRequestAuthDeniedEvent(t, store.auditEvents[0], "authorize_error")
+}
+
+// TestRequestAuthDeniedWithoutAuditSinkStillRejects proves the middleware
+// keeps its rejection behavior when no admin identity store is configured.
+func TestRequestAuthDeniedWithoutAuditSinkStillRejects(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	srv := New(newFakeMutationStore(), authn, 0)
+
+	var logBuf bytes.Buffer
+	origLog := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origLog)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without an audit sink, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(logBuf.String(), "request auth denied") {
+		t.Fatalf("expected per-rejection log line even without an audit sink, got %q", logBuf.String())
+	}
+}
+
+func TestRequestAuthDeniedAuditPersistsAfterRequestCancellation(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	store := &requestAuthAuditContextStore{
+		adminTestStore: newAdminTestStore(),
+		requiresActive: true,
+	}
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 after request cancellation, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), "unauthorized: unknown token\n"; got != want {
+		t.Fatalf("401 body = %q, want %q", got, want)
+	}
+	if len(store.auditEvents) != 1 {
+		t.Fatalf("expected one persisted audit event after cancellation, got %d: %+v", len(store.auditEvents), store.auditEvents)
+	}
+	assertRequestAuthDeniedEvent(t, store.auditEvents[0], "unknown_token")
+}
+
+func TestProjectPolicyDeniedAuditsAuthorizationWithoutCredentials(t *testing.T) {
+	managedPrincipal := cloudauth.Principal{ID: "principal-1", Kind: cloudauth.PrincipalKindHuman, Role: cloudauth.RoleMember, Source: cloudauth.PrincipalSourceManagedToken, Enabled: true}
+	cases := []struct {
+		name          string
+		authn         Authenticator
+		options       []Option
+		bearer        string
+		wantActorID   string
+		wantActorFrom string
+	}{
+		{
+			name:          "managed principal",
+			authn:         resolvingAuth{principals: map[string]cloudauth.Principal{"managed-token": managedPrincipal}},
+			options:       []Option{WithPrincipalProjectAuthorizer(managedGrantAuthorizer{})},
+			bearer:        "managed-token",
+			wantActorID:   "principal-1",
+			wantActorFrom: string(cloudauth.PrincipalSourceManagedToken),
+		},
+		{
+			name: "legacy principal",
+			authn: resolvingAuth{principals: map[string]cloudauth.Principal{
+				"legacy-token": {ID: "legacy:sync", Kind: cloudauth.PrincipalKindLegacy, Role: cloudauth.RoleMember, Source: cloudauth.PrincipalSourceLegacyEnvSync, Enabled: true},
+			}},
+			options:       []Option{WithProjectAuthorizer(fakeAuth{projectErr: errors.New("denied")})},
+			bearer:        "legacy-token",
+			wantActorFrom: string(cloudauth.PrincipalSourceLegacyEnvSync),
+		},
+		{
+			name:          "no principal",
+			authn:         fakeAuth{projectErr: errors.New("denied")},
+			options:       []Option{WithProjectAuthorizer(fakeAuth{projectErr: errors.New("denied")})},
+			wantActorFrom: authAuditActorSourceRequest,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newAdminTestStore()
+			opts := append(tc.options, WithAdminIdentityStore(store))
+			srv := New(newFakeMutationStore(), tc.authn, 0, opts...)
+
+			var logBuf bytes.Buffer
+			origLog := log.Writer()
+			log.SetOutput(&logBuf)
+			defer log.SetOutput(origLog)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=Beta%20Project", nil)
+			if tc.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.bearer)
+			}
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d body=%q", rec.Code, rec.Body.String())
+			}
+			payload := decodeActionableError(t, rec)
+			if payload.Error != `forbidden: project "beta project" is not allowed` {
+				t.Fatalf("403 body changed: %+v", payload)
+			}
+			if len(store.auditEvents) != 1 {
+				t.Fatalf("expected one project authorization audit event, got %d: %+v", len(store.auditEvents), store.auditEvents)
+			}
+			event := store.auditEvents[0]
+			if event.Action != "sync.authorize" || event.Outcome != authAuditOutcomeDenied || event.ReasonCode != "project_forbidden" {
+				t.Fatalf("unexpected project authorization audit event: %+v", event)
+			}
+			if event.Project != "beta project" || event.ActorPrincipalID != tc.wantActorID || event.ActorSource != tc.wantActorFrom || event.Metadata["source"] != tc.wantActorFrom {
+				t.Fatalf("unexpected project authorization attribution: %+v", event)
+			}
+			assertNoSensitiveAuditMetadata(t, event)
+			if strings.Contains(logBuf.String(), "managed-token") || strings.Count(logBuf.String(), "project authorization denied") != 1 {
+				t.Fatalf("expected one safe project authorization log line, got %q", logBuf.String())
+			}
+		})
+	}
+}
+
+// TestWithVersionProducesDisplayLabel pins the display mapping owned by
+// WithVersion. MountConfig.Version is rendered verbatim by the dashboard
+// chrome, so the option has to hand over an already display-ready identifier:
+// a semver build carries exactly one "v" regardless of the shape ldflags or
+// debug.ReadBuildInfo supplied, while a non-semver build identifier such as
+// "dev" must survive untouched (#1657).
+func TestWithVersionProducesDisplayLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "leading v is kept exactly once", in: "v3.0.0", want: "v3.0.0"},
+		{name: "bare semver gains one v", in: "3.0.0", want: "v3.0.0"},
+		{name: "surrounding whitespace is trimmed", in: "  v1.20.3-rc.1  ", want: "v1.20.3-rc.1"},
+		{name: "numeric leading identifier is preserved", in: "123abc", want: "123abc"},
+		{name: "prefixed invalid identifier is preserved", in: "v123abc", want: "v123abc"},
+		{name: "invalid identifier whitespace is trimmed", in: " 123abc \t", want: "123abc"},
+		{name: "prerelease and build gain prefix", in: "1.2.3-rc.1+build.7", want: "v1.2.3-rc.1+build.7"},
+		{name: "invalid prerelease is preserved", in: "1.2.3-01", want: "1.2.3-01"},
+		{name: "invalid build is preserved", in: "1.2.3+", want: "1.2.3+"},
+		{name: "abbreviated major gains prefix", in: "1", want: "v1"},
+		{name: "abbreviated minor stays valid", in: "v1.2", want: "v1.2"},
+		{name: "dev stays dev", in: "dev", want: "dev"},
+		{name: "nonnumeric leading v is preserved", in: "version-test", want: "version-test"},
+		{name: "single v is preserved", in: "v", want: "v"},
+		{name: "empty stays empty", in: "", want: ""},
+		{name: "only whitespace stays empty", in: "   ", want: ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{}, fakeAuth{}, 0, WithVersion(tt.in))
+			if srv.version != tt.want {
+				t.Fatalf("CloudServer.version = %q, want %q (input=%q)", srv.version, tt.want, tt.in)
+			}
+		})
 	}
 }

@@ -3,19 +3,22 @@ package cloudstore
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -55,15 +58,55 @@ func TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns(t *testing.T) {
 	}
 
 	schema := fmt.Sprintf("cloudstore_modern_%d", time.Now().UnixNano())
+	// Registered first so this observes the schema after all fixture cleanups.
+	t.Cleanup(func() {
+		observer, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Error("open fixture cleanup observer failed")
+			return
+		}
+		defer func() {
+			if err := observer.Close(); err != nil {
+				t.Error("close fixture cleanup observer failed")
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var exists bool
+		if err := observer.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)`, schema).Scan(&exists); err != nil {
+			t.Error("query fixture schema cleanup failed")
+			return
+		}
+		if exists {
+			t.Error("migration fixture schema remains after cleanup")
+			return
+		}
+		t.Log("migration fixture schema removed")
+	})
 	adminDB, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open admin db: %v", err)
 	}
-	defer adminDB.Close()
+	// Cleanups run in reverse registration order: drop the schema before closing.
+	t.Cleanup(func() {
+		if err := adminDB.Close(); err != nil {
+			t.Error("close migration fixture admin database failed")
+		}
+	})
 	if _, err := adminDB.ExecContext(context.Background(), `CREATE SCHEMA `+schema); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	t.Cleanup(func() { _, _ = adminDB.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`) })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := adminDB.ExecContext(ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`); err != nil {
+			// Driver errors may include connection details; keep diagnostics bounded.
+			t.Error("drop migration fixture schema failed")
+		}
+	})
+	if os.Getenv("ENGRAM_TEST_MIGRATION_FIXTURE_FAILURE") == "1" {
+		t.Fatal("intentional failure after migration fixture creation")
+	}
 
 	testDSN := dsn + "?search_path=" + schema
 	if strings.Contains(dsn, "?") {
@@ -94,6 +137,97 @@ func TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns(t *testing.T) {
 		t.Fatalf("New should migrate modern cloud_chunks without imported_at/sessions/memories/prompts: %v", err)
 	}
 	cs.Close()
+}
+
+func migrationFixtureCleanupDiagnostic(output string) string {
+	for _, diagnostic := range []string{
+		"open fixture cleanup observer failed",
+		"close fixture cleanup observer failed",
+		"query fixture schema cleanup failed",
+		"migration fixture schema remains after cleanup",
+		"close migration fixture admin database failed",
+		"drop migration fixture schema failed",
+	} {
+		if strings.Contains(output, diagnostic) {
+			return diagnostic
+		}
+	}
+	return ""
+}
+
+func TestMigrationFixtureCleanupDiagnostics(t *testing.T) {
+	const removed = "migration fixture schema removed\n"
+	const intentional = "intentional failure after migration fixture creation\n"
+	for _, diagnostic := range []string{
+		"open fixture cleanup observer failed",
+		"close fixture cleanup observer failed",
+		"query fixture schema cleanup failed",
+		"migration fixture schema remains after cleanup",
+		"close migration fixture admin database failed",
+		"drop migration fixture schema failed",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			output := intentional + diagnostic + "\n" + removed
+			if got := migrationFixtureCleanupDiagnostic(output); got != diagnostic {
+				t.Errorf("cleanup diagnostic = %q, want %q", got, diagnostic)
+			}
+		})
+	}
+	for _, output := range []string{removed, intentional + removed} {
+		if got := migrationFixtureCleanupDiagnostic(output); got != "" {
+			t.Errorf("healthy cleanup reported diagnostic %q", got)
+		}
+	}
+}
+
+func TestMigrationFixtureCleanup(t *testing.T) {
+	dsn := os.Getenv("CLOUDSTORE_TEST_DSN")
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		t.Skip("requires URL-style CLOUDSTORE_TEST_DSN and disposable PostgreSQL")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct {
+		name     string
+		fail     string
+		wantExit int
+	}{
+		{name: "success", fail: "0", wantExit: 0},
+		{name: "failure_after_creation", fail: "1", wantExit: 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns$", "-test.v", "-test.timeout=20s")
+			cmd.Env = append(os.Environ(), "ENGRAM_TEST_MIGRATION_FIXTURE_FAILURE="+scenario.fail)
+			output, err := cmd.CombinedOutput()
+			exitCode := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("run migration fixture subprocess: %v", err)
+				}
+				exitCode = exitErr.ExitCode()
+			}
+			if exitCode != scenario.wantExit {
+				t.Errorf("exit code = %d, want %d", exitCode, scenario.wantExit)
+			}
+			if diagnostic := migrationFixtureCleanupDiagnostic(string(output)); diagnostic != "" {
+				t.Errorf("subprocess reported cleanup error: %s", diagnostic)
+			}
+			if !strings.Contains(string(output), "migration fixture schema removed") {
+				t.Error("subprocess did not confirm schema removal")
+			}
+			if strings.Contains(string(output), "intentional failure after migration fixture creation") != (scenario.fail == "1") {
+				t.Error("subprocess did not reach the expected success/failure path")
+			}
+			if t.Failed() {
+				t.Logf("migration fixture subprocess output:\n%s", output)
+			}
+		})
+	}
 }
 
 func TestMaterializedMutationBatchChunkIncludesObservationAlongsidePromptAndSession(t *testing.T) {
@@ -194,6 +328,86 @@ func TestMaterializedMutationBatchChunksKeepProjectsSeparate(t *testing.T) {
 	}
 	if chunks[0].project != "proj-a" || chunks[1].project != "proj-b" {
 		t.Fatalf("expected project order preserved, got %q then %q", chunks[0].project, chunks[1].project)
+	}
+}
+
+// Direct uploads deliberately retain payload IDs; this parity covers only
+// canonically valid inputs and does not broaden direct-upload normalization.
+func TestMutationOnlyChunkAndMutationPushMaterializeEquivalentEntries(t *testing.T) {
+	project := "proj-mutation-parity"
+	projectValue := project
+	marshal := func(value any) json.RawMessage {
+		t.Helper()
+		payload, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal mutation payload: %v", err)
+		}
+		return payload
+	}
+	batch := []MutationEntry{
+		{Project: project, Entity: store.SyncEntitySession, EntityKey: "sess-1", Op: store.SyncOpUpsert, Payload: marshal(store.Session{ID: "sess-1", Project: project, Directory: "/work/parity", StartedAt: "2026-05-04T09:00:00Z"})},
+		{Project: project, Entity: store.SyncEntityObservation, EntityKey: "obs-1", Op: store.SyncOpUpsert, Payload: marshal(store.Observation{SyncID: "obs-1", SessionID: "sess-1", Project: &projectValue, Type: "decision", Title: "Parity", Content: "same materialization", Scope: "project", CreatedAt: "2026-05-04T09:01:00Z"})},
+		{Project: project, Entity: store.SyncEntityPrompt, EntityKey: "prompt-1", Op: store.SyncOpUpsert, Payload: marshal(store.Prompt{SyncID: "prompt-1", SessionID: "sess-1", Project: project, Content: "parity prompt", CreatedAt: "2026-05-04T09:02:00Z"})},
+	}
+	directChunk := engramsync.ChunkData{Mutations: make([]store.SyncMutation, 0, len(batch))}
+	for _, entry := range batch {
+		directChunk.Mutations = append(directChunk.Mutations, store.SyncMutation{Project: entry.Project, Entity: entry.Entity, EntityKey: entry.EntityKey, Op: entry.Op, Payload: string(entry.Payload)})
+	}
+	direct, err := materializedChunkMutations(project, directChunk)
+	if err != nil {
+		t.Fatalf("materializedChunkMutations direct: %v", err)
+	}
+
+	payload, _, err := materializedMutationBatchChunk(batch)
+	if err != nil {
+		t.Fatalf("materializedMutationBatchChunk: %v", err)
+	}
+	pushed, err := materializedChunkMutations(project, parseMustChunk(t, payload))
+	if err != nil {
+		t.Fatalf("materializedChunkMutations mutation push: %v", err)
+	}
+	if len(direct) != len(pushed) {
+		t.Fatalf("expected %d parity entries, got %d", len(direct), len(pushed))
+	}
+	for i := range direct {
+		if direct[i].Project != pushed[i].Project || direct[i].Entity != pushed[i].Entity || direct[i].EntityKey != pushed[i].EntityKey || direct[i].Op != pushed[i].Op || string(normalizeJSON(direct[i].Payload)) != string(normalizeJSON(pushed[i].Payload)) {
+			t.Fatalf("entry %d differs between direct upload and mutation push\ndirect=%+v\npushed=%+v", i, direct[i], pushed[i])
+		}
+	}
+}
+
+func TestMaterializedChunkMutationsSkipsUnsupportedTypedOperations(t *testing.T) {
+	entries, err := materializedChunkMutations("proj-unsupported-op", engramsync.ChunkData{Mutations: []store.SyncMutation{
+		{Entity: store.SyncEntitySession, EntityKey: "sess-1", Op: "replace", Payload: `{"id":"sess-1"}`},
+		{Entity: store.SyncEntityObservation, EntityKey: "obs-1", Op: "patch", Payload: `{"sync_id":"obs-1"}`},
+		{Entity: store.SyncEntityPrompt, EntityKey: "prompt-1", Op: "merge", Payload: `{"sync_id":"prompt-1"}`},
+		{Entity: store.SyncEntityRelation, EntityKey: "rel-1", Op: "replace", Payload: `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"related","judgment_status":"judged","marked_by_actor":"agent-a","marked_by_kind":"agent"}`},
+	}})
+	if err != nil {
+		t.Fatalf("materializedChunkMutations: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Entity != store.SyncEntityRelation || entries[0].Op != "replace" {
+		t.Fatalf("expected only unchanged relation materialization, got %+v", entries)
+	}
+}
+
+func TestMaterializedChunkMutationsRejectsInvalidTypedUpserts(t *testing.T) {
+	tests := []struct{ name, entity, payload string }{
+		{"session/malformed", store.SyncEntitySession, `{`},
+		{"observation/malformed", store.SyncEntityObservation, `{`},
+		{"prompt/malformed", store.SyncEntityPrompt, `{`},
+		{"null", store.SyncEntitySession, `null`},
+		{"session/mismatch", store.SyncEntitySession, `{"id":"payload-id"}`},
+		{"observation/mismatch", store.SyncEntityObservation, `{"sync_id":"payload-id"}`},
+		{"prompt/mismatch", store.SyncEntityPrompt, `{"sync_id":"payload-id"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := materializeChunkMutation("project", store.SyncMutation{Entity: test.entity, EntityKey: "entity-key", Op: store.SyncOpUpsert, Payload: test.payload})
+			if err == nil {
+				t.Fatalf("expected invalid %s upsert to fail", test.entity)
+			}
+		})
 	}
 }
 
@@ -328,20 +542,21 @@ func TestCollectSessionIDsIncludesChunkSessionsAndMutationSessions(t *testing.T)
 	sessionIDs := collectSessionIDsFromPayload([]byte(`{
 		"sessions":[{"id":"s-1"}],
 		"mutations":[
-			{"entity":"session","op":"upsert","payload":"{\"id\":\"s-2\",\"directory\":\"/tmp/s-2\"}"},
-			{"entity":"session","op":"upsert","payload":"\"{\\\"id\\\":\\\"s-3\\\",\\\"directory\\\":\\\"/tmp/s-3\\\"}\""},
-			{"entity":"observation","op":"upsert","payload":"{\"session_id\":\"s-1\"}"}
+			{"entity":"session","entity_key":"s-1","op":"upsert","payload":"{\"id\":\"s-1\",\"directory\":\"/tmp/s-1\"}"},
+			{"entity":"session","entity_key":"s-2","op":"upsert","payload":"{\"id\":\"s-2\",\"directory\":\"/tmp/s-2\"}"},
+			{"entity":"session","entity_key":"s-3","op":"upsert","payload":"\"{\\\"id\\\":\\\"s-3\\\",\\\"directory\\\":\\\"/tmp/s-3\\\"}\""},
+			{"entity":"session","entity_key":"s-4","op":"upsert","payload":"{\"directory\":\"/tmp/s-4\"}"},
+			{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"session_id\":\"s-1\"}"}
 		]
 	}`))
 
-	if _, ok := sessionIDs["s-1"]; !ok {
-		t.Fatalf("expected session id from chunk sessions")
+	if len(sessionIDs) != 4 {
+		t.Fatalf("expected typed and mutation session IDs to dedupe, got %d: %+v", len(sessionIDs), sessionIDs)
 	}
-	if _, ok := sessionIDs["s-2"]; !ok {
-		t.Fatalf("expected session id from mutation payload")
-	}
-	if _, ok := sessionIDs["s-3"]; !ok {
-		t.Fatalf("expected session id from double-encoded mutation payload")
+	for _, sessionID := range []string{"s-1", "s-2", "s-3", "s-4"} {
+		if _, ok := sessionIDs[sessionID]; !ok {
+			t.Fatalf("expected session id %q from chunk session or mutation", sessionID)
+		}
 	}
 }
 
@@ -371,6 +586,22 @@ func TestParseClientCreatedAt(t *testing.T) {
 			t.Fatal("expected parse error for invalid timestamp")
 		}
 	})
+}
+
+func TestReadManifestEmitsOwnershipModeVersion(t *testing.T) {
+	db, err := sql.Open(projectGrantBindingDriverName, "")
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	manifest, err := (&CloudStore{db: db}).ReadManifest(context.Background(), "proj-a")
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if manifest.Version != 2 {
+		t.Fatalf("manifest version = %d, want 2", manifest.Version)
+	}
 }
 
 func TestSortManifestRowsByServerCreatedAtForReplay(t *testing.T) {
@@ -674,6 +905,120 @@ func TestMaterializedChunkMutationsMaterializesUpsertsExactlyOnce(t *testing.T) 
 	}
 }
 
+func TestInsertMutationBatchFailureIdentifiesFailingEntryAndRollsBack(t *testing.T) {
+	resetPartialFailDriver(1) // succeed first INSERT, fail the second
+	db, err := sql.Open("cloudstore-partial-fail-driver", "dsn")
+	if err != nil {
+		t.Fatalf("open partial failure db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cs := &CloudStore{db: db}
+
+	_, err = cs.InsertMutationBatch(context.Background(), []MutationEntry{
+		{Project: "proj-a", Entity: "custom", EntityKey: "first-entry", Op: "upsert", Payload: json.RawMessage(`{}`)},
+		{Project: "proj-a", Entity: "failing-entity", EntityKey: "failing-key", Op: "upsert", Payload: json.RawMessage(`{}`)},
+	})
+	if err == nil {
+		t.Fatal("expected the second entry to fail")
+	}
+	for _, want := range []string{
+		"batch_index=1",
+		`entity="failing-entity"`,
+		`entity_key="failing-key"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("InsertMutationBatch error = %q, want %q", err, want)
+		}
+	}
+	if tx := partialFailDriverSingleton.lastTx; tx == nil || !tx.rolledBack || tx.committed {
+		t.Fatalf("expected rollback without commit after second-entry failure, got %+v", tx)
+	}
+
+	cause := errors.New("raw-cause-secret-must-not-appear")
+	entryErr := &MutationBatchEntryError{BatchIndex: 1, Entity: "failing-entity", EntityKey: "failing-key", Err: cause}
+	if strings.Contains(entryErr.Error(), cause.Error()) {
+		t.Fatalf("public mutation batch error exposes wrapped cause: %q", entryErr)
+	}
+	if !errors.Is(entryErr, cause) {
+		t.Fatal("expected wrapped cause to remain discoverable with errors.Is")
+	}
+}
+
+type replayIndexDriver struct {
+	indexErr error
+	inserts  int
+}
+
+type replayIndexConn struct{ state *replayIndexDriver }
+type replayIndexRows struct {
+	payload []byte
+	done    bool
+}
+
+func (d *replayIndexDriver) Open(string) (driver.Conn, error) { return &replayIndexConn{state: d}, nil }
+func (d *replayIndexDriver) Connect(context.Context) (driver.Conn, error) {
+	return d.Open("")
+}
+func (d *replayIndexDriver) Driver() driver.Driver { return d }
+func (c *replayIndexConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("unexpected prepare")
+}
+func (c *replayIndexConn) Close() error { return nil }
+func (c *replayIndexConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("unexpected transaction")
+}
+func (c *replayIndexConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if !strings.Contains(query, "SELECT payload::text FROM cloud_chunks") {
+		return nil, fmt.Errorf("unexpected query: %s", query)
+	}
+	return &replayIndexRows{payload: []byte(`{"sessions":[{"id":"s-1"}]}`)}, nil
+}
+func (c *replayIndexConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	if !strings.Contains(query, "INSERT INTO cloud_project_sessions") {
+		return nil, fmt.Errorf("unexpected exec: %s", query)
+	}
+	c.state.inserts++
+	if c.state.indexErr != nil {
+		return nil, c.state.indexErr
+	}
+	return driver.RowsAffected(0), nil
+}
+func (r *replayIndexRows) Columns() []string { return []string{"payload"} }
+func (r *replayIndexRows) Close() error      { return nil }
+func (r *replayIndexRows) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = r.payload
+	return nil
+}
+
+func TestWriteChunkReplayIndexFailure(t *testing.T) {
+	cause := errors.New("session index unavailable")
+	for _, tt := range []struct {
+		name     string
+		indexErr error
+	}{
+		{name: "index failure", indexErr: cause},
+		{name: "healthy replay"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &replayIndexDriver{indexErr: tt.indexErr}
+			db := sql.OpenDB(state)
+			t.Cleanup(func() { _ = db.Close() })
+			payload := []byte(`{"sessions":[{"id":"s-1"}]}`)
+			err := (&CloudStore{db: db}).WriteChunk(context.Background(), "project", chunkIDFromPayload(payload), "tester", "", payload)
+			if !errors.Is(err, tt.indexErr) || (tt.indexErr != nil && !strings.Contains(err.Error(), `index session "s-1"`)) {
+				t.Fatalf("replay error = %v, want index error %v", err, tt.indexErr)
+			}
+			if state.inserts != 1 {
+				t.Fatalf("index insert count = %d, want 1", state.inserts)
+			}
+		})
+	}
+}
+
 func TestWriteChunkMaterializesRelationMutationIntoCloudMutations(t *testing.T) {
 	cs := openTestCloudStore(t)
 	project := "test-chunk-relation-" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "-")
@@ -805,6 +1150,52 @@ func TestWriteChunkMaterializesMutationsAndIsReplayIdempotent(t *testing.T) {
 	if len(mutationsAfterReplay) != 3 {
 		t.Fatalf("expected replay not to duplicate mutations, got %d: %+v", len(mutationsAfterReplay), mutationsAfterReplay)
 	}
+}
+
+func TestWriteChunkMaterializesCanonicalMutationOnlyUpserts(t *testing.T) {
+	cs := openTestCloudStore(t)
+	project := uniqueCloudstoreTestProject("mutation-only-upserts")
+	cleanupCloudstoreProject(t, cs, project)
+	payload, err := chunkcodec.CanonicalizeForProject([]byte(`{"mutations":[
+		{"entity":"session","entity_key":"sess-1","op":"upsert","payload":"{\"id\":\"sess-1\",\"project\":\"`+project+`\",\"directory\":\"/work\",\"started_at\":\"2026-05-04T09:00:00Z\"}"},
+		{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"`+project+`\",\"type\":\"decision\",\"title\":\"Mutation only\",\"content\":\"materialized\",\"scope\":\"project\",\"created_at\":\"2026-05-04T09:01:00Z\"}"},
+		{"entity":"prompt","entity_key":"prompt-1","op":"upsert","payload":"{\"sync_id\":\"prompt-1\",\"session_id\":\"sess-1\",\"project\":\"`+project+`\",\"content\":\"mutation prompt\",\"created_at\":\"2026-05-04T09:02:00Z\"}"}
+	]}`), project)
+	if err != nil {
+		t.Fatalf("canonicalize chunk: %v", err)
+	}
+	ctx, chunkID := context.Background(), chunkIDFromPayload(payload)
+	if err := cs.WriteChunk(ctx, project, chunkID, "tester", "2026-05-04T09:03:00Z", payload); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+	mutations, _, _, err := cs.ListMutationsSince(ctx, 0, 10, []string{project})
+	if err != nil || len(mutations) != 3 {
+		t.Fatalf("expected three materialized mutations, got %+v, %v", mutations, err)
+	}
+	seen := map[string]int{}
+	for _, mutation := range mutations {
+		seen[mutation.Entity+"/"+mutation.EntityKey]++
+	}
+	for _, key := range []string{"session/sess-1", "observation/obs-1", "prompt/prompt-1"} {
+		if seen[key] != 1 {
+			t.Fatalf("expected one materialized %s, got %+v", key, seen)
+		}
+	}
+	known, err := cs.KnownSessionIDs(ctx, project)
+	if err != nil || !containsSessionID(known, "sess-1") {
+		t.Fatalf("expected indexed mutation-only session, got %+v, %v", known, err)
+	}
+	if err := cs.WriteChunk(ctx, project, chunkID, "tester", "2026-05-04T09:03:00Z", payload); err != nil {
+		t.Fatalf("replay WriteChunk: %v", err)
+	}
+	if mutations, _, _, err = cs.ListMutationsSince(ctx, 0, 10, []string{project}); err != nil || len(mutations) != 3 {
+		t.Fatalf("expected idempotent replay, got %+v, %v", mutations, err)
+	}
+}
+
+func containsSessionID(ids map[string]struct{}, id string) bool {
+	_, ok := ids[id]
+	return ok
 }
 
 func TestBackfillMutationChunksMaterializesExistingMutationRows(t *testing.T) {

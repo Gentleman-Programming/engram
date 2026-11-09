@@ -1,11 +1,13 @@
 package obsidian
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 // ─── Mock StoreReader ─────────────────────────────────────────────────────────
@@ -273,6 +275,143 @@ func TestDeletedObsRemoved(t *testing.T) {
 			t.Errorf("expected %s to be deleted, but it still exists", obsFile)
 		}
 	})
+
+	t.Run("deleted observation with path traversal in state file is rejected without deleting external file", func(t *testing.T) {
+		dir := t.TempDir()
+		externalDir := t.TempDir()
+		sensitiveFile := filepath.Join(externalDir, "secret.txt")
+		if err := os.WriteFile(sensitiveFile, []byte("sensitive content"), 0644); err != nil {
+			t.Fatalf("setup sensitive file: %v", err)
+		}
+
+		engRoot := filepath.Join(dir, "engram")
+		if err := os.MkdirAll(engRoot, 0755); err != nil {
+			t.Fatalf("mkdir engRoot: %v", err)
+		}
+
+		relPathToSensitive, err := filepath.Rel(engRoot, sensitiveFile)
+		if err != nil {
+			t.Fatalf("filepath.Rel: %v", err)
+		}
+
+		// Inject path traversal into .engram-sync-state.json
+		state := SyncState{
+			Version: 1,
+			Files: map[int64]string{
+				99: relPathToSensitive,
+			},
+		}
+		statePath := filepath.Join(engRoot, ".engram-sync-state.json")
+		if err := WriteState(statePath, state); err != nil {
+			t.Fatalf("WriteState: %v", err)
+		}
+
+		deletedAt := "2026-02-01T00:00:00Z"
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{},
+				Observations: []store.Observation{
+					{
+						ID:        99,
+						Type:      "bugfix",
+						Title:     "Traverse",
+						DeletedAt: &deletedAt,
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+
+		exp := NewExporter(ms, ExportConfig{VaultPath: dir})
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Sensitive file must NOT be deleted
+		if !fileExists(sensitiveFile) {
+			t.Errorf("expected %s to be preserved, but it was deleted via path traversal", sensitiveFile)
+		}
+		if result.Deleted != 0 {
+			t.Errorf("expected 0 deleted, got %d", result.Deleted)
+		}
+		if len(result.Errors) == 0 {
+			t.Errorf("expected error reporting unsafe path rejection, got none")
+		}
+		// The permanently unsafe entry must be dropped from persisted state so it
+		// is not retried (and re-reported) on every subsequent export.
+		persisted, err := ReadState(statePath)
+		if err != nil {
+			t.Fatalf("ReadState: %v", err)
+		}
+		if _, stillTracked := persisted.Files[99]; stillTracked {
+			t.Errorf("unsafe Files[99] entry survived in state, expected it dropped")
+		}
+	})
+
+	t.Run("deleted observation through intermediate symlink preserves external file and state", func(t *testing.T) {
+		vault := t.TempDir()
+		externalDir := t.TempDir()
+		sensitiveFile := filepath.Join(externalDir, "sensitive.md")
+		if err := os.WriteFile(sensitiveFile, []byte("sensitive content"), 0644); err != nil {
+			t.Fatalf("setup sensitive file: %v", err)
+		}
+
+		engRoot := filepath.Join(vault, "engram")
+		if err := os.MkdirAll(engRoot, 0755); err != nil {
+			t.Fatalf("mkdir engRoot: %v", err)
+		}
+		if err := os.Symlink(externalDir, filepath.Join(engRoot, "linked")); err != nil {
+			t.Skipf("symlink creation is unavailable: %v", err)
+		}
+
+		state := SyncState{
+			Version: 1,
+			Files: map[int64]string{
+				100: filepath.Join("linked", "sensitive.md"),
+			},
+		}
+		statePath := filepath.Join(engRoot, ".engram-sync-state.json")
+		if err := WriteState(statePath, state); err != nil {
+			t.Fatalf("WriteState: %v", err)
+		}
+
+		deletedAt := "2026-02-01T00:00:00Z"
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{},
+				Observations: []store.Observation{{
+					ID:        100,
+					Type:      "bugfix",
+					Title:     "Symlink escape",
+					DeletedAt: &deletedAt,
+				}},
+				Prompts: []store.Prompt{},
+			},
+		}
+
+		result, err := NewExporter(ms, ExportConfig{VaultPath: vault}).Export()
+		if err != nil {
+			t.Fatalf("Export() error: %v", err)
+		}
+		if !fileExists(sensitiveFile) {
+			t.Errorf("expected external file %s to be preserved, but it was deleted", sensitiveFile)
+		}
+		if result.Deleted != 0 {
+			t.Errorf("Deleted: got %d, want 0", result.Deleted)
+		}
+		if len(result.Errors) == 0 || !strings.Contains(result.Errors[0].Error(), "delete") {
+			t.Errorf("expected deletion containment error, got %v", result.Errors)
+		}
+
+		updatedState, err := ReadState(statePath)
+		if err != nil {
+			t.Fatalf("ReadState: %v", err)
+		}
+		if got := updatedState.PendingRetirements[100]; len(got) != 1 || got[0] != filepath.Join("linked", "sensitive.md") {
+			t.Errorf("pending retirement = %v; want tracked symlink path", got)
+		}
+	})
 }
 
 // ─── Task 2.7: TestProjectFilter ─────────────────────────────────────────────
@@ -374,6 +513,395 @@ func TestProjectFilter(t *testing.T) {
 			t.Errorf("Created: got %d, want 2 (all projects)", result.Created)
 		}
 	})
+}
+
+// ─── Org filter (#776) ───────────────────────────────────────────────────────
+
+func TestOrgFilter(t *testing.T) {
+	t.Run("--org flag limits exported observations to matching org", func(t *testing.T) {
+		dir := t.TempDir()
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{
+					{ID: "sess-1", Project: "eng"},
+					{ID: "sess-2", Project: "eng"},
+				},
+				Observations: []store.Observation{
+					{
+						ID:        1,
+						SessionID: "sess-1",
+						Type:      "bugfix",
+						Title:     "Acme fix",
+						Content:   "acme fix content",
+						Scope:     "project",
+						CreatedAt: "2026-01-01T10:00:00Z",
+						UpdatedAt: "2026-01-01T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("acme-corp"),
+					},
+					{
+						ID:        2,
+						SessionID: "sess-2",
+						Type:      "decision",
+						Title:     "Globex decision",
+						Content:   "globex decision content",
+						Scope:     "project",
+						CreatedAt: "2026-01-02T10:00:00Z",
+						UpdatedAt: "2026-01-02T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("globex-inc"),
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+		cfg := ExportConfig{VaultPath: dir, Org: "acme-corp"}
+		exp := NewExporter(ms, cfg)
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created: got %d, want 1 (only acme-corp org)", result.Created)
+		}
+		// The globex-inc obs must NOT have a file
+		globexFile := dir + "/engram/eng/decision/globex-decision-2.md"
+		if fileExists(globexFile) {
+			t.Errorf("unexpected file for filtered-out org: %s", globexFile)
+		}
+	})
+
+	t.Run("no org filter exports observations regardless of org", func(t *testing.T) {
+		dir := t.TempDir()
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{
+					{ID: "sess-1", Project: "eng"},
+					{ID: "sess-2", Project: "eng"},
+				},
+				Observations: []store.Observation{
+					{
+						ID:        1,
+						SessionID: "sess-1",
+						Type:      "bugfix",
+						Title:     "Acme fix",
+						Content:   "acme fix content",
+						Scope:     "project",
+						CreatedAt: "2026-01-01T10:00:00Z",
+						UpdatedAt: "2026-01-01T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("acme-corp"),
+					},
+					{
+						ID:        2,
+						SessionID: "sess-2",
+						Type:      "decision",
+						Title:     "Untagged decision",
+						Content:   "untagged decision content",
+						Scope:     "project",
+						CreatedAt: "2026-01-02T10:00:00Z",
+						UpdatedAt: "2026-01-02T10:00:00Z",
+						Project:   strPtr("eng"),
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+		cfg := ExportConfig{VaultPath: dir, Org: ""} // no filter
+		exp := NewExporter(ms, cfg)
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.Created != 2 {
+			t.Errorf("Created: got %d, want 2 (all orgs)", result.Created)
+		}
+	})
+
+	t.Run("re-export scoped to a narrower org removes files for observations that fell out of scope", func(t *testing.T) {
+		dir := t.TempDir()
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{
+					{ID: "sess-1", Project: "eng"},
+					{ID: "sess-2", Project: "eng"},
+				},
+				Observations: []store.Observation{
+					{
+						ID:        1,
+						SessionID: "sess-1",
+						Type:      "bugfix",
+						Title:     "Acme fix",
+						Content:   "acme fix content",
+						Scope:     "project",
+						CreatedAt: "2026-01-01T10:00:00Z",
+						UpdatedAt: "2026-01-01T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("acme-corp"),
+					},
+					{
+						ID:        2,
+						SessionID: "sess-2",
+						Type:      "decision",
+						Title:     "Globex decision",
+						Content:   "globex decision content",
+						Scope:     "project",
+						CreatedAt: "2026-01-02T10:00:00Z",
+						UpdatedAt: "2026-01-02T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("globex-inc"),
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+
+		// First export: unfiltered, both observations land in the vault, each
+		// with its own session hub (sess-1 for acme, sess-2 for globex).
+		cfg := ExportConfig{VaultPath: dir}
+		exp := NewExporter(ms, cfg)
+		first, err := exp.Export()
+		if err != nil {
+			t.Fatalf("first Export() error: %v", err)
+		}
+		if first.Created != 2 {
+			t.Fatalf("first export Created: got %d, want 2", first.Created)
+		}
+		globexFile := dir + "/engram/eng/decision/globex-decision-2.md"
+		if !fileExists(globexFile) {
+			t.Fatalf("expected globex file after unfiltered export: %s", globexFile)
+		}
+		globexHub := dir + "/engram/_sessions/sess-2.md"
+		acmeHub := dir + "/engram/_sessions/sess-1.md"
+		if !fileExists(globexHub) {
+			t.Fatalf("expected globex session hub after unfiltered export: %s", globexHub)
+		}
+		if !fileExists(acmeHub) {
+			t.Fatalf("expected acme session hub after unfiltered export: %s", acmeHub)
+		}
+
+		// Second export: scoped to acme-corp only. The globex-inc observation
+		// falls out of scope; its previously tracked file AND its now-empty
+		// session hub must both be removed rather than left behind as
+		// orphans — the exporter is documented as a live mirror of the
+		// current selection.
+		cfg2 := ExportConfig{VaultPath: dir, Org: "acme-corp"}
+		exp2 := NewExporter(ms, cfg2)
+		second, err := exp2.Export()
+		if err != nil {
+			t.Fatalf("second Export() error: %v", err)
+		}
+		if fileExists(globexFile) {
+			t.Errorf("expected globex file removed after re-export scoped to acme-corp: %s", globexFile)
+		}
+		if fileExists(globexHub) {
+			t.Errorf("expected globex session hub removed after re-export scoped to acme-corp: %s", globexHub)
+		}
+		if second.Deleted != 2 {
+			t.Errorf("second export Deleted: got %d, want 2 (orphaned globex file + session hub)", second.Deleted)
+		}
+		acmeFile := dir + "/engram/eng/bugfix/acme-fix-1.md"
+		if !fileExists(acmeFile) {
+			t.Errorf("expected acme file to remain after re-export scoped to acme-corp: %s", acmeFile)
+		}
+		if !fileExists(acmeHub) {
+			t.Errorf("expected acme session hub to remain after re-export scoped to acme-corp: %s", acmeHub)
+		}
+	})
+
+	t.Run("project-scoped re-export narrowed by org retires the excluded org's stale hub", func(t *testing.T) {
+		dir := t.TempDir()
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{
+					{ID: "sess-1", Project: "eng"},
+					{ID: "sess-2", Project: "eng"},
+				},
+				Observations: []store.Observation{
+					{
+						ID: 1, SessionID: "sess-1", Type: "bugfix",
+						Title: "Acme fix", Content: "acme fix content", Scope: "project",
+						CreatedAt: "2026-01-01T10:00:00Z", UpdatedAt: "2026-01-01T10:00:00Z",
+						Project: strPtr("eng"), Org: strPtr("acme-corp"),
+					},
+					{
+						ID: 2, SessionID: "sess-2", Type: "decision",
+						Title: "Globex decision", Content: "globex decision content", Scope: "project",
+						CreatedAt: "2026-01-02T10:00:00Z", UpdatedAt: "2026-01-02T10:00:00Z",
+						Project: strPtr("eng"), Org: strPtr("globex-inc"),
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+
+		// First export is PROJECT-scoped (Project: "eng") with no org filter, so
+		// both orgs' notes and session hubs land. This exercises the !fullScope
+		// branch the empty-Project narrowing test above never reaches (#776).
+		first, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "eng"}).Export()
+		if err != nil {
+			t.Fatalf("first Export() error: %v", err)
+		}
+		if first.Created != 2 {
+			t.Fatalf("first export Created: got %d, want 2", first.Created)
+		}
+		acmeHub := dir + "/engram/_sessions/sess-1.md"
+		globexHub := dir + "/engram/_sessions/sess-2.md"
+		if !fileExists(acmeHub) || !fileExists(globexHub) {
+			t.Fatalf("expected both session hubs after project-scoped export")
+		}
+
+		// Narrow to one org WITHIN the same project. The globex note and its now
+		// orphaned session hub must both be retired even though fullScope is false.
+		second, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "eng", Org: "acme-corp"}).Export()
+		if err != nil {
+			t.Fatalf("second Export() error: %v", err)
+		}
+		globexFile := dir + "/engram/eng/decision/globex-decision-2.md"
+		if fileExists(globexFile) {
+			t.Errorf("globex note should be retired after org narrowing: %s", globexFile)
+		}
+		if fileExists(globexHub) {
+			t.Errorf("stale globex session hub should be retired after org narrowing: %s", globexHub)
+		}
+		if !fileExists(acmeHub) {
+			t.Errorf("acme session hub must remain in the selected scope: %s", acmeHub)
+		}
+		if second.Deleted != 2 {
+			t.Errorf("second export Deleted: got %d, want 2 (globex note + stale hub)", second.Deleted)
+		}
+	})
+}
+
+// TestExportPreservesForeignProjectTracking covers a StoreReader that returns two
+// live projects. The CLI prefilters rows, but the exporter interface must not
+// retire a foreign project's tracking when a later run is scoped to a different
+// project, or a subsequent export of that project would rewrite an unchanged
+// note (#776, danielgap review).
+func TestExportPreservesForeignProjectTracking(t *testing.T) {
+	dir := t.TempDir()
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{
+				{ID: "sess-a", Project: "alpha"},
+				{ID: "sess-b", Project: "beta"},
+			},
+			Observations: []store.Observation{
+				{
+					ID: 1, SessionID: "sess-a", Type: "note",
+					Title: "Alpha note", Content: "alpha content", Scope: "project",
+					CreatedAt: "2026-01-01T10:00:00Z", UpdatedAt: "2026-01-01T10:00:00Z",
+					Project: strPtr("alpha"),
+				},
+				{
+					ID: 2, SessionID: "sess-b", Type: "note",
+					Title: "Beta note", Content: "beta content", Scope: "project",
+					CreatedAt: "2026-01-02T10:00:00Z", UpdatedAt: "2026-01-02T10:00:00Z",
+					Project: strPtr("beta"),
+				},
+			},
+			Prompts: []store.Prompt{},
+		},
+	}
+
+	// First export is unscoped: both projects are tracked.
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export(); err != nil {
+		t.Fatalf("first Export() error: %v", err)
+	}
+	betaFile := dir + "/engram/beta/note/beta-note-2.md"
+	betaBefore, err := os.ReadFile(betaFile)
+	if err != nil {
+		t.Fatalf("read beta file after first export: %v", err)
+	}
+	betaHub := dir + "/engram/_sessions/sess-b.md"
+	if !fileExists(betaHub) {
+		t.Fatalf("expected beta session hub after unscoped export: %s", betaHub)
+	}
+
+	// Second export scoped to alpha only. Beta is a live foreign-project row.
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "alpha"}).Export(); err != nil {
+		t.Fatalf("scoped Export() error: %v", err)
+	}
+
+	// Beta's file contents must survive untouched...
+	betaAfter, err := os.ReadFile(betaFile)
+	if err != nil {
+		t.Fatalf("beta file must survive a scoped-to-alpha export: %v", err)
+	}
+	if string(betaAfter) != string(betaBefore) {
+		t.Errorf("beta file rewritten by a scoped-to-alpha export")
+	}
+	// ...and its live tracking must remain, or a later beta export rewrites it.
+	state, err := ReadState(dir + "/engram/.engram-sync-state.json")
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if _, tracked := state.Files[2]; !tracked {
+		t.Errorf("beta observation lost its tracking after a scoped-to-alpha export")
+	}
+	// The foreign project's session hub must survive the scoped run too.
+	if !fileExists(betaHub) {
+		t.Errorf("beta session hub removed by a scoped-to-alpha export: %s", betaHub)
+	}
+}
+
+// TestScopedExportPreservesSharedTopicHub covers the cross-project nature of
+// topic hubs: a topic aggregates notes from any project, so a project-scoped
+// export — which only sees its own project's rows — must never prune a topic
+// hub that another project's notes still depend on (#776, danielgap review).
+func TestScopedExportPreservesSharedTopicHub(t *testing.T) {
+	dir := t.TempDir()
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{
+				{ID: "sess-a", Project: "alpha"},
+				{ID: "sess-b", Project: "beta"},
+			},
+			Observations: []store.Observation{
+				{
+					ID: 1, SessionID: "sess-a", Type: "note",
+					Title: "Alpha deploy", Content: "alpha content", Scope: "project",
+					CreatedAt: "2026-01-01T10:00:00Z", UpdatedAt: "2026-01-01T10:00:00Z",
+					Project: strPtr("alpha"), TopicKey: strPtr("deploy"),
+				},
+				{
+					ID: 2, SessionID: "sess-b", Type: "note",
+					Title: "Beta deploy", Content: "beta content", Scope: "project",
+					CreatedAt: "2026-01-02T10:00:00Z", UpdatedAt: "2026-01-02T10:00:00Z",
+					Project: strPtr("beta"), TopicKey: strPtr("deploy"),
+				},
+			},
+			Prompts: []store.Prompt{},
+		},
+	}
+
+	// Full export: alpha and beta share the "deploy" topic, so its hub exists
+	// (two references clear the creation threshold).
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export(); err != nil {
+		t.Fatalf("first Export() error: %v", err)
+	}
+	state, err := ReadState(dir + "/engram/.engram-sync-state.json")
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	topicHub, ok := state.TopicHubs["deploy"]
+	if !ok {
+		t.Fatalf("expected a shared topic hub for \"deploy\" after full export")
+	}
+	topicHubPath := dir + "/engram/" + topicHub
+	if !fileExists(topicHubPath) {
+		t.Fatalf("expected topic hub file after full export: %s", topicHubPath)
+	}
+
+	// Scope to alpha. Only alpha's "deploy" note is live this run (one
+	// reference, below the hub threshold), but beta's note still links the
+	// shared hub, so it must survive.
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "alpha"}).Export(); err != nil {
+		t.Fatalf("scoped Export() error: %v", err)
+	}
+	if !fileExists(topicHubPath) {
+		t.Errorf("shared topic hub pruned by a scoped-to-alpha export: %s", topicHubPath)
+	}
 }
 
 // ─── Task 2.9: TestFullExportPipeline ────────────────────────────────────────
@@ -548,6 +1076,250 @@ func TestExporterCallsGraphConfig(t *testing.T) {
 	})
 }
 
+func TestExportSessionHubsCreateNestedDirectories(t *testing.T) {
+	for _, sessionID := range []string{
+		"sdd/change-2026-09-10/summary",
+		"sdd-apply/change-2026-09-10/apply",
+	} {
+		t.Run(sessionID, func(t *testing.T) {
+			vault := t.TempDir()
+			ms := &mockStore{
+				exportData: &store.ExportData{
+					Sessions: []store.Session{{ID: sessionID, Project: "engram"}},
+					Observations: []store.Observation{{
+						ID:        1,
+						SessionID: sessionID,
+						Type:      "bugfix",
+						Title:     "Nested session hub",
+						Content:   "content",
+						Scope:     "project",
+						CreatedAt: "2026-09-10T00:00:00Z",
+						UpdatedAt: "2026-09-10T00:00:00Z",
+						Project:   strPtr("engram"),
+					}},
+				},
+			}
+
+			result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+			if err != nil {
+				t.Fatalf("Export() error: %v", err)
+			}
+			if result.Created != 1 || result.HubsCreated != 1 || len(result.Errors) != 0 {
+				t.Fatalf("result = %+v, want one observation and one hub without errors", result)
+			}
+
+			hubPath := filepath.Join(vault, "engram", "_sessions", sessionID+".md")
+			if _, err := os.Stat(hubPath); err != nil {
+				t.Fatalf("nested session hub %q: %v", hubPath, err)
+			}
+
+			state, err := ReadState(filepath.Join(vault, "engram", ".engram-sync-state.json"))
+			if err != nil {
+				t.Fatalf("ReadState: %v", err)
+			}
+			if got, want := state.SessionHubs[sessionID], filepath.Join("_sessions", sessionID+".md"); got != want {
+				t.Fatalf("state.SessionHubs[%q] = %q, want %q", sessionID, got, want)
+			}
+		})
+	}
+}
+
+func TestExportRejectsSessionHubPathsOutsideSessionsDirectory(t *testing.T) {
+	vault := t.TempDir()
+	sessionID := "../../outside/escape"
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{{ID: sessionID, Project: "engram"}},
+			Observations: []store.Observation{{
+				ID:        1,
+				SessionID: sessionID,
+				Type:      "bugfix",
+				Title:     "Traversal session hub",
+				Content:   "content",
+				Scope:     "project",
+				CreatedAt: "2026-09-10T00:00:00Z",
+				UpdatedAt: "2026-09-10T00:00:00Z",
+				Project:   strPtr("engram"),
+			}},
+		},
+	}
+
+	result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+	if err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+	if result.Created != 1 || result.HubsCreated != 0 || len(result.Errors) != 1 {
+		t.Fatalf("result = %+v, want one observation, no hub, and one path error", result)
+	}
+	if !strings.Contains(result.Errors[0].Error(), "unsafe session hub path") {
+		t.Fatalf("error = %v, want unsafe session hub path error", result.Errors[0])
+	}
+
+	outsideHub := filepath.Join(vault, "outside", "escape.md")
+	if _, err := os.Stat(outsideHub); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside hub %q exists or could not be checked: %v", outsideHub, err)
+	}
+	state, err := ReadState(filepath.Join(vault, "engram", ".engram-sync-state.json"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if _, exists := state.SessionHubs[sessionID]; exists {
+		t.Fatalf("state recorded rejected session hub %q", sessionID)
+	}
+}
+
+func TestExportRecordsSessionHubParentCreationFailure(t *testing.T) {
+	vault := t.TempDir()
+	sessionID := "sdd/blocked/summary"
+	blockingFile := filepath.Join(vault, "engram", "_sessions", "sdd")
+	if err := os.MkdirAll(filepath.Dir(blockingFile), 0755); err != nil {
+		t.Fatalf("setup session hub parent: %v", err)
+	}
+	if err := os.WriteFile(blockingFile, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("setup blocking file: %v", err)
+	}
+
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{{ID: sessionID, Project: "engram"}},
+			Observations: []store.Observation{{
+				ID:        1,
+				SessionID: sessionID,
+				Type:      "bugfix",
+				Title:     "Blocked session hub",
+				Content:   "content",
+				Scope:     "project",
+				CreatedAt: "2026-09-10T00:00:00Z",
+				UpdatedAt: "2026-09-10T00:00:00Z",
+				Project:   strPtr("engram"),
+			}},
+		},
+	}
+
+	result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+	if err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+	if result.Created != 1 || result.HubsCreated != 0 || len(result.Errors) != 1 {
+		t.Fatalf("result = %+v, want one observation, no hub, and one parent error", result)
+	}
+	if !strings.Contains(result.Errors[0].Error(), "mkdir session hub") {
+		t.Fatalf("error = %v, want session hub parent creation error", result.Errors[0])
+	}
+
+	state, err := ReadState(filepath.Join(vault, "engram", ".engram-sync-state.json"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if _, exists := state.SessionHubs[sessionID]; exists {
+		t.Fatalf("state recorded failed session hub %q", sessionID)
+	}
+	if _, err := os.Stat(filepath.Join(vault, "engram", "_sessions", "sdd", "blocked", "summary.md")); err == nil {
+		t.Fatal("session hub was written despite blocked parent")
+	}
+}
+
+func TestExportRejectsSessionHubSymlinkEscape(t *testing.T) {
+	vault := t.TempDir()
+	outside := t.TempDir()
+	sessionID := "sdd/escape"
+	sessionsDir := filepath.Join(vault, "engram", "_sessions")
+	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
+		t.Fatalf("setup sessions directory: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(sessionsDir, "sdd")); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{{ID: sessionID, Project: "engram"}},
+			Observations: []store.Observation{{
+				ID:        1,
+				SessionID: sessionID,
+				Type:      "bugfix",
+				Title:     "Symlink session hub",
+				Content:   "content",
+				Scope:     "project",
+				CreatedAt: "2026-09-10T00:00:00Z",
+				UpdatedAt: "2026-09-10T00:00:00Z",
+				Project:   strPtr("engram"),
+			}},
+		},
+	}
+
+	result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+	if err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+	if result.Created != 1 || result.HubsCreated != 0 || len(result.Errors) != 1 {
+		t.Fatalf("result = %+v, want one observation, no hub, and one symlink error", result)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escape.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside hub exists or could not be checked: %v", err)
+	}
+
+	state, err := ReadState(filepath.Join(vault, "engram", ".engram-sync-state.json"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if _, exists := state.SessionHubs[sessionID]; exists {
+		t.Fatalf("state recorded rejected session hub %q", sessionID)
+	}
+}
+
+func TestExportRecordsGenuineObservationWriteFailures(t *testing.T) {
+	vault := t.TempDir()
+	blockedPath := filepath.Join(vault, "engram", "engram", "bugfix", "blocked-export-1.md")
+	if err := os.MkdirAll(blockedPath, 0755); err != nil {
+		t.Fatalf("setup blocked output directory: %v", err)
+	}
+
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{{ID: "session-1", Project: "engram"}},
+			Observations: []store.Observation{
+				{
+					ID:        1,
+					SessionID: "session-1",
+					Type:      "bugfix",
+					Title:     "Blocked export",
+					Content:   "blocked",
+					Scope:     "project",
+					CreatedAt: "2026-09-10T00:00:00Z",
+					UpdatedAt: "2026-09-10T00:00:00Z",
+					Project:   strPtr("engram"),
+				},
+				{
+					ID:        2,
+					SessionID: "session-1",
+					Type:      "bugfix",
+					Title:     "Successful export",
+					Content:   "written",
+					Scope:     "project",
+					CreatedAt: "2026-09-10T00:00:00Z",
+					UpdatedAt: "2026-09-10T00:00:00Z",
+					Project:   strPtr("engram"),
+				},
+			},
+		},
+	}
+
+	result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+	if err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+	if result.Created != 1 || result.HubsCreated != 1 || len(result.Errors) != 1 {
+		t.Fatalf("result = %+v, want one created observation, one hub, and one write error", result)
+	}
+	if !strings.Contains(result.Errors[0].Error(), "write") {
+		t.Fatalf("error = %v, want write failure", result.Errors[0])
+	}
+	if !fileExists(filepath.Join(vault, "engram", "engram", "bugfix", "successful-export-2.md")) {
+		t.Fatal("successful observation was not exported")
+	}
+}
+
 // ─── Security: TestPathTraversalPrevention (Issue #180) ──────────────────────
 
 // TestPathTraversalPrevention asserts that malicious Project or Type values
@@ -676,21 +1448,21 @@ func buildPipelineFixtures(deletedAt string) *store.ExportData {
 	}
 
 	// Build 20 observations:
-	//   - obs 1..4: project-a, sess-alpha, topic "sdd/plugin" (cluster ≥2)
-	//   - obs 5..8: project-a, sess-beta, topic "sdd/design" (same cluster "sdd")
+	//   - obs 1..4: project-a, sess-alpha, topic "architecture/plugin" (cluster ≥2)
+	//   - obs 5..8: project-a, sess-beta, topic "architecture/design" (same cluster "architecture")
 	//   - obs 9..12: project-b, sess-gamma, topic "auth/jwt" (cluster ≥2)
 	//   - obs 13..16: project-b, sess-delta, topic "auth/sessions"
 	//   - obs 17..19: project-c, sess-epsilon, no topic (singleton project)
 	//   - obs 20: project-a, deleted (should not be exported / creates delete on 2nd run)
 	observations := []store.Observation{
-		makeObs(1, "sess-alpha", "project-a", "architecture", "SDD Plugin Arch", "sdd/plugin", "2026-01-01T01:00:00Z"),
-		makeObs(2, "sess-alpha", "project-a", "decision", "SDD Plugin Decision", "sdd/plugin", "2026-01-01T02:00:00Z"),
-		makeObs(3, "sess-alpha", "project-a", "bugfix", "SDD Plugin Fix", "sdd/plugin", "2026-01-01T03:00:00Z"),
-		makeObs(4, "sess-alpha", "project-a", "learning", "SDD Plugin Learning", "sdd/plugin", "2026-01-01T04:00:00Z"),
-		makeObs(5, "sess-beta", "project-a", "architecture", "SDD Design Arch", "sdd/design", "2026-01-02T01:00:00Z"),
-		makeObs(6, "sess-beta", "project-a", "decision", "SDD Design Decision", "sdd/design", "2026-01-02T02:00:00Z"),
-		makeObs(7, "sess-beta", "project-a", "bugfix", "SDD Design Fix", "sdd/design", "2026-01-02T03:00:00Z"),
-		makeObs(8, "sess-beta", "project-a", "pattern", "SDD Design Pattern", "sdd/design", "2026-01-02T04:00:00Z"),
+		makeObs(1, "sess-alpha", "project-a", "architecture", "Plugin Architecture", "architecture/plugin", "2026-01-01T01:00:00Z"),
+		makeObs(2, "sess-alpha", "project-a", "decision", "Plugin Decision", "architecture/plugin", "2026-01-01T02:00:00Z"),
+		makeObs(3, "sess-alpha", "project-a", "bugfix", "Plugin Fix", "architecture/plugin", "2026-01-01T03:00:00Z"),
+		makeObs(4, "sess-alpha", "project-a", "learning", "Plugin Learning", "architecture/plugin", "2026-01-01T04:00:00Z"),
+		makeObs(5, "sess-beta", "project-a", "architecture", "Design Architecture", "architecture/design", "2026-01-02T01:00:00Z"),
+		makeObs(6, "sess-beta", "project-a", "decision", "Design Decision", "architecture/design", "2026-01-02T02:00:00Z"),
+		makeObs(7, "sess-beta", "project-a", "bugfix", "Design Fix", "architecture/design", "2026-01-02T03:00:00Z"),
+		makeObs(8, "sess-beta", "project-a", "pattern", "Design Pattern", "architecture/design", "2026-01-02T04:00:00Z"),
 		makeObs(9, "sess-gamma", "project-b", "architecture", "Auth JWT Arch", "auth/jwt", "2026-01-03T01:00:00Z"),
 		makeObs(10, "sess-gamma", "project-b", "decision", "Auth JWT Decision", "auth/jwt", "2026-01-03T02:00:00Z"),
 		makeObs(11, "sess-gamma", "project-b", "bugfix", "Auth JWT Fix", "auth/jwt", "2026-01-03T03:00:00Z"),
@@ -741,4 +1513,218 @@ func makeObs(id int64, sessionID, project, obsType, title, topicKey, ts string) 
 		obs.TopicKey = strPtr(topicKey)
 	}
 	return obs
+}
+
+// ─── Issue #1900: reconcile notes left behind by deletions and renames ────────
+
+// staleNoteExport is a small harness for the reconciliation cases: it exports
+// a vault, then exports again with a different store snapshot.
+func newReconcileVault(t *testing.T) (dir, engRoot string) {
+	t.Helper()
+	dir = t.TempDir()
+	engRoot = filepath.Join(dir, "engram")
+	if err := os.MkdirAll(engRoot, 0755); err != nil {
+		t.Fatalf("mkdir engRoot: %v", err)
+	}
+	return dir, engRoot
+}
+
+func readStateFiles(t *testing.T, engRoot string) SyncState {
+	t.Helper()
+	state, err := ReadState(filepath.Join(engRoot, ".engram-sync-state.json"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	return state
+}
+
+func TestExportRemovesNoteOfHardDeletedObservation(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	stale := filepath.Join(engRoot, "demo", "manual", "hard-gone-2.md")
+	if err := writeFile(stale, []byte("stale")); err != nil {
+		t.Fatalf("setup stale note: %v", err)
+	}
+	keep := makeObs(1, "sess-1", "demo", "manual", "keep me", "", "2026-01-01T10:00:00Z")
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{1: "demo/manual/keep-me-1.md", 2: "demo/manual/hard-gone-2.md"},
+		SessionHubs: map[string]string{},
+		TopicHubs:   map[string]string{},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	// Observation 2 was hard deleted: the store no longer returns its row.
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{keep},
+	}}
+	result, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Deleted != 1 {
+		t.Errorf("Deleted: got %d, want 1", result.Deleted)
+	}
+	if fileExists(stale) {
+		t.Errorf("expected %s to be deleted, but it still exists", stale)
+	}
+	if _, tracked := readStateFiles(t, engRoot).Files[2]; tracked {
+		t.Error("hard-deleted observation is still tracked in the sync state")
+	}
+	if _, tracked := readStateFiles(t, engRoot).Files[1]; !tracked {
+		t.Error("live observation lost its sync state entry")
+	}
+}
+
+func TestExportRemovesPreviousNoteAfterRename(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	oldNote := filepath.Join(engRoot, "demo", "manual", "keep-me-1.md")
+	if err := writeFile(oldNote, []byte("old")); err != nil {
+		t.Fatalf("setup old note: %v", err)
+	}
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{1: "demo/manual/keep-me-1.md"},
+		SessionHubs: map[string]string{},
+		TopicHubs:   map[string]string{},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	renamed := makeObs(1, "sess-1", "demo", "manual", "keep me renamed", "", "2026-01-01T10:00:00Z")
+	newNote := filepath.Join(engRoot, "demo", "manual", "keep-me-renamed-1.md")
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{renamed},
+	}}
+	result, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Deleted != 1 {
+		t.Errorf("Deleted: got %d, want 1 (the note the rename retired)", result.Deleted)
+	}
+	if fileExists(oldNote) {
+		t.Errorf("expected %s to be removed after the rename, but it still exists", oldNote)
+	}
+	if !fileExists(newNote) {
+		t.Errorf("expected %s to exist after the rename", newNote)
+	}
+	if got := readStateFiles(t, engRoot).Files[1]; filepath.ToSlash(got) != "demo/manual/keep-me-renamed-1.md" {
+		t.Errorf("state path: got %q, want %q", got, "demo/manual/keep-me-renamed-1.md")
+	}
+}
+
+func TestExportDoesNotRemoveNoteThatAnotherEntryNowOwns(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	// Slugs are id-suffixed, so only a hand-edited state file can make two
+	// entries name the same path. When that happens the live note wins.
+	target := filepath.Join(engRoot, "demo", "manual", "renamed-1.md")
+	if err := writeFile(target, []byte("live note")); err != nil {
+		t.Fatalf("setup target note: %v", err)
+	}
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{1: "demo/manual/keep-me-1.md", 2: "demo/manual/renamed-1.md"},
+		SessionHubs: map[string]string{},
+		TopicHubs:   map[string]string{},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	renamed := makeObs(1, "sess-1", "demo", "manual", "renamed", "", "2026-01-01T10:00:00Z")
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{renamed},
+	}}
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !fileExists(target) {
+		t.Errorf("expected %s to survive: it is the live path of observation 1", target)
+	}
+}
+
+func TestExportRemovesOrphanedHubs(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	orphanSession := filepath.Join(engRoot, "_sessions", "sess-gone.md")
+	orphanTopic := filepath.Join(engRoot, "_topics", "gone--topic.md")
+	for _, p := range []string{orphanSession, orphanTopic} {
+		if err := writeFile(p, []byte("orphan")); err != nil {
+			t.Fatalf("setup %s: %v", p, err)
+		}
+	}
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{},
+		SessionHubs: map[string]string{"sess-gone": "_sessions/sess-gone.md"},
+		TopicHubs:   map[string]string{"gone/topic": "_topics/gone--topic.md"},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{},
+	}}
+	result, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Deleted != 2 {
+		t.Errorf("Deleted: got %d, want 2 (the orphaned session and topic hubs)", result.Deleted)
+	}
+	if fileExists(orphanSession) || fileExists(orphanTopic) {
+		t.Error("expected orphaned hubs to be removed")
+	}
+	state := readStateFiles(t, engRoot)
+	if len(state.SessionHubs) != 0 || len(state.TopicHubs) != 0 {
+		t.Errorf("orphaned hubs still tracked: sessions=%v topics=%v", state.SessionHubs, state.TopicHubs)
+	}
+}
+
+func TestProjectScopedExportKeepsUntrackedNotesAndHubs(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	// Notes and hubs belonging to another project are absent from a
+	// project-scoped export and must survive it untouched.
+	otherNote := filepath.Join(engRoot, "other", "manual", "elsewhere-9.md")
+	otherHub := filepath.Join(engRoot, "_sessions", "sess-other.md")
+	for _, p := range []string{otherNote, otherHub} {
+		if err := writeFile(p, []byte("other project")); err != nil {
+			t.Fatalf("setup %s: %v", p, err)
+		}
+	}
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{9: "other/manual/elsewhere-9.md"},
+		SessionHubs: map[string]string{"sess-other": "_sessions/sess-other.md"},
+		TopicHubs:   map[string]string{},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	scoped := makeObs(1, "sess-1", "demo", "manual", "scoped note", "", "2026-01-01T10:00:00Z")
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{scoped},
+	}}
+	result, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "demo"}).Export()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Deleted != 0 {
+		t.Errorf("Deleted: got %d, want 0 for a project-scoped export", result.Deleted)
+	}
+	if !fileExists(otherNote) || !fileExists(otherHub) {
+		t.Error("project-scoped export removed a note or hub it does not own")
+	}
+	if _, tracked := readStateFiles(t, engRoot).Files[9]; !tracked {
+		t.Error("project-scoped export dropped another project's sync state entry")
+	}
 }

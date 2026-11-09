@@ -9,7 +9,7 @@ func TestSessionHub(t *testing.T) {
 	t.Run("session hub contains backlinks for all observations", func(t *testing.T) {
 		refs := []ObsRef{
 			{Slug: "fixed-auth-bug-1", Title: "Fixed auth bug", Type: "bugfix"},
-			{Slug: "sdd-proposal-obsidian-2", Title: "SDD Proposal: Obsidian", Type: "architecture"},
+			{Slug: "architecture-proposal-obsidian-2", Title: "Architecture Proposal: Obsidian", Type: "architecture"},
 		}
 
 		got := SessionHubMarkdown("sess-42", refs)
@@ -33,8 +33,8 @@ func TestSessionHub(t *testing.T) {
 		if !strings.Contains(got, "[[fixed-auth-bug-1]]") {
 			t.Errorf("expected wikilink [[fixed-auth-bug-1]] in session hub")
 		}
-		if !strings.Contains(got, "[[sdd-proposal-obsidian-2]]") {
-			t.Errorf("expected wikilink [[sdd-proposal-obsidian-2]] in session hub")
+		if !strings.Contains(got, "[[architecture-proposal-obsidian-2]]") {
+			t.Errorf("expected wikilink [[architecture-proposal-obsidian-2]] in session hub")
 		}
 	})
 
@@ -56,14 +56,13 @@ func TestSessionHub(t *testing.T) {
 
 func TestTopicHub(t *testing.T) {
 	t.Run("topic hub with two observations lists both wikilinks", func(t *testing.T) {
-		// Spec REQ-EXPORT-05: obs-A has topic_key="sdd/spec", obs-B has topic_key="sdd/design"
-		// Both share prefix "sdd" → hub is generated
+		// The observations share a topic prefix, so a hub is generated.
 		refs := []ObsRef{
-			{Slug: "sdd-spec-obs-1", Title: "SDD Spec", Type: "architecture", TopicKey: "sdd/spec"},
-			{Slug: "sdd-design-obs-2", Title: "SDD Design", Type: "architecture", TopicKey: "sdd/design"},
+			{Slug: "architecture-analysis-obs-1", Title: "Architecture Analysis", Type: "architecture", TopicKey: "architecture/analysis"},
+			{Slug: "architecture-design-obs-2", Title: "Architecture Design", Type: "architecture", TopicKey: "architecture/design"},
 		}
 
-		got := TopicHubMarkdown("sdd", refs)
+		got := TopicHubMarkdown("architecture", refs)
 
 		// Must have YAML frontmatter with type: topic-hub
 		if !strings.HasPrefix(got, "---\n") {
@@ -74,26 +73,26 @@ func TestTopicHub(t *testing.T) {
 		}
 
 		// Must have H1 heading with topic prefix
-		if !strings.Contains(got, "# Topic: sdd") {
-			t.Errorf("expected H1 heading 'Topic: sdd'")
+		if !strings.Contains(got, "# Topic: architecture") {
+			t.Errorf("expected H1 heading 'Topic: architecture'")
 		}
 
 		// Must contain both wikilinks
-		if !strings.Contains(got, "[[sdd-spec-obs-1]]") {
-			t.Errorf("expected wikilink [[sdd-spec-obs-1]] in topic hub")
+		if !strings.Contains(got, "[[architecture-analysis-obs-1]]") {
+			t.Errorf("expected wikilink [[architecture-analysis-obs-1]] in topic hub")
 		}
-		if !strings.Contains(got, "[[sdd-design-obs-2]]") {
-			t.Errorf("expected wikilink [[sdd-design-obs-2]] in topic hub")
+		if !strings.Contains(got, "[[architecture-design-obs-2]]") {
+			t.Errorf("expected wikilink [[architecture-design-obs-2]] in topic hub")
 		}
 	})
 
 	t.Run("topic hub shows type annotation in the observation list", func(t *testing.T) {
 		refs := []ObsRef{
-			{Slug: "explore-obs-1", Title: "Explore", Type: "architecture", TopicKey: "sdd/explore"},
-			{Slug: "proposal-obs-2", Title: "Proposal", Type: "decision", TopicKey: "sdd/proposal"},
+			{Slug: "analysis-obs-1", Title: "Analysis", Type: "architecture", TopicKey: "architecture/analysis"},
+			{Slug: "decision-obs-2", Title: "Decision", Type: "decision", TopicKey: "architecture/decision"},
 		}
 
-		got := TopicHubMarkdown("sdd", refs)
+		got := TopicHubMarkdown("architecture", refs)
 
 		// Design template shows: - [[slug]] (type)
 		if !strings.Contains(got, "(architecture)") {
@@ -129,14 +128,14 @@ func TestTopicHubSkipped(t *testing.T) {
 	t.Run("ShouldCreateTopicHub returns false for singleton prefix", func(t *testing.T) {
 		// REQ-EXPORT-05: Only create hub when ≥2 observations share the same prefix
 		counts := map[string]int{
-			"auth": 1, // singleton — no hub
-			"sdd":  3, // ≥2 — hub should be created
+			"auth":         1, // singleton — no hub
+			"architecture": 3, // ≥2 — hub should be created
 		}
 
 		if ShouldCreateTopicHub(counts["auth"]) {
 			t.Errorf("ShouldCreateTopicHub(1) must return false — singleton prefix")
 		}
-		if !ShouldCreateTopicHub(counts["sdd"]) {
+		if !ShouldCreateTopicHub(counts["architecture"]) {
 			t.Errorf("ShouldCreateTopicHub(3) must return true — ≥2 observations")
 		}
 	})

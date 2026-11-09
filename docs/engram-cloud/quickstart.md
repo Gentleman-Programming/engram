@@ -43,7 +43,11 @@ engram sync --cloud --status --project smoke-project
 ### 5) Verify browser dashboard
 
 Open:
-- `http://127.0.0.1:18080/dashboard`
+- `http://127.0.0.1:18080/` — redirects to `/dashboard/` with HTTP 302.
+- `http://127.0.0.1:18080/dashboard` — direct dashboard entrypoint.
+
+In authenticated deployments, an unauthenticated browser is then redirected to
+`/dashboard/login`. Unknown paths still return HTTP 404.
 
 In compose smoke mode, `/dashboard/login` redirects to `/dashboard/` (no bearer login needed).
 
@@ -61,15 +65,55 @@ engram cloud upgrade bootstrap --project smoke-project --resume
 engram cloud upgrade status --project smoke-project
 ```
 
-`rollback` is only available before bootstrap reaches `bootstrap_verified`.
+`engram cloud upgrade rollback` is only available before bootstrap reaches `bootstrap_verified`. It concerns local SQLite/bootstrap state, not the deployed container image. For general release upgrades and rollback expectations, see the [Release Policy](../RELEASE-POLICY.md).
 
 ---
 
-## Deploy with Official GHCR Image (Dokploy/Coolify/Portainer/VPS)
+## Container Image: Pin, Upgrade, and Roll Back
 
-Do not build from source for production deploys. Use the published image:
+**Production rule:** deploy a deliberately selected exact image reference. This guide defaults to:
 
-- `ghcr.io/gentleman-programming/engram:latest`
+- `ghcr.io/gentleman-programming/engram:v2.0.0`
+
+Do not deploy an untagged reference or `:latest` in production.
+
+For a strict immutable pin, set `ENGRAM_IMAGE` to:
+
+- `ghcr.io/gentleman-programming/engram@sha256:3f08b768aeb30d407d54a56827f8090ab506a8c11f0b346d31b9b52b75e4718a`
+
+This digest identifies the published multi-architecture OCI manifest list (the `linux/amd64` and `linux/arm64` index), not an architecture-specific child image. Choose one exact reference for each deployment.
+
+### Upgrade or roll back the container
+
+1. Record the running container's effective image reference and the client version:
+
+   ```bash
+   docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q cloud)"
+   engram version
+   ```
+
+   Save the first command's output as the rollback image. Inspecting the running container captures a Compose default or shell override that `.env` alone might not show.
+
+2. Read the selected release and migration notes. Confirm the recorded client version is compatible with the selected Cloud image; its exact image reference is the server release evidence. Then back up relevant state. Migrations can constrain rollback; follow the [Release Policy](../RELEASE-POLICY.md).
+3. Set `ENGRAM_IMAGE` to the selected exact image reference in the environment source used by Compose. For the `.env` layout below, edit `.env` and update or unset any shell-level `ENGRAM_IMAGE`, because shell variables override `.env`.
+4. Pull and redeploy only the cloud service:
+
+   ```bash
+   docker compose pull cloud
+   docker compose up -d cloud
+   ```
+
+5. Verify the deployed `/health` endpoint, cloud status, and an enrolled project:
+
+   ```bash
+   curl -fsS http://127.0.0.1:18080/health
+   engram cloud status
+   engram sync --cloud --status --project <project>
+   ```
+
+To roll back the container, set the effective `ENGRAM_IMAGE` to the previously recorded image reference, run `docker compose pull cloud` and `docker compose up -d cloud`, then repeat the verification checks. `engram cloud upgrade rollback` concerns local SQLite/bootstrap state and is not a container rollback.
+
+Do not build from source for production deploys. Use the published image with Dokploy, Coolify, Portainer, or a VPS.
 
 Reference compose file:
 - [docker-compose.ghcr.yml](./docker-compose.ghcr.yml)
@@ -89,7 +133,7 @@ Optional runtime env vars:
 
 Dokploy guidance:
 1. Create a managed Postgres service.
-2. Create an app from image `ghcr.io/gentleman-programming/engram:latest`.
+2. Create an app from image `ghcr.io/gentleman-programming/engram:v2.0.0`.
 3. Configure the env vars above (with strong secrets).
 4. Expose container port `18080`.
 5. Avoid build-from-source mode unless you are actively developing Engram itself.
@@ -114,6 +158,7 @@ POSTGRES_USER=engram
 POSTGRES_PASSWORD=replace-with-strong-postgres-password
 POSTGRES_DB=engram_cloud
 
+ENGRAM_IMAGE=ghcr.io/gentleman-programming/engram:v2.0.0
 ENGRAM_DATABASE_URL=postgres://engram:replace-with-strong-postgres-password@postgres:5432/engram_cloud?sslmode=disable
 ENGRAM_CLOUD_TOKEN=replace-with-long-random-bearer-token
 ENGRAM_CLOUD_ADMIN=replace-with-separate-admin-token
@@ -123,6 +168,28 @@ ENGRAM_CLOUD_HOST=0.0.0.0
 ENGRAM_CLOUD_MAX_PUSH_BYTES=8388608
 ENGRAM_PORT=18080
 ```
+
+### PostgreSQL credentials
+
+For a fresh PostgreSQL volume, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
+`POSTGRES_DB` initialize the database. `ENGRAM_DATABASE_URL` must connect to that
+same user and database with the same password. Changing the initialization values
+in `.env` does not change credentials in an already-initialized PostgreSQL volume.
+
+Keep the password literal in `POSTGRES_PASSWORD`. In `ENGRAM_DATABASE_URL`,
+percent-encode reserved characters in the password component, not the entire URL.
+For example, the synthetic password `example@pass:word/` becomes
+`example%40pass%3Aword%2F` in the URL (do not use this example password):
+
+```dotenv
+POSTGRES_PASSWORD=example@pass:word/
+ENGRAM_DATABASE_URL=postgres://engram:example%40pass%3Aword%2F@postgres:5432/engram_cloud?sslmode=disable
+```
+
+A successful PostgreSQL `pg_isready` healthcheck does not verify Engram's runtime
+credentials or database target. Engram checks its actual connection during cloud
+startup using `cloudstore.New` and `PingContext`; a readiness check alone does not
+prove that connection will succeed.
 
 Notes:
 - Keep `.env` on the server only. Do not commit it.
@@ -145,8 +212,11 @@ engram cloud bootstrap admin --username alice \
 - `--grant-project` may repeat; managed principals are deny-by-default (no grants means no sync access for that principal).
 - `--issue-token [name]` prints the raw managed token exactly once and requires `ENGRAM_CLOUD_TOKEN_PEPPER` to be set to a dedicated secret, separate from `ENGRAM_JWT_SECRET`.
 - Running bootstrap again once a managed admin exists is refused (no silent duplicate admin), and every attempt — accepted or refused — is recorded as a `bootstrap.cli` audit event.
+- If the one-time bootstrap token output was lost, use `engram cloud bootstrap recover-token` only when no managed token rows exist. To replace the sole unused, active bootstrap token explicitly, use `engram cloud bootstrap recover-token --revoke-existing`; retry it after another lost output only while the current token remains unused. It refuses used, revoked, ambiguous, or multiple-active-token states and preserves the admin and project grants.
 
-**Runtime authentication:** set `ENGRAM_CLOUD_TOKEN_PEPPER` (the same secret used at token-issuance time) on the `engram cloud serve` process to enable managed-token authentication — `engram cloud serve` then resolves managed tokens first, then falls back to the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` credentials, on every `/sync/*`, `/admin/*`, and dashboard-login request. If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, the server still starts normally and continues to authenticate only via the legacy env-token credentials. Full details: [DOCS.md — Managed users, tokens, and CLI bootstrap](../../DOCS.md#managed-users-tokens-and-cli-bootstrap).
+**Managed-token last use:** last use records successful managed bearer-token authentication, including dashboard login, not activity in an existing browser cookie session. Authentication fails closed if usage cannot be persisted. Once a token has authenticated successfully, `recover-token --revoke-existing` cannot replace it; use normal token management instead. Legacy credentials and existing cookie-session behavior are unchanged.
+
+**Runtime authentication:** set `ENGRAM_CLOUD_TOKEN_PEPPER` (the same secret used at token-issuance time) on the `engram cloud serve` process to enable managed-token authentication — `engram cloud serve` then checks the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` credentials first and resolves other bearer tokens through managed storage, on every `/sync/*`, `/admin/*`, and dashboard-login request. If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, the server still starts normally and continues to authenticate only via the legacy env-token credentials. Full details: [DOCS.md — Managed users, tokens, and CLI bootstrap](../../DOCS.md#managed-users-tokens-and-cli-bootstrap).
 
 ---
 
@@ -167,7 +237,7 @@ services:
       - engram-cloud-pg:/var/lib/postgresql/data
 
   cloud:
-    image: ghcr.io/gentleman-programming/engram:latest
+    image: ${ENGRAM_IMAGE:-ghcr.io/gentleman-programming/engram:v2.0.0}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -178,15 +248,15 @@ services:
       - "18080:18080"
 ```
 
-Start or restart after editing `.env`:
+For initial startup after creating `.env`:
 
 ```bash
 docker compose up -d
-docker compose restart cloud
 ```
 
-If you upgrade the `engram` image tag, redeploy or restart the container so the
-running server picks up the new binary.
+For image changes, follow [Container Image: Pin, Upgrade, and Roll Back](#container-image-pin-upgrade-and-roll-back). Do not use `docker compose restart cloud`; it does not recreate the service with a changed image reference.
+
+Before exposing this deployment to users, complete the [Production Checklist](./production-checklist.md). The Compose example is a starting point, not a complete production platform.
 
 ### Client-side token setup
 
@@ -204,6 +274,16 @@ engram sync --cloud --project my-project
 
 ---
 
+## Confirm one prompt source (human-token only)
+
+For an existing local prompt, use its **exact** sync ID and explicitly assert the owner project:
+
+```bash
+engram cloud attest-prompt-source --sync-id <exact-sync-id> --owner-project <owner-project>
+```
+
+Review the observed session, source inbox, prompt project, sync ID, and live/deleted kind alongside the separately labeled human-asserted owner. Type `yes` to send that tuple; `no`, invalid input, or a missing/ambiguous local preview sends nothing. A configured human bearer token is required; the remote service enforces both project grants. Only a successful remote attestation with a positive ID is recorded locally against the effective validated cloud endpoint. This command does not import, pull, or delete data.
+
 ## Common Failure Reasons
 
 | Reason code | Meaning |
@@ -211,7 +291,7 @@ engram sync --cloud --project my-project
 | `blocked_unenrolled` | Project is not enrolled for cloud replication |
 | `auth_required` | Authenticated runtime requires valid token/session |
 | `cloud_config_error` | Cloud endpoint config is missing/invalid |
-| `policy_forbidden` | Project blocked by cloud policy |
+| `policy_forbidden` | Project blocked by cloud policy. Check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents. |
 | `paused` | Project sync paused in cloud control plane |
 | `transport_failed` | Cloud transport/network operation failed |
 
@@ -232,10 +312,10 @@ ENGRAM_CLOUD_ALLOWED_PROJECTS="my-project" \
 engram cloud serve
 ```
 
-Then configure client endpoint + token:
+Then configure the client through an HTTPS TLS-terminating endpoint and set its token:
 
 ```bash
-engram cloud config --server http://127.0.0.1:8080
+engram cloud config --server https://your-tls-proxy:8443
 export ENGRAM_CLOUD_TOKEN="your-token"
 engram cloud enroll my-project
 engram sync --cloud --project my-project
@@ -243,6 +323,7 @@ engram sync --cloud --project my-project
 
 Rules that matter:
 - `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` cannot be combined with `ENGRAM_CLOUD_TOKEN`
+- Bearer-token clients require HTTPS, including after redirects. Plain HTTP is supported only for tokenless local/dev smoke mode.
 - `ENGRAM_CLOUD_ALLOWED_PROJECTS` is required server-side in both modes
 - authenticated mode requires explicit non-default `ENGRAM_JWT_SECRET`
 - `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` remains local/dev only (never production)

@@ -85,6 +85,55 @@ func TestIsNewer(t *testing.T) {
 	}
 }
 
+func TestCheckLatestRejectsNonReleaseVersions(t *testing.T) {
+	t.Setenv(EnvNoUpdateCheck, "")
+	for _, current := range []string{
+		"3.0.0-20261023222254-ac07f6f1650b",
+		"3.5.5-0.20261023222254-ac07f6f1650b",
+		"main", "1.2", "1.2.3-beta", "1.2.3+build", "1.2.3.4",
+		"01.2.3", "1..3", "-1.2.3", "999999999999999999999999999999.2.3",
+	} {
+		t.Run(current, func(t *testing.T) {
+			calls := 0
+			oldClient := httpClient
+			httpClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return nil, fmt.Errorf("unexpected request")
+			})}
+			t.Cleanup(func() { httpClient = oldClient })
+			result := CheckLatest(current)
+			want := checkFailed("Could not check for updates: current version does not map to a plain release version.")
+			if result != want || calls != 0 {
+				t.Fatalf("CheckLatest(%q) = %+v, HTTP calls = %d; want %+v, 0 calls", current, result, calls, want)
+			}
+		})
+	}
+}
+
+func TestCheckLatestReleaseValidation(t *testing.T) {
+	t.Setenv(EnvNoUpdateCheck, "")
+	for _, tt := range []struct {
+		current, latest string
+		want            CheckResult
+	}{
+		{"v3.5.4", "v3.5.4", CheckResult{Status: StatusUpToDate}},
+		{"3.5.5", "v3.5.4", CheckResult{Status: StatusUpToDate}},
+		{"0.0.0", "v0.0.1", CheckResult{Status: StatusUpdateAvailable, Message: fmt.Sprintf("Update available: 0.0.0 -> 0.0.1\nTo update:\n%s", updateInstructions())}},
+		{"3.5.4", "main", checkFailed("Could not check for updates: GitHub did not return a release version.")},
+		{"3.5.4", "v4.0.0-beta", checkFailed("Could not check for updates: GitHub did not return a release version.")},
+		{"3.5.4", "v4.0", checkFailed("Could not check for updates: GitHub did not return a release version.")},
+	} {
+		t.Run(tt.current+"/"+tt.latest, func(t *testing.T) {
+			withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprintf(w, `{"tag_name":%q}`, tt.latest)
+			}))
+			if got := CheckLatest(tt.current); got != tt.want {
+				t.Fatalf("CheckLatest(%q) = %+v, want %+v", tt.current, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCheckLatest(t *testing.T) {
 	t.Run("opt out skips the HTTP transport for a released version", func(t *testing.T) {
 		t.Setenv("ENGRAM_NO_UPDATE_CHECK", "1")
@@ -274,11 +323,15 @@ func TestUpdateInstructions(t *testing.T) {
 	if msg == "" {
 		t.Fatal("expected non-empty update instructions")
 	}
-	if runtime.GOOS != "darwin" && !strings.Contains(msg, "github.com/Gentleman-Programming/engram/v2/cmd/engram@latest") {
-		t.Fatalf("update instructions = %q, want v2 Go install command", msg)
+	want := "  go install github.com/Gentleman-Programming/engram/v3/cmd/engram@latest\n  or: https://github.com/Gentleman-Programming/engram/releases/latest"
+	switch runtime.GOOS {
+	case "darwin":
+		want = "  brew update && brew upgrade engram"
+	case "linux":
+		want = "  brew update && brew upgrade engram\n  or: go install github.com/Gentleman-Programming/engram/v3/cmd/engram@latest"
 	}
-	if runtime.GOOS != "linux" && !strings.Contains(msg, "https://github.com/Gentleman-Programming/engram/releases/latest") {
-		t.Fatalf("update instructions = %q, want canonical GitHub Releases URL", msg)
+	if msg != want {
+		t.Fatalf("update instructions on %s = %q, want %q", runtime.GOOS, msg, want)
 	}
 }
 

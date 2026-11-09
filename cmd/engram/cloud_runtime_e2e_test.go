@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
-	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -131,6 +131,12 @@ func TestCloudRuntimeWiresManagedTokenAuthEndToEnd(t *testing.T) {
 		t.Fatalf("expected /admin/users response to include seeded admin, got %s", adminUsersBody)
 	}
 
+	tokens, err := dcr.store.ListPrincipalTokens(ctx, admin.PrincipalID)
+	if err != nil || len(tokens) != 1 || tokens[0].LastUsedAt == nil {
+		t.Fatalf("successful runtime auth must persist usage: tokens=%+v err=%v", tokens, err)
+	}
+	lastUsed := *tokens[0].LastUsedAt
+
 	// (d) legacy ENGRAM_CLOUD_TOKEN still authenticates sync routes.
 	legacyPullStatus, legacyPullBody := doBearerRequest(t, handler, http.MethodGet, "/sync/pull?project=demo-project", legacySyncToken)
 	if legacyPullStatus != http.StatusOK {
@@ -164,6 +170,11 @@ func TestCloudRuntimeWiresManagedTokenAuthEndToEnd(t *testing.T) {
 		t.Fatalf("expected revoked managed token to be rejected with 401, got status=%d body=%s", status, body)
 	}
 
+	tokens, err = dcr.store.ListPrincipalTokens(ctx, admin.PrincipalID)
+	if err != nil || len(tokens) != 1 || tokens[0].LastUsedAt == nil || !tokens[0].LastUsedAt.Equal(lastUsed) {
+		t.Fatalf("legacy/cookie/rejected authentication changed managed usage: tokens=%+v err=%v", tokens, err)
+	}
+
 	// (e) graceful degradation: with no dedicated token pepper configured,
 	// the server must still start and legacy auth must still work.
 	noPepperCfg := cfg
@@ -183,6 +194,149 @@ func TestCloudRuntimeWiresManagedTokenAuthEndToEnd(t *testing.T) {
 	}
 	if status, _ := doBearerRequest(t, noPepperHandler, http.MethodGet, "/admin/users", managedToken.Raw); status != http.StatusUnauthorized {
 		t.Fatalf("expected managed token auth to be disabled (not misresolved) with no token pepper configured, got %d", status)
+	}
+}
+
+func TestCloudRuntimeMutationPushAttributionUsesAuthenticatedPrincipal(t *testing.T) {
+	testDSN := openIsolatedCloudRuntimeSchema(t)
+
+	const legacySyncToken = "e2e-attribution-legacy-token"
+	const tokenPepper = "e2e-attribution-token-pepper-at-least-32-bytes"
+	const project = "attribution-e2e"
+	t.Setenv("ENGRAM_CLOUD_TOKEN", legacySyncToken)
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	rt, err := newCloudRuntime(cloud.Config{
+		DSN:              testDSN,
+		JWTSecret:        "e2e-attribution-jwt-secret-32-bytes-plus",
+		AllowedProjects:  []string{project},
+		TokenPepper:      tokenPepper,
+		MaxPushBodyBytes: cloud.DefaultMaxPushBodyBytes,
+	})
+	if err != nil {
+		t.Fatalf("newCloudRuntime: %v", err)
+	}
+	dcr, ok := rt.(*defaultCloudRuntime)
+	if !ok {
+		t.Fatalf("expected *defaultCloudRuntime, got %T", rt)
+	}
+	t.Cleanup(func() { _ = dcr.store.Close() })
+	ctx := context.Background()
+	managedUser, err := dcr.store.CreateHumanUser(ctx, cloudstore.CreateHumanUserParams{
+		Username:    "managed-attribution-user",
+		DisplayName: "Managed E2E User",
+		Role:        cloudstore.PrincipalRoleMember,
+	})
+	if err != nil {
+		t.Fatalf("CreateHumanUser: %v", err)
+	}
+	if _, err := dcr.store.CreateProjectGrant(ctx, cloudstore.CreateProjectGrantParams{
+		PrincipalID:          managedUser.PrincipalID,
+		Project:              project,
+		GrantedByPrincipalID: managedUser.PrincipalID,
+	}); err != nil {
+		t.Fatalf("CreateProjectGrant: %v", err)
+	}
+	managedToken, err := cloudauth.GenerateManagedToken("test")
+	if err != nil {
+		t.Fatalf("GenerateManagedToken: %v", err)
+	}
+	hasher, err := cloudauth.NewManagedTokenHasher([]byte(tokenPepper))
+	if err != nil {
+		t.Fatalf("NewManagedTokenHasher: %v", err)
+	}
+	tokenHash, err := hasher.Hash(managedToken.Raw)
+	if err != nil {
+		t.Fatalf("hash managed token: %v", err)
+	}
+	if _, err := dcr.store.CreatePrincipalToken(ctx, cloudstore.CreatePrincipalTokenParams{
+		PrincipalID: managedUser.PrincipalID,
+		TokenPrefix: managedToken.Prefix,
+		TokenHash:   tokenHash,
+		Name:        "attribution-e2e-token",
+	}); err != nil {
+		t.Fatalf("CreatePrincipalToken: %v", err)
+	}
+
+	body := `{"created_by":"forged-client-identity","entries":[{"project":"attribution-e2e","entity":"session","entity_key":"session-1","op":"upsert","payload":{"id":"session-1","directory":"/tmp/session-1"}}]}`
+	unauthorized := httptest.NewRecorder()
+	unauthorizedRequest := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", strings.NewReader(body))
+	unauthorizedRequest.Header.Set("Content-Type", "application/json")
+	dcr.server.Handler().ServeHTTP(unauthorized, unauthorizedRequest)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized mutation push status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
+	}
+	manifest, err := dcr.store.ReadManifest(ctx, project)
+	if err != nil {
+		t.Fatalf("ReadManifest after rejected mutation push: %v", err)
+	}
+	if len(manifest.Chunks) != 0 {
+		t.Fatalf("rejected mutation push materialized %d chunks", len(manifest.Chunks))
+	}
+
+	push := httptest.NewRecorder()
+	pushRequest := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", strings.NewReader(body))
+	pushRequest.Header.Set("Authorization", "Bearer "+managedToken.Raw)
+	pushRequest.Header.Set("Content-Type", "application/json")
+	dcr.server.Handler().ServeHTTP(push, pushRequest)
+	if push.Code != http.StatusOK {
+		t.Fatalf("authenticated mutation push status = %d, want %d body=%q", push.Code, http.StatusOK, push.Body.String())
+	}
+
+	manifest, err = dcr.store.ReadManifest(ctx, project)
+	if err != nil {
+		t.Fatalf("ReadManifest after accepted mutation push: %v", err)
+	}
+	if len(manifest.Chunks) != 1 {
+		t.Fatalf("materialized chunks = %d, want 1", len(manifest.Chunks))
+	}
+	if manifest.Chunks[0].CreatedBy != managedUser.DisplayName {
+		t.Fatalf("materialized chunk created_by = %q, want authenticated principal %q", manifest.Chunks[0].CreatedBy, managedUser.DisplayName)
+	}
+	contributors, err := dcr.store.ListContributors("")
+	if err != nil {
+		t.Fatalf("ListContributors: %v", err)
+	}
+	if len(contributors) != 1 || contributors[0].CreatedBy != managedUser.DisplayName {
+		t.Fatalf("contributors = %+v, want authenticated principal %q", contributors, managedUser.DisplayName)
+	}
+
+	replay := httptest.NewRecorder()
+	replayRequest := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", strings.NewReader(body))
+	replayRequest.Header.Set("Authorization", "Bearer "+managedToken.Raw)
+	replayRequest.Header.Set("Content-Type", "application/json")
+	dcr.server.Handler().ServeHTTP(replay, replayRequest)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replayed mutation push status = %d, want %d body=%q", replay.Code, http.StatusOK, replay.Body.String())
+	}
+	manifest, err = dcr.store.ReadManifest(ctx, project)
+	if err != nil {
+		t.Fatalf("ReadManifest after replay: %v", err)
+	}
+	if len(manifest.Chunks) != 1 || manifest.Chunks[0].CreatedBy != managedUser.DisplayName {
+		t.Fatalf("replay changed materialized attribution: %+v", manifest.Chunks)
+	}
+
+	explicitPush := httptest.NewRecorder()
+	explicitPushRequest := httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(`{"project":"attribution-e2e","created_by":"explicit-client-attribution","data":{"sessions":[{"id":"session-explicit","directory":"/tmp/session-explicit"}]}}`))
+	explicitPushRequest.Header.Set("Authorization", "Bearer "+managedToken.Raw)
+	explicitPushRequest.Header.Set("Content-Type", "application/json")
+	dcr.server.Handler().ServeHTTP(explicitPush, explicitPushRequest)
+	if explicitPush.Code != http.StatusOK {
+		t.Fatalf("explicit chunk push status = %d, want %d body=%q", explicitPush.Code, http.StatusOK, explicitPush.Body.String())
+	}
+	manifest, err = dcr.store.ReadManifest(ctx, project)
+	if err != nil {
+		t.Fatalf("ReadManifest after explicit chunk push: %v", err)
+	}
+	foundExplicitAttribution := false
+	for _, chunk := range manifest.Chunks {
+		if chunk.CreatedBy == "explicit-client-attribution" {
+			foundExplicitAttribution = true
+		}
+	}
+	if !foundExplicitAttribution {
+		t.Fatalf("explicit chunk push attribution missing from manifest: %+v", manifest.Chunks)
 	}
 }
 

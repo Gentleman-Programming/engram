@@ -10,8 +10,7 @@ import (
 
 // Protocol mode values persisted per setup slug. A slug's mode controls how
 // verbose the version-pinned Claude Code hook scripts render the ACTIVE
-// PROTOCOL prose at session start / post-compaction — see
-// openspec/changes/setup-protocol-flag/proposal.md.
+// PROTOCOL prose at session start / post-compaction.
 const (
 	ProtocolModeSlim = "slim"
 	ProtocolModeFull = "full"

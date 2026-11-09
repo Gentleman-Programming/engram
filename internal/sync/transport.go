@@ -32,6 +32,15 @@ type Transport interface {
 	ReadChunk(chunkID string) ([]byte, error)
 }
 
+// ChunkEvidenceTransport opts into persistent per-chunk dependency summaries.
+// The scope must identify the source and project, without credentials. Within
+// that scope a chunk ID must always identify the same immutable payload. A new
+// source/namespace must use a different scope. Other transports are uncached.
+type ChunkEvidenceTransport interface {
+	Transport
+	ChunkEvidenceScope() string
+}
+
 // ─── FileTransport ──────────────────────────────────────────────────────────
 
 // FileTransport reads/writes chunks to the local filesystem.

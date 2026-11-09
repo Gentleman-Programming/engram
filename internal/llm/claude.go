@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/command"
 )
 
 // ─── ClaudeRunner ─────────────────────────────────────────────────────────────
@@ -62,10 +64,10 @@ var _ AgentRunner = (*ClaudeRunner)(nil)
 
 // claudeEnvelope is the top-level JSON object returned by `claude --output-format json`.
 type claudeEnvelope struct {
-	Type        string                        `json:"type"`
-	Result      string                        `json:"result"`
-	DurationMS  int64                         `json:"duration_ms"`
-	ModelUsage  map[string]json.RawMessage    `json:"modelUsage"`
+	Type       string                     `json:"type"`
+	Result     string                     `json:"result"`
+	DurationMS int64                      `json:"duration_ms"`
+	ModelUsage map[string]json.RawMessage `json:"modelUsage"`
 }
 
 // innerVerdict is the JSON shape the LLM is prompted to return.
@@ -137,7 +139,7 @@ func parseClaudeEnvelope(raw []byte) (Verdict, error) {
 // standard input, and returns the combined stdout+stderr output.
 // It translates exec.ErrNotFound into ErrCLINotInstalled.
 func defaultRunCLI(ctx context.Context, name string, args []string, stdin string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := command.NewContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.Output()
 	if err != nil {

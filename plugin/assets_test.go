@@ -79,6 +79,61 @@ func TestPluginAssetsDoNotLeakSpanishTriggers(t *testing.T) {
 	}
 }
 
+func TestOpenCodeEmbeddedAssetMatchesCanonicalSource(t *testing.T) {
+	root := repoRoot(t)
+	canonicalPath := filepath.Join(root, "plugin", "opencode", "engram.ts")
+	embeddedPath := filepath.Join(root, "internal", "setup", "plugins", "opencode", "engram.ts")
+
+	canonical, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatalf("read canonical OpenCode plugin: %v", err)
+	}
+	embedded, err := os.ReadFile(embeddedPath)
+	if err != nil {
+		t.Fatalf("read embedded OpenCode plugin: %v", err)
+	}
+	if string(embedded) != string(canonical) {
+		t.Fatalf("embedded OpenCode plugin differs from canonical source; run go generate ./internal/setup")
+	}
+	for _, requirement := range deliveryGuaranteeRequirements() {
+		if !strings.Contains(string(canonical), requirement) {
+			t.Errorf("canonical OpenCode plugin missing delivery guarantee: %q", requirement)
+		}
+	}
+}
+
+func TestClaudeCodePluginDoesNotShipMCPManifest(t *testing.T) {
+	path := filepath.Join(repoRoot(t), "plugin", "claude-code", ".mcp.json")
+	if _, err := os.Lstat(path); err == nil {
+		t.Errorf("Claude Code plugin must not ship a duplicate MCP manifest: %s", path)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+}
+
+func TestCodexPluginDoesNotShipMCPManifestOrReference(t *testing.T) {
+	root := repoRoot(t)
+	manifestPath := filepath.Join(root, "plugin", "codex", ".mcp.json")
+	if _, err := os.Lstat(manifestPath); err == nil {
+		t.Errorf("Codex plugin must not ship a duplicate MCP manifest: %s", manifestPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat %s: %v", manifestPath, err)
+	}
+
+	pluginPath := filepath.Join(root, "plugin", "codex", ".codex-plugin", "plugin.json")
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("read Codex plugin manifest: %v", err)
+	}
+	var plugin map[string]json.RawMessage
+	if err := json.Unmarshal(data, &plugin); err != nil {
+		t.Fatalf("parse Codex plugin manifest: %v", err)
+	}
+	if _, exists := plugin["mcpServers"]; exists {
+		t.Fatalf("Codex plugin manifest must not reference an MCP manifest: %s", pluginPath)
+	}
+}
+
 // marketplaceJSON is the minimal structure of .claude-plugin/marketplace.json
 // needed to extract the version declared for the engram plugin entry.
 type marketplaceJSON struct {
@@ -143,5 +198,9 @@ func TestPluginVersionsMatch(t *testing.T) {
 			marketplaceVersion,
 			plugin.Version,
 		)
+	}
+
+	if marketplaceVersion == "0.1.2" {
+		t.Error("Claude Code's corrected SessionStart hook contract must not ship under the collided 0.1.2 plugin identity")
 	}
 }

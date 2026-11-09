@@ -5,7 +5,7 @@
 # Claude Code to load all engram memory tools (which are deferred by default).
 #
 # On subsequent messages: checks when the last mem_save was for the current
-# project. If it's been > 15 minutes AND the session has been active > 5
+# project. If it's been at least 15 minutes AND the session has been active > 5
 # minutes, injects a nudge reminding the agent to save.
 #
 # The nudge is debounced per session: once shown, it stays quiet for
@@ -15,8 +15,13 @@
 #
 # MUST exit 0 always and output valid JSON — otherwise Claude Code blocks the message.
 
-ENGRAM_PORT="${ENGRAM_PORT:-7437}"
-ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+# Under Pi (PI_CODING_AGENT non-empty) every hook is a silent no-op; this script checks it before the
+# Windows fast path below, which runs before _helpers.sh is sourced.
+if [ -n "${PI_CODING_AGENT:-}" ]; then
+  [ -t 0 ] || while IFS= read -r _engram_pi_line; do :; done 2>/dev/null
+  exit 0
+fi
+
 ENGRAM_HOOK_MAX_TIME="${ENGRAM_HOOK_MAX_TIME:-0.2}"
 
 # Windows Git Bash/MSYS2 can fail while forking helper processes under
@@ -41,6 +46,14 @@ set_json_string_value() {
   fi
 }
 
+# Bash 3.2 may sign-extend a quoted byte in printf's numeric conversions.
+# These scanners use LC_ALL=C: normalize to 0..255 before classifying/encoding.
+byte_value_without_jq() {
+  local LC_ALL=C
+  printf -v JSON_VALUE '%d' "'$1"
+  JSON_VALUE=$(( JSON_VALUE & 255 ))
+}
+
 session_state_key_part() {
   local raw="$1"
   local encoded="sid-"
@@ -58,8 +71,20 @@ session_state_key_part() {
   JSON_VALUE="$encoded"
 }
 
+# Emit the first-message ToolSearch bootstrap.
+#
+# Uses hookSpecificOutput.additionalContext (NOT systemMessage): on a
+# UserPromptSubmit hook, only stdout/additionalContext enters the model's
+# context. A systemMessage payload is rendered to the terminal as
+# "UserPromptSubmit says: ..." (issue #145) and never reaches the model, so the
+# bootstrap silently no-ops. session-start.sh already uses additionalContext.
+#
+# The select list carries BOTH tool-name prefixes: mcp__plugin_engram_engram__*
+# for plugin/marketplace installs and mcp__engram__* for direct MCP-server
+# installs. ToolSearch select: returns whichever names exist and silently
+# ignores the rest, so one list covers both install modes (issue #534).
 print_toolsearch_message() {
-  printf '%s\n' '{"systemMessage":"CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:mcp__engram__mem_save,mcp__engram__mem_search,mcp__engram__mem_context,mcp__engram__mem_session_summary,mcp__engram__mem_session_start,mcp__engram__mem_session_end,mcp__engram__mem_get_observation,mcp__engram__mem_suggest_topic_key,mcp__engram__mem_capture_passive,mcp__engram__mem_save_prompt,mcp__engram__mem_update,mcp__engram__mem_current_project,mcp__engram__mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding."}'
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CRITICAL FIRST ACTION - Execute this ToolSearch NOW before responding to the user:\nselect:mcp__plugin_engram_engram__mem_save,mcp__plugin_engram_engram__mem_search,mcp__plugin_engram_engram__mem_context,mcp__plugin_engram_engram__mem_session_summary,mcp__plugin_engram_engram__mem_session_start,mcp__plugin_engram_engram__mem_session_end,mcp__plugin_engram_engram__mem_get_observation,mcp__plugin_engram_engram__mem_suggest_topic_key,mcp__plugin_engram_engram__mem_capture_passive,mcp__plugin_engram_engram__mem_save_prompt,mcp__plugin_engram_engram__mem_update,mcp__plugin_engram_engram__mem_current_project,mcp__plugin_engram_engram__mem_judge,mcp__plugin_engram_engram__mem_doctor,mcp__plugin_engram_engram__mem_review,mcp__plugin_engram_engram__mem_pin,mcp__plugin_engram_engram__mem_unpin,mcp__engram__mem_save,mcp__engram__mem_search,mcp__engram__mem_context,mcp__engram__mem_session_summary,mcp__engram__mem_session_start,mcp__engram__mem_session_end,mcp__engram__mem_get_observation,mcp__engram__mem_suggest_topic_key,mcp__engram__mem_capture_passive,mcp__engram__mem_save_prompt,mcp__engram__mem_update,mcp__engram__mem_current_project,mcp__engram__mem_judge,mcp__engram__mem_doctor,mcp__engram__mem_review,mcp__engram__mem_pin,mcp__engram__mem_unpin\n\nAfter loading tools, use usable prior-session context already provided by SessionStart. Only call mem_context before responding if no prior-session context was provided or it is not useful."}}'
 }
 
 json_string_value_without_jq() {
@@ -112,6 +137,117 @@ json_string_value_without_jq() {
   JSON_VALUE="$value"
 }
 
+# Validate a complete JSON value using bash builtins. The no-jq hook cannot
+# depend on another runtime, but a 200 response is useful only when it is a
+# valid observations array.
+json_skip_whitespace_without_jq() {
+  while [ "$JSON_PARSE_INDEX" -lt "$JSON_PARSE_LENGTH" ]; do
+    case "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}" in
+      ' '|$'\t'|$'\r'|$'\n') JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 )) ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+json_parse_string_without_jq() {
+  [ "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}" = '"' ] || return 1
+  JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+  while [ "$JSON_PARSE_INDEX" -lt "$JSON_PARSE_LENGTH" ]; do
+    local char="${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}"
+    case "$char" in
+      '"') JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 )); return 0 ;;
+      $'\\')
+        JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+        [ "$JSON_PARSE_INDEX" -lt "$JSON_PARSE_LENGTH" ] || return 1
+        char="${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}"
+        case "$char" in
+          '"'|$'\\'|/|b|f|n|r|t) JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 )) ;;
+          u)
+            [[ "${JSON_PARSE_INPUT:JSON_PARSE_INDEX+1:4}" =~ ^[0-9A-Fa-f]{4}$ ]] || return 1
+            JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 5 ))
+            ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *)
+        byte_value_without_jq "$char"
+        [ "$JSON_VALUE" -ge 32 ] || return 1
+        JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+        ;;
+    esac
+  done
+  return 1
+}
+
+json_parse_value_without_jq() {
+  local char tail
+  json_skip_whitespace_without_jq
+  [ "$JSON_PARSE_INDEX" -lt "$JSON_PARSE_LENGTH" ] || return 1
+  char="${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}"
+  case "$char" in
+    '"') json_parse_string_without_jq ;;
+    t) [ "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:4}" = "true" ] && JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 4 )) ;;
+    f) [ "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:5}" = "false" ] && JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 5 )) ;;
+    n) [ "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:4}" = "null" ] && JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 4 )) ;;
+    [0-9-])
+      tail="${JSON_PARSE_INPUT:JSON_PARSE_INDEX}"
+      [[ "$tail" =~ ^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)? ]] || return 1
+      JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + ${#BASH_REMATCH[0]} ))
+      ;;
+    '[')
+      JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+      json_skip_whitespace_without_jq
+      if [ "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}" = ']' ]; then
+        JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+        return 0
+      fi
+      while true; do
+        json_parse_value_without_jq || return 1
+        json_skip_whitespace_without_jq
+        case "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}" in
+          ',') JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 )) ;;
+          ']') JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 )); return 0 ;;
+          *) return 1 ;;
+        esac
+      done
+      ;;
+    '{')
+      JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+      json_skip_whitespace_without_jq
+      if [ "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}" = '}' ]; then
+        JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+        return 0
+      fi
+      while true; do
+        json_skip_whitespace_without_jq
+        json_parse_string_without_jq || return 1
+        json_skip_whitespace_without_jq
+        [ "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}" = ':' ] || return 1
+        JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+        json_parse_value_without_jq || return 1
+        json_skip_whitespace_without_jq
+        case "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}" in
+          ',') JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 )) ;;
+          '}') JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 )); return 0 ;;
+          *) return 1 ;;
+        esac
+      done
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+json_is_valid_array_without_jq() {
+  JSON_PARSE_INPUT="$1"
+  JSON_PARSE_INDEX=0
+  JSON_PARSE_LENGTH=${#JSON_PARSE_INPUT}
+  json_skip_whitespace_without_jq
+  [ "${JSON_PARSE_INPUT:JSON_PARSE_INDEX:1}" = '[' ] || return 1
+  json_parse_value_without_jq || return 1
+  json_skip_whitespace_without_jq
+  [ "$JSON_PARSE_INDEX" -eq "$JSON_PARSE_LENGTH" ]
+}
+
 utf8_from_codepoint_without_jq() {
   local codepoint="$1"
   local byte1 byte2 byte3 byte4
@@ -152,21 +288,25 @@ json_escape_without_jq() {
       $'\r') value+='\r' ;;
       $'\t') value+='\t' ;;
       *)
-        printf -v byte '%d' "'$char"
+        byte_value_without_jq "$char"
+        byte="$JSON_VALUE"
         if [ "$byte" -ge 1 ] && [ "$byte" -le 31 ]; then
           printf -v escaped '\\u%04x' "$byte"
           value+="$escaped"
         elif [ "$byte" -ge 128 ]; then
           codepoint=""
           if [ "$byte" -ge 194 ] && [ "$byte" -le 223 ] && [ "$(( i + 1 ))" -lt "${#raw}" ]; then
-            printf -v byte2 '%d' "'${raw:i+1:1}"
+            byte_value_without_jq "${raw:i+1:1}"
+            byte2="$JSON_VALUE"
             if [ "$byte2" -ge 128 ] && [ "$byte2" -le 191 ]; then
               codepoint=$(( ((byte & 31) << 6) | (byte2 & 63) ))
               i=$(( i + 1 ))
             fi
           elif [ "$byte" -ge 224 ] && [ "$byte" -le 239 ] && [ "$(( i + 2 ))" -lt "${#raw}" ]; then
-            printf -v byte2 '%d' "'${raw:i+1:1}"
-            printf -v byte3 '%d' "'${raw:i+2:1}"
+            byte_value_without_jq "${raw:i+1:1}"
+            byte2="$JSON_VALUE"
+            byte_value_without_jq "${raw:i+2:1}"
+            byte3="$JSON_VALUE"
             if [ "$byte2" -ge 128 ] && [ "$byte2" -le 191 ] && [ "$byte3" -ge 128 ] && [ "$byte3" -le 191 ]; then
               codepoint=$(( ((byte & 15) << 12) | ((byte2 & 63) << 6) | (byte3 & 63) ))
               if [ "$codepoint" -ge 2048 ] && { [ "$codepoint" -lt 55296 ] || [ "$codepoint" -gt 57343 ]; }; then
@@ -176,9 +316,12 @@ json_escape_without_jq() {
               fi
             fi
           elif [ "$byte" -ge 240 ] && [ "$byte" -le 244 ] && [ "$(( i + 3 ))" -lt "${#raw}" ]; then
-            printf -v byte2 '%d' "'${raw:i+1:1}"
-            printf -v byte3 '%d' "'${raw:i+2:1}"
-            printf -v byte4 '%d' "'${raw:i+3:1}"
+            byte_value_without_jq "${raw:i+1:1}"
+            byte2="$JSON_VALUE"
+            byte_value_without_jq "${raw:i+2:1}"
+            byte3="$JSON_VALUE"
+            byte_value_without_jq "${raw:i+3:1}"
+            byte4="$JSON_VALUE"
             if [ "$byte2" -ge 128 ] && [ "$byte2" -le 191 ] && [ "$byte3" -ge 128 ] && [ "$byte3" -le 191 ] && [ "$byte4" -ge 128 ] && [ "$byte4" -le 191 ]; then
               codepoint=$(( ((byte & 7) << 18) | ((byte2 & 63) << 12) | ((byte3 & 63) << 6) | (byte4 & 63) ))
               if [ "$codepoint" -ge 65536 ] && [ "$codepoint" -le 1114111 ]; then
@@ -217,7 +360,8 @@ url_encode_without_jq() {
     case "$char" in
       [a-zA-Z0-9.~_-]) value+="$char" ;;
       *)
-        printf -v byte '%02X' "'$char"
+        byte_value_without_jq "$char"
+        printf -v byte '%02X' "$JSON_VALUE"
         value+="%${byte}"
         ;;
     esac
@@ -231,7 +375,7 @@ resolve_project_without_jq() {
   [ -n "$dir" ] || return 1
   url_encode_without_jq "$dir"
   encoded="$JSON_VALUE"
-  response=$(curl -sf "${ENGRAM_URL}/project/current?cwd=${encoded}" --max-time 2 2>/dev/null) || return 1
+  response=$(engram_curl -sf "${ENGRAM_URL}/project/current?cwd=${encoded}" --max-time 2 2>/dev/null) || return 1
   json_string_value_without_jq "project" "$response" || return 1
   project="$JSON_VALUE"
   json_string_value_without_jq "project_source" "$response" || return 1
@@ -245,6 +389,89 @@ resolve_project_without_jq() {
   printf '%s\n' "$project"
 }
 
+# capture_project_from_response accepts exact, top-level string decision metadata.
+# Reuse the builtin
+# JSON parser on both capture routes; nested or malformed metadata cannot
+# authorize a write. Classification belongs exclusively to the Go server.
+capture_project_from_response() {
+  local response="$1" key start value decision="" project="" source="" seen="|"
+  local LC_ALL=C
+  JSON_PARSE_INPUT="$response"
+  JSON_PARSE_INDEX=0
+  JSON_PARSE_LENGTH=${#response}
+  json_skip_whitespace_without_jq
+  [ "${response:JSON_PARSE_INDEX:1}" = '{' ] || return 1
+  json_parse_value_without_jq || return 1
+  json_skip_whitespace_without_jq
+  [ "$JSON_PARSE_INDEX" -eq "$JSON_PARSE_LENGTH" ] || return 1
+  JSON_PARSE_INDEX=0
+  json_skip_whitespace_without_jq
+  JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+  json_skip_whitespace_without_jq
+  while [ "${response:JSON_PARSE_INDEX:1}" != '}' ]; do
+    start=$JSON_PARSE_INDEX
+    json_parse_string_without_jq || return 1
+    json_string_value_without_jq k "{\"k\":${response:start:JSON_PARSE_INDEX-start}}" || return 1
+    key="$JSON_VALUE"
+    case "$key" in
+      decision|project|project_source|error_hint)
+        [[ "$seen" != *"|${key}|"* ]] || return 1
+        seen+="${key}|"
+        ;;
+    esac
+    json_skip_whitespace_without_jq
+    JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+    json_skip_whitespace_without_jq
+    start=$JSON_PARSE_INDEX
+    json_parse_value_without_jq || return 1
+    case "$key" in
+      error_hint) return 1 ;;
+      decision|project|project_source)
+        [ "${response:start:1}" = '"' ] || return 1
+        json_string_value_without_jq k "{\"k\":${response:start:JSON_PARSE_INDEX-start}}" || return 1
+        value="$JSON_VALUE"
+        case "$key" in
+          decision) decision="$value" ;;
+          project) project="$value" ;;
+          project_source) source="$value" ;;
+        esac
+        ;;
+    esac
+    json_skip_whitespace_without_jq
+    [ "${response:JSON_PARSE_INDEX:1}" = '}' ] && break
+    JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+    json_skip_whitespace_without_jq
+  done
+  [ "$decision" = capture ] && [[ "$project" = *[![:space:]]* ]] || return 1
+  # Transport sanity only: never repair metadata or duplicate Go normalization.
+  [[ "$project" != *[/\\]* && "$project" != *[[:cntrl:]]* &&
+     "$project" != [[:space:]]* && "$project" != *[[:space:]] ]] || return 1
+  case "$source" in
+    config|git_remote|git_root|git_child|dir_basename|process_override) ;;
+    *) return 1 ;;
+  esac
+  JSON_VALUE="$project"
+}
+
+# resolve_capture_project replaces capture's GET with one read-only decision POST.
+# Reminder reads still use the existing resolver independently.
+resolve_capture_project() {
+  local cwd="$1" prompt="$2" escaped_cwd escaped_prompt response status
+  [[ "$cwd" = *[![:space:]]* ]] || return 1
+  json_escape_without_jq "$cwd"
+  escaped_cwd="$JSON_VALUE"
+  json_escape_without_jq "$prompt"
+  escaped_prompt="$JSON_VALUE"
+  response=$(engram_curl -sf -X POST "${ENGRAM_URL}/prompts/capture-decision" --max-time 2 -w $'\n%{http_code}' \
+    -H 'Content-Type: application/json' \
+    -d "{\"source\":\"claude-code\",\"cwd\":\"${escaped_cwd}\",\"content\":\"${escaped_prompt}\"}" 2>/dev/null) || return 1
+  status="${response##*$'\n'}"
+  [[ "$status" = 2[0-9][0-9] ]] || return 1
+  capture_project_from_response "${response%$'\n'*}"
+}
+
+# user_prompt_submit_without_jq preserves bootstrap/reminders without jq and
+# persists original prompts only after a valid Go capture decision.
 user_prompt_submit_without_jq() {
   local cwd="" session_id="" prompt="" project="" session_key state_dir state_file
   local session_start="" session_start_epoch now_epoch session_age_secs encoded_project
@@ -256,13 +483,14 @@ user_prompt_submit_without_jq() {
 
   if [ -n "$prompt" ] && [ -n "$session_id" ]; then
     (
-      project=$(resolve_project_without_jq "$cwd") || exit 0
+      resolve_capture_project "$cwd" "$prompt" || exit 0
+      project="$JSON_VALUE"
       json_escape_without_jq "$session_id"
       local escaped_session="$JSON_VALUE"
       json_escape_without_jq "$project"
       local escaped_project="$JSON_VALUE"
       json_escape_without_jq "$prompt"
-      curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
+      engram_curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
         -H 'Content-Type: application/json' \
         -d "{\"session_id\":\"${escaped_session}\",\"project\":\"${escaped_project}\",\"content\":\"${JSON_VALUE}\"}" >/dev/null 2>&1 || true
     ) &
@@ -289,7 +517,7 @@ user_prompt_submit_without_jq() {
   }
 
   if [ -n "$session_id" ]; then
-    session_start=$(curl -sf "${ENGRAM_URL}/sessions/${session_id}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
+    session_start=$(engram_curl -sf "${ENGRAM_URL}/sessions/${session_id}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
     json_string_value_without_jq "started_at" "$session_start" && session_start="$JSON_VALUE" || session_start=""
   fi
   if [ -n "$session_start" ]; then
@@ -302,15 +530,28 @@ user_prompt_submit_without_jq() {
 
   url_encode_without_jq "$project"
   encoded_project="$JSON_VALUE"
-  last_save_json=$(curl -sf "${ENGRAM_URL}/observations?project=${encoded_project}&limit=1&sort=created_at:desc" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
-  json_string_value_without_jq "created_at" "$last_save_json" && last_save_at="$JSON_VALUE" || last_save_at=""
-  [ -n "$last_save_at" ] || { printf '%s\n' '{}'; return 0; }
-  last_epoch=$(parse_epoch "$last_save_at")
-  [ -n "$last_epoch" ] || { printf '%s\n' '{}'; return 0; }
-  now_epoch=$(date "+%s")
-  elapsed=$(( now_epoch - last_epoch ))
+  last_save_json=$(engram_curl -sf "${ENGRAM_URL}/observations?project=${encoded_project}&limit=1&sort=created_at:desc" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null) || {
+    printf '%s\n' '{}'
+    return 0
+  }
+  json_is_valid_array_without_jq "$last_save_json" || {
+    printf '%s\n' '{}'
+    return 0
+  }
+  if [[ "$last_save_json" =~ ^[[:space:]]*\[[[:space:]]*\][[:space:]]*$ ]]; then
+    [ -n "$session_age_secs" ] || { printf '%s\n' '{}'; return 0; }
+    now_epoch=$(date "+%s")
+    elapsed="$session_age_secs"
+  else
+    json_string_value_without_jq "created_at" "$last_save_json" && last_save_at="$JSON_VALUE" || last_save_at=""
+    [ -n "$last_save_at" ] || { printf '%s\n' '{}'; return 0; }
+    last_epoch=$(parse_epoch "$last_save_at")
+    [ -n "$last_epoch" ] || { printf '%s\n' '{}'; return 0; }
+    now_epoch=$(date "+%s")
+    elapsed=$(( now_epoch - last_epoch ))
+  fi
 
-  if [ "$elapsed" -gt 900 ]; then
+  if [ "$elapsed" -ge 900 ]; then
     nudge_cooldown="${ENGRAM_NUDGE_COOLDOWN_SECS:-900}"
     nudge_state_file="${state_file%-tools-loaded}-last-nudge"
     if [ -f "$nudge_state_file" ]; then
@@ -321,7 +562,7 @@ user_prompt_submit_without_jq() {
     esac
     if [ -z "$last_nudge_epoch" ] || [ "$(( now_epoch - last_nudge_epoch ))" -ge "$nudge_cooldown" ]; then
       printf '%s\n' "$now_epoch" > "$nudge_state_file" 2>/dev/null || true
-      printf '%s\n' '{"systemMessage":"MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}'
+      printf '%s\n' '{"systemMessage":"MEMORY REMINDER: It'\''s been at least 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}'
       return 0
     fi
   fi
@@ -358,7 +599,7 @@ fi
 # Load shared helpers after the Windows-safe fast path so Git Bash does not fork
 # for dirname/pwd before deciding whether the safe path applies.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "${SCRIPT_DIR}/_helpers.sh"
+source "${SCRIPT_DIR}/_helpers.sh" "__engram_hook_default_max_time=0.2"
 
 parse_epoch() {
   TS="$1"
@@ -392,9 +633,14 @@ parse_epoch() {
     date -j -u -f "%Y-%m-%dT%H:%M:%S" "$Z_TS" "+%s" 2>/dev/null && return 0
   fi
 
-  date -j -f "%Y-%m-%dT%H:%M:%S" "$TS" "+%s" 2>/dev/null \
-    || date -j -f "%Y-%m-%d %H:%M:%S" "$TS" "+%s" 2>/dev/null \
-    || date -d "$TS" "+%s" 2>/dev/null
+  # No timezone marker at all — these are naive timestamps from sqlite's
+  # datetime('now'), which is always UTC. Must parse with -u; parsing as
+  # local time skews the result by the host's UTC offset (e.g. on a UTC-6
+  # host, session age comes out ~6h in the future, so it's always seen as
+  # "just started" and the save-nudge can never fire).
+  date -j -u -f "%Y-%m-%dT%H:%M:%S" "$TS" "+%s" 2>/dev/null \
+    || date -j -u -f "%Y-%m-%d %H:%M:%S" "$TS" "+%s" 2>/dev/null \
+    || date -u -d "$TS" "+%s" 2>/dev/null
 }
 
 # Read hook input from stdin
@@ -410,21 +656,27 @@ PROJECT=""
 # ──────────────────────────────────────────────────────────────────────────────
 # PROMPT PERSIST
 #
-# Every user message is captured to POST /prompts so mem_save can attach the
-# originating prompt via SessionActivity. The canonical project is resolved by
-# the server before this script writes. Fire-and-forget: never blocks and never
-# fails the hook.
+# The Go decision endpoint authorizes capture and returns the canonical project
+# before POST /prompts. Original content is preserved. Fire-and-forget: never
+# blocks and never fails the hook.
 # ──────────────────────────────────────────────────────────────────────────────
-PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
+# Decode without a subprocess: preserve Unicode and CRLF even with Windows jq.
+PROMPT=""
+json_string_value_without_jq "prompt" "$INPUT" && PROMPT="$JSON_VALUE"
 if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
   # Detached subshell so the POST never stalls the hook. The server derives the
   # prompt's project from the session and rejects any mismatch.
   (
-    PROJECT=$(resolve_project "$CWD") || exit 0
-    curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
+    resolve_capture_project "$CWD" "$PROMPT" || exit 0
+    PROJECT="$JSON_VALUE"
+    json_escape_without_jq "$SESSION_ID"
+    ESCAPED_SESSION="$JSON_VALUE"
+    json_escape_without_jq "$PROJECT"
+    ESCAPED_PROJECT="$JSON_VALUE"
+    json_escape_without_jq "$PROMPT"
+    engram_curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
       -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg s "$SESSION_ID" --arg p "$PROJECT" --arg c "$PROMPT" \
-            '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
+      -d "{\"session_id\":\"${ESCAPED_SESSION}\",\"project\":\"${ESCAPED_PROJECT}\",\"content\":\"${JSON_VALUE}\"}" >/dev/null 2>&1 || true
   ) &
 fi
 
@@ -476,7 +728,7 @@ fi
 # Get session start time to check if session is > 5 minutes old
 SESSION_START=""
 if [ -n "$SESSION_ID" ]; then
-  SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null \
+  SESSION_START=$(engram_curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null \
     | jq -r '.started_at // empty' 2>/dev/null)
 fi
 
@@ -499,9 +751,9 @@ fi
 
 # Fetch the most recent observation for this project (any type)
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-LAST_SAVE_JSON=$(curl -sf \
+LAST_SAVE_JSON=$(engram_curl -sf \
   "${ENGRAM_URL}/observations?project=${ENCODED_PROJECT}&limit=1&sort=created_at:desc" \
-  --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
+  --max-time "$ENGRAM_HOOK_MAX_TIME")
 
 if [ -z "$LAST_SAVE_JSON" ]; then
   # Server not responding or slow — fail silently, no nudge
@@ -509,26 +761,41 @@ if [ -z "$LAST_SAVE_JSON" ]; then
   exit 0
 fi
 
-LAST_SAVE_AT=$(echo "$LAST_SAVE_JSON" | jq -r '.[0].created_at // empty' 2>/dev/null)
-
-if [ -z "$LAST_SAVE_AT" ]; then
-  # No observations yet — no nudge (session might just be starting)
+if ! echo "$LAST_SAVE_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  # A successful HTTP response still must be a valid observations array.
   echo "$OUTPUT"
   exit 0
 fi
 
-# Parse last save timestamp and compare to now
-LAST_EPOCH=$(parse_epoch "$LAST_SAVE_AT")
-if [ -z "$LAST_EPOCH" ]; then
-  echo "$OUTPUT"
-  exit 0
-fi
 NOW_EPOCH=$(date "+%s")
-ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
 
-# Nudge if last save was > 15 minutes ago (900 seconds), but debounce so we do
+if [ "$(echo "$LAST_SAVE_JSON" | jq 'length')" -eq 0 ]; then
+  # No observations exist yet. Use the real session age so the first-save
+  # reminder observes the same 15-minute threshold as existing saves.
+  if [ -z "${SESSION_AGE_SECS:-}" ]; then
+    echo "$OUTPUT"
+    exit 0
+  fi
+  ELAPSED="$SESSION_AGE_SECS"
+else
+  LAST_SAVE_AT=$(echo "$LAST_SAVE_JSON" | jq -r '.[0].created_at | if type == "string" then . else empty end')
+  if [ -z "$LAST_SAVE_AT" ]; then
+    # A non-empty response without a timestamp is incomplete, not a first save.
+    echo "$OUTPUT"
+    exit 0
+  fi
+  # Parse last save timestamp and compare to now
+  LAST_EPOCH=$(parse_epoch "$LAST_SAVE_AT")
+  if [ -z "$LAST_EPOCH" ]; then
+    echo "$OUTPUT"
+    exit 0
+  fi
+  ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
+fi
+
+# Nudge if the last save was at least 15 minutes ago (900 seconds), but debounce so we do
 # not repeat the reminder on every message while the agent has nothing to save.
-if [ "$ELAPSED" -gt 900 ]; then
+if [ "$ELAPSED" -ge 900 ]; then
   NUDGE_COOLDOWN="${ENGRAM_NUDGE_COOLDOWN_SECS:-900}"
   NUDGE_STATE_FILE="${STATE_FILE%-tools-loaded}-last-nudge"
 
@@ -542,9 +809,11 @@ if [ "$ELAPSED" -gt 900 ]; then
   esac
 
   if [ -z "$LAST_NUDGE_EPOCH" ] || [ "$(( NOW_EPOCH - LAST_NUDGE_EPOCH ))" -ge "$NUDGE_COOLDOWN" ]; then
-    printf '%s' "$NOW_EPOCH" > "$NUDGE_STATE_FILE" 2>/dev/null || true
+    printf '%s\n' "$NOW_EPOCH" > "$NUDGE_STATE_FILE" 2>/dev/null || true
+    # additionalContext (not systemMessage) so the nudge reaches the model — see
+    # print_toolsearch_message above.
     OUTPUT=$(jq -n \
-      '{"systemMessage": "MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}')
+      '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: "MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}}')
   fi
 fi
 

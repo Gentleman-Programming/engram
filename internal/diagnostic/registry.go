@@ -39,8 +39,11 @@ func DefaultRegistry() Registry {
 		ManualSessionNameProjectMismatchCheck{},
 		InvalidSessionIdentityCheck{},
 		OrphanedObservationSessionCheck{},
+		OrphanedPendingRelationsCheck{},
 		UnownedSessionProjectCheck{},
+		AmbiguousActiveRuntimeSessionsCheck{},
 		SyncMutationRequiredFieldsCheck{},
+		SyncTargetClosedSpaceCheck{},
 		SQLiteLockContentionCheck{},
 	)
 }

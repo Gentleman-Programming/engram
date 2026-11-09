@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 const (
@@ -20,6 +20,11 @@ const (
 
 	PrincipalRoleAdmin  = "admin"
 	PrincipalRoleMember = "member"
+
+	strandedAdminRecoveryAuditActorSource = "bootstrap_cli"
+	strandedAdminRecoveryAuditAction      = "bootstrap.cli"
+	strandedAdminRecoveryAuditOutcome     = "success"
+	strandedAdminRecoveryAuditReason      = "stranded_admin_token_recovered"
 )
 
 var (
@@ -99,9 +104,10 @@ type CreatePrincipalTokenParams struct {
 // RecoverStrandedAdminTokenParams contains the non-secret token data needed to
 // recover the single admin left without a token by a failed bootstrap.
 type RecoverStrandedAdminTokenParams struct {
-	TokenPrefix string
-	TokenHash   string
-	Name        string
+	TokenPrefix    string
+	TokenHash      string
+	Name           string
+	RevokeExisting bool
 }
 
 type ProjectGrant struct {
@@ -248,6 +254,16 @@ func (cs *CloudStore) CreateHumanUser(ctx context.Context, params CreateHumanUse
 		return HumanUser{}, fmt.Errorf("cloudstore: begin human user tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// New admins have no existing principal row to lock, so acquire the shared
+	// guard before their enabled principal can become visible. This matches
+	// first-admin creation and serializes recovery eligibility with every
+	// enabled managed-human admin creation.
+	if role == PrincipalRoleAdmin {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+			return HumanUser{}, fmt.Errorf("cloudstore: lock active admin guard: %w", err)
+		}
+	}
 
 	var principal Principal
 	const principalQ = `
@@ -487,9 +503,11 @@ func (cs *CloudStore) CreatePrincipalTokenWithAudit(ctx context.Context, params 
 
 // RecoverStrandedAdminTokenWithAudit atomically issues a token to the sole
 // enabled managed human admin only when no principal token exists anywhere in
-// the deployment. It is intentionally narrower than normal token issuance:
-// it repairs only the partial state left by the historical bootstrap audit
-// failure, preserves all grants, and cannot be repeated after a token exists.
+// the deployment. With RevokeExisting, it may instead replace exactly one
+// unused active token belonging to that admin. It is intentionally narrower
+// than normal token issuance: it repairs only the partial state left by the
+// historical bootstrap audit failure and preserves all grants. Explicit
+// replacement remains available only while exactly one active token is unused.
 func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, params RecoverStrandedAdminTokenParams, audit AuthAuditEvent) (PrincipalToken, error) {
 	if cs == nil || cs.db == nil {
 		return PrincipalToken{}, fmt.Errorf("cloudstore: not initialized")
@@ -530,15 +548,50 @@ func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, pa
 		return PrincipalToken{}, fmt.Errorf("%w: requires exactly one enabled managed human admin, found %d", ErrStrandedAdminRecoveryIneligible, len(adminIDs))
 	}
 
+	principalID := adminIDs[0]
 	var tokenCount int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cloud_principal_tokens`).Scan(&tokenCount); err != nil {
 		return PrincipalToken{}, fmt.Errorf("cloudstore: count stranded admin recovery tokens: %w", err)
 	}
+
 	if tokenCount != 0 {
-		return PrincipalToken{}, fmt.Errorf("%w: requires zero principal tokens, found %d", ErrStrandedAdminRecoveryIneligible, tokenCount)
+		if !params.RevokeExisting {
+			return PrincipalToken{}, fmt.Errorf("%w: requires zero principal tokens, found %d", ErrStrandedAdminRecoveryIneligible, tokenCount)
+		}
+		var existing PrincipalToken
+		var activeTokenCount int
+		err := tx.QueryRowContext(ctx, `
+			SELECT id::text, principal_id::text, last_used_at, revoked_at,
+				(SELECT COUNT(*) FROM cloud_principal_tokens WHERE revoked_at IS NULL)
+			FROM cloud_principal_tokens
+			WHERE revoked_at IS NULL
+			ORDER BY id
+			LIMIT 1
+			FOR UPDATE`).Scan(&existing.ID, &existing.PrincipalID, &existing.LastUsedAt, &existing.RevokedAt, &activeTokenCount)
+		if errors.Is(err, sql.ErrNoRows) {
+			return PrincipalToken{}, fmt.Errorf("%w: replacement requires exactly one active principal token, found 0", ErrStrandedAdminRecoveryIneligible)
+		}
+		if err != nil {
+			return PrincipalToken{}, fmt.Errorf("cloudstore: lock active stranded admin recovery token: %w", err)
+		}
+		if activeTokenCount != 1 {
+			return PrincipalToken{}, fmt.Errorf("%w: replacement requires exactly one active principal token, found %d", ErrStrandedAdminRecoveryIneligible, activeTokenCount)
+		}
+		if existing.PrincipalID != principalID || existing.LastUsedAt != nil {
+			return PrincipalToken{}, fmt.Errorf("%w: replacement requires one unused active token owned by the sole enabled managed human admin", ErrStrandedAdminRecoveryIneligible)
+		}
+		res, err := tx.ExecContext(ctx, `
+			UPDATE cloud_principal_tokens
+			SET revoked_at = NOW(), revoked_by_principal_id = $2, revocation_reason = $3
+			WHERE id = $1 AND revoked_at IS NULL`, existing.ID, principalID, "stranded_admin_token_replaced")
+		if err != nil {
+			return PrincipalToken{}, fmt.Errorf("cloudstore: revoke stranded admin recovery token: %w", err)
+		}
+		if err := requireAffected(res, "principal token"); err != nil {
+			return PrincipalToken{}, err
+		}
 	}
 
-	principalID := adminIDs[0]
 	const q = `
 		INSERT INTO cloud_principal_tokens (principal_id, token_prefix, token_hash, name, created_by_principal_id)
 		VALUES ($1, $2, $3, $4, $1)
@@ -548,9 +601,15 @@ func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, pa
 		return PrincipalToken{}, fmt.Errorf("cloudstore: create stranded admin recovery token: %w", err)
 	}
 
-	// The store owns the target identity so a caller cannot create an audit
-	// event that claims recovery for a different principal.
+	// The store owns every durable recovery-marker dimension so callers cannot
+	// create a lookalike marker or claim recovery for another principal.
+	audit.ActorPrincipalID = ""
+	audit.ActorSource = strandedAdminRecoveryAuditActorSource
 	audit.TargetPrincipalID = principalID
+	audit.Project = ""
+	audit.Action = strandedAdminRecoveryAuditAction
+	audit.Outcome = strandedAdminRecoveryAuditOutcome
+	audit.ReasonCode = strandedAdminRecoveryAuditReason
 	if err := insertAuthAuditEvent(ctx, tx, audit); err != nil {
 		return PrincipalToken{}, fmt.Errorf("%w: %w", ErrAuthAuditInsertFailed, err)
 	}
@@ -722,6 +781,64 @@ func (cs *CloudStore) FindPrincipalTokenByHash(ctx context.Context, tokenHash st
 		return PrincipalToken{}, Principal{}, fmt.Errorf("cloudstore: find principal token by hash: %w", err)
 	}
 	return token, principal, nil
+}
+
+var ErrPrincipalTokenRevoked = errors.New("principal token is revoked")
+
+// MarkPrincipalTokenUsed serializes enabled-state validation and usage against
+// principal transitions and recovery. Lock principal before token, matching
+// recovery's ordering; an UPDATE predicate alone cannot protect both rows.
+func (cs *CloudStore) MarkPrincipalTokenUsed(ctx context.Context, tokenID string) error {
+	if cs == nil || cs.db == nil {
+		return fmt.Errorf("cloudstore: not initialized")
+	}
+	tokenID = strings.TrimSpace(tokenID)
+	tx, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("cloudstore: begin token usage tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var principalID string
+	err = tx.QueryRowContext(ctx, `SELECT principal_id::text FROM cloud_principal_tokens WHERE id = $1`, tokenID).Scan(&principalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrPrincipalTokenNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("cloudstore: find token usage principal: %w", err)
+	}
+	var enabled bool
+	// NO KEY UPDATE blocks enabled-state changes and recovery's FOR UPDATE,
+	// but permits FK KEY SHARE checks by concurrent token revocation.
+	err = tx.QueryRowContext(ctx, `SELECT enabled FROM cloud_principals WHERE id = $1 FOR NO KEY UPDATE`, principalID).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrPrincipalNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("cloudstore: lock token usage principal: %w", err)
+	}
+	if !enabled {
+		return ErrPrincipalDisabled
+	}
+	var revokedAt *time.Time
+	err = tx.QueryRowContext(ctx, `SELECT revoked_at FROM cloud_principal_tokens WHERE id = $1 AND principal_id = $2 FOR UPDATE`, tokenID, principalID).Scan(&revokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrPrincipalTokenNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("cloudstore: lock token usage: %w", err)
+	}
+	if revokedAt != nil {
+		return ErrPrincipalTokenRevoked
+	}
+	// clock_timestamp is evaluated after waiting for locks, unlike NOW's
+	// transaction-start time. GREATEST also preserves future stored values.
+	if _, err := tx.ExecContext(ctx, `UPDATE cloud_principal_tokens SET last_used_at = GREATEST(last_used_at, clock_timestamp()) WHERE id = $1`, tokenID); err != nil {
+		return fmt.Errorf("cloudstore: mark token usage: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cloudstore: commit token usage: %w", err)
+	}
+	return nil
 }
 
 func (cs *CloudStore) RevokePrincipalToken(ctx context.Context, tokenID, revokedByPrincipalID, reason string) error {
@@ -1059,9 +1176,22 @@ func guardLastActiveAdminTx(ctx context.Context, tx *sql.Tx, principalID string,
 	return nil
 }
 
+// auditKeyValueExempt reports whether a (key, value) pair should bypass the
+// sensitive-key heuristic based on its value. issued_token is a boolean flag
+// written by the bootstrap completion audit (see cloudBootstrapCompletionMetadata);
+// it is exempt ONLY when the value is actually a bool, so the exemption cannot
+// be used to smuggle a secret string under a trusted key name.
+func auditKeyValueExempt(key string, value any) bool {
+	if strings.EqualFold(strings.TrimSpace(key), "issued_token") {
+		_, ok := value.(bool)
+		return ok
+	}
+	return false
+}
+
 func rejectSensitiveAuthAuditMetadata(metadata map[string]any) error {
 	for key, value := range metadata {
-		if sensitiveAuthAuditKey(key) {
+		if !auditKeyValueExempt(key, value) && sensitiveAuthAuditKey(key) {
 			return fmt.Errorf("%w: %s", ErrSensitiveAuditMetadata, key)
 		}
 		if err := rejectSensitiveAuthAuditValue(value); err != nil {
@@ -1089,10 +1219,11 @@ func rejectSensitiveAuthAuditValue(value any) error {
 		}
 		for _, key := range reflected.MapKeys() {
 			keyText := key.String()
-			if sensitiveAuthAuditKey(keyText) {
+			entryValue := reflected.MapIndex(key).Interface()
+			if !auditKeyValueExempt(keyText, entryValue) && sensitiveAuthAuditKey(keyText) {
 				return fmt.Errorf("%w: %s", ErrSensitiveAuditMetadata, keyText)
 			}
-			if err := rejectSensitiveAuthAuditValue(reflected.MapIndex(key).Interface()); err != nil {
+			if err := rejectSensitiveAuthAuditValue(entryValue); err != nil {
 				return err
 			}
 		}
@@ -1108,6 +1239,10 @@ func rejectSensitiveAuthAuditValue(value any) error {
 
 func sensitiveAuthAuditKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
+	// token_prefix is the short, non-secret token prefix; it matches the
+	// fragment heuristic below but never carries secret material. issued_token
+	// is handled by auditKeyValueExempt instead, because it is only safe when
+	// its value is the boolean flag the bootstrap completion audit records.
 	if key == "token_prefix" {
 		return false
 	}

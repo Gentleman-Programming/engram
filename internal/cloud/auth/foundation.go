@@ -53,6 +53,12 @@ var ErrTokenRevoked = errors.New("token is revoked")
 var ErrPrincipalDisabled = errors.New("principal is disabled")
 var ErrInvalidPrincipal = errors.New("invalid principal")
 
+// ErrTokenPrincipalMismatch reports a managed-token record whose principal
+// ID does not match the resolved principal (a storage invariant violation).
+// It is kept distinct from ErrInvalidPrincipal so audit classification can
+// separate a token/record join mismatch from a malformed stored principal.
+var ErrTokenPrincipalMismatch = errors.New("token principal mismatch")
+
 type PrincipalKind string
 
 type Role string
@@ -85,6 +91,14 @@ type ManagedTokenRecord struct {
 type ManagedTokenLookup interface {
 	FindManagedTokenByHash(ctx context.Context, hash string) (ManagedTokenRecord, Principal, error)
 }
+
+// ManagedTokenUsageRecorder is required for successful managed authentication.
+// Lookup-only backends fail closed rather than omitting durable usage.
+type ManagedTokenUsageRecorder interface {
+	MarkManagedTokenUsed(ctx context.Context, tokenID string) error
+}
+
+var ErrTokenUsageRecorderRequired = errors.New("managed token usage recorder is required")
 
 type ManagedTokenHasher struct {
 	pepper []byte
@@ -259,7 +273,7 @@ func (r *PrincipalResolver) ResolveBearerToken(ctx context.Context, token string
 		record, principal, err := r.managedTokens.FindManagedTokenByHash(ctx, hash)
 		if err == nil {
 			if record.PrincipalID == "" || record.PrincipalID != principal.ID {
-				return Principal{}, fmt.Errorf("%w: token principal mismatch", ErrInvalidPrincipal)
+				return Principal{}, ErrTokenPrincipalMismatch
 			}
 			if principal.Source == "" {
 				principal.Source = PrincipalSourceManagedToken
@@ -272,6 +286,13 @@ func (r *PrincipalResolver) ResolveBearerToken(ctx context.Context, token string
 			}
 			if !principal.Enabled {
 				return Principal{}, ErrPrincipalDisabled
+			}
+			recorder, ok := r.managedTokens.(ManagedTokenUsageRecorder)
+			if !ok {
+				return Principal{}, ErrTokenUsageRecorderRequired
+			}
+			if err := recorder.MarkManagedTokenUsed(ctx, record.ID); err != nil {
+				return Principal{}, fmt.Errorf("record managed token usage: %w", err)
 			}
 			principal.TokenID = record.ID
 			return principal, nil

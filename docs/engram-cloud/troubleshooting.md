@@ -6,6 +6,10 @@ Use this guide when local Engram saves work but cloud sync does not advance. The
 
 ---
 
+## Blank-project pending session mutations
+
+If cloud export reports a pending session mutation with `seq` and `entity_key`, run `engram cloud upgrade doctor --project <project>` and apply its deterministic repair before retrying export. Repair uses the matching local session as authority for project and directory. A conflicting payload or missing local session requires manual investigation; do not assign ownership from the journal payload alone.
+
 ## Quick Triage
 
 Run these commands first:
@@ -25,6 +29,8 @@ Check three things:
 | `cloud status` | configured + auth ready | CLI has a server URL and runtime token |
 | `doctor` | `ready` or actionable repair | Local metadata is safe to upload |
 | `last_acked_seq` | Advances after sync | Cloud accepted the pending journal |
+
+`engram cloud upgrade doctor --project <project>` checks policy failures recorded locally for that project only. A denial recorded for another project in the shared `cloud` sync target does not block the selected project. Doctor does not probe server authorization; it persists its diagnosis as `doctor_ready` or `doctor_blocked`. Use `engram sync --cloud --project <project>` to check the current server response.
 
 If the dashboard shows `0` observations but local saves exist, the cloud server has not accepted the client's pending sync yet. Do not delete local data.
 
@@ -50,6 +56,34 @@ export ENGRAM_CLOUD_TOKEN="your-token"
 ```
 
 The local `~/.engram/cloud.json` stores the server URL and may also store a `token` fallback. `ENGRAM_CLOUD_TOKEN` takes precedence over any token in `cloud.json`; if the env var is unset, Engram falls back to `cloud.json.token`. This fallback is intentional (issue #343) for use cases such as background autosync where exporting the env var on every shell is not practical.
+
+### Stop future replication or clear persisted settings
+
+```bash
+engram cloud status --project <project>
+engram cloud unenroll <project>
+engram cloud config --clear
+```
+
+`cloud status` reports effective server/auth configuration separately from project enrollment. Use `--project` to see whether that project is enrolled.
+
+`cloud unenroll` is idempotent and stops future replication eligibility for that project. It does not delete local data, remote history, or pending journal rows, and it does not cancel an already in-flight push.
+
+`cloud config --clear` clears only the persisted `cloud.json` server URL and token. Active `ENGRAM_CLOUD_SERVER` and `ENGRAM_CLOUD_TOKEN` overrides remain effective and are reported by the command and status output; unset them separately when you need them inactive.
+
+## Prompt source attestation did not complete
+
+`engram cloud attest-prompt-source --sync-id <exact-sync-id> --owner-project <owner-project>` requires a configured cloud endpoint and human bearer token. If the local preview is absent or ambiguous, verify the exact sync ID; no remote request is sent. A declined or invalid confirmation also sends nothing. A remote denial can mean either project grant is missing: check both grants with your cloud administrator rather than treating the prompt project as ownership proof. If the remote call succeeds but local confirmation fails, the error includes the remote attestation ID; **do not assume local authorization**. Resolve the local mismatch and retry deliberately. No import, pull, or deletion is part of this command.
+
+## Cloud project was recreated or deleted
+
+When a project's cloud data was deleted or recreated while the correct local data is already acknowledged, replay the current local project state with:
+
+```bash
+engram cloud upgrade remirror --project <project>
+```
+
+The project must already be enrolled and the configured cloud credentials must be authorized for it. Remirror creates new project-scoped upsert and locally represented tombstone mutations, then sends them through the normal cloud export path. It preserves existing acknowledgement and attempt history; it does not reopen acknowledged rows, delete mutation history, or reset `last_acked_seq`. Re-running the command is safe because remote entities use stable identities and upsert semantics.
 
 ---
 
@@ -105,6 +139,8 @@ write chunk: cloud: push chunk ...: status 400: invalid push payload: observatio
 ```
 
 It means a historical `session` mutation in `sync_mutations` is missing `directory`, a local `sessions` row included in the project export still has an empty/null `directory`, a local `observations` row included in the project export is missing a cloud-push required field, or a historical `observation` mutation is missing one of the required upsert fields: `sync_id`, `session_id`, `type`, `title`, `content`, or `scope`. Newer Engram versions write these fields correctly, but old journal rows, local session rows, or exported local observation rows may still need repair before first cloud upload.
+
+Isolated cross-project sessions are an exception: `ownership_mode: "project_owned"` with an omitted or blank string directory is valid and replicates without a repair. If an older client or cloud server rejects that payload, update both sides to a version supporting isolated cloud sessions. Do not use the directory rescue helper on these sessions: assigning a directory breaks their isolation contract. JSON null and non-string directory values are still invalid.
 
 ### Safe path: helper script
 
@@ -282,6 +318,22 @@ Do not manually edit SQLite without a backup.
 
 ---
 
+## Error: `invalid push payload: invalid character '\x1f' looking for beginning of value`
+
+Full symptom during `engram sync --cloud`:
+
+```text
+write chunk: cloud: push chunk ...: status 400: invalid push payload: invalid character '\x1f' looking for beginning of value
+```
+
+**Cause:** the client sends the push body as a gzip-compressed envelope declared with `Content-Type: application/vnd.engram.sync+gzip; version=1`. `\x1f` is the first byte of the gzip magic number (`0x1f 0x8b`), so this error means the server tried to decode raw gzip bytes as plain JSON. That happens when a proxy in front of the cloud server dropped or rewrote the request `Content-Type` header, or when the running server binary predates the compressed envelope support.
+
+**Current server behavior:** up-to-date `engram cloud serve` binaries sniff the gzip magic bytes and decode the compressed envelope when the declared `Content-Type` is missing or rewritten to a non-envelope value such as `application/json`, so a rewritten header no longer causes this error server-side. One shape still fails before sniffing: a request that still declares `application/vnd.engram.sync+gzip` with an unsupported `version` parameter is rejected with HTTP 415 (`unsupported push payload`), because the declared envelope version is validated before the request body is read. If you still see this error, the running server binary is older than this fix — upgrade the server.
+
+**Proxy advice:** if you run a proxy (nginx, Traefik, an API gateway, a WAF) in front of the cloud server, configure it to preserve the client request `Content-Type` header — in particular `application/vnd.engram.sync+gzip; version=1` — instead of replacing it with `application/json` or stripping it.
+
+---
+
 ## Error: `transport_failed`
 
 `transport_failed` is a wrapper around network, auth, server, or payload errors. Look for the concrete error message below it.
@@ -294,7 +346,7 @@ Do not manually edit SQLite without a backup.
 | `observation payload title is required for upsert` | Run the missing session directory helper; it also repairs missing observation payload fields from local `observations` |
 | `observations[N].title is required` | Run the missing session directory helper with `--fix-empty-observations` or `--all` |
 | `401` or `auth_required` | Check `ENGRAM_CLOUD_TOKEN` on the client and server |
-| `403` or `policy_forbidden` | Check `ENGRAM_CLOUD_ALLOWED_PROJECTS` on the server |
+| `403` or `policy_forbidden` | Check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents. |
 | `server_unsupported` | Redeploy a cloud server with mutation endpoints |
 
 ---
@@ -305,7 +357,7 @@ Do not manually edit SQLite without a backup.
 |---|---|---|
 | `a managed admin already exists; refusing to create a duplicate first admin via CLI bootstrap` | A managed admin was already bootstrapped (via CLI or dashboard). | This is expected safety behavior, not a bug. Use the existing managed admin, or a documented recovery path, instead of re-running first-admin bootstrap. |
 | `--issue-token requires ENGRAM_CLOUD_TOKEN_PEPPER to be configured` | `--issue-token` was passed without `ENGRAM_CLOUD_TOKEN_PEPPER` set. | Set `ENGRAM_CLOUD_TOKEN_PEPPER` to a dedicated secret (distinct from `ENGRAM_JWT_SECRET`) and re-run. No admin/user was created by the failed attempt. |
-| `stranded admin token recovery is not eligible` | `recover-token` found anything other than exactly one enabled managed human admin and zero principal tokens. | Use `engram cloud bootstrap recover-token` only for the documented partial-bootstrap state; it intentionally refuses a normal, ambiguous, or already recovered deployment. |
+| `stranded admin token recovery is not eligible` | `recover-token` found an unsafe admin or token state. | Use `engram cloud bootstrap recover-token` only for the documented partial-bootstrap state. To replace one unused active bootstrap token whose output was lost, explicitly add `--revoke-existing`; it may be retried after another lost output only while the current token remains unused, and refuses used, revoked, ambiguous, or multiple-active-token states. |
 | `recover-token requires ENGRAM_CLOUD_TOKEN_PEPPER to be configured` | The recovery command cannot hash a managed token safely. | Set the dedicated pepper, then retry. No token was created. |
 | `connect cloud store` | `ENGRAM_DATABASE_URL` is missing/unreachable, same as any other `engram cloud` database command. | Verify `ENGRAM_DATABASE_URL` and that Postgres is reachable, same as `engram cloud serve`. |
 

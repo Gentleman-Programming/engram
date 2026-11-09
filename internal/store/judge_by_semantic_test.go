@@ -140,11 +140,68 @@ func TestJudgeBySemantic_UpsertIdempotency(t *testing.T) {
 	}
 }
 
+// TestJudgeBySemantic_UpsertRewritesDirection verifies that a reverse pending
+// row reused by a directional judgment retains its sync ID but is rewritten to
+// the requested source and target polarity.
+func TestJudgeBySemantic_UpsertRewritesDirection(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncA := addTestObs(t, s, "JWT auth approach v1 decision", "decision", "testproject", "project")
+	_, syncB := addTestObs(t, s, "JWT auth approach v0 legacy", "decision", "testproject", "project")
+
+	const reverseRelationID = "rel-reversed-pending"
+	if _, err := s.SaveRelation(SaveRelationParams{
+		SyncID:   reverseRelationID,
+		SourceID: syncB,
+		TargetID: syncA,
+	}); err != nil {
+		t.Fatalf("SaveRelation reverse pending: %v", err)
+	}
+
+	syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID:   syncA,
+		TargetID:   syncB,
+		Relation:   RelationSupersedes,
+		Confidence: 0.92,
+		Reasoning:  "v1 supersedes v0",
+		Model:      "test-model",
+	})
+	if err != nil {
+		t.Fatalf("JudgeBySemantic: %v", err)
+	}
+	if syncID != reverseRelationID {
+		t.Errorf("sync ID = %q, want existing row %q", syncID, reverseRelationID)
+	}
+
+	relation, err := s.GetRelation(syncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
+	}
+	if relation.SourceID != syncA || relation.TargetID != syncB {
+		t.Errorf("relation direction = (%q, %q), want (%q, %q)", relation.SourceID, relation.TargetID, syncA, syncB)
+	}
+	if relation.Relation != RelationSupersedes {
+		t.Errorf("relation = %q, want %q", relation.Relation, RelationSupersedes)
+	}
+
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_relations
+		 WHERE (source_id = ? AND target_id = ?)
+		    OR (source_id = ? AND target_id = ?)`,
+		syncA, syncB, syncB, syncA,
+	).Scan(&count); err != nil {
+		t.Fatalf("count relation pair: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("relation pair count = %d, want 1", count)
+	}
+}
+
 // ─── C.2c — TestJudgeBySemantic_NotConflictIsNoOp ────────────────────────────
 
-// TestJudgeBySemantic_NotConflictIsNoOp verifies that passing Relation="not_conflict"
-// inserts no row and returns an empty sync_id without error.
-func TestJudgeBySemantic_NotConflictIsNoOp(t *testing.T) {
+// TestJudgeBySemantic_NotConflictPersists verifies that not_conflict retains a
+// judged relation so future candidate scans suppress the pair.
+func TestJudgeBySemantic_NotConflictPersists(t *testing.T) {
 	s := setupRelationsStore(t)
 
 	_, syncA := addTestObs(t, s, "Unrelated auth decision", "decision", "testproject", "project")
@@ -161,20 +218,16 @@ func TestJudgeBySemantic_NotConflictIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JudgeBySemantic(not_conflict): unexpected error: %v", err)
 	}
-	if syncID != "" {
-		t.Errorf("JudgeBySemantic(not_conflict): expected empty sync_id; got %q", syncID)
+	if syncID == "" {
+		t.Fatal("JudgeBySemantic(not_conflict): expected a persisted sync_id")
 	}
 
-	// No row must exist for this pair.
-	var count int
-	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_relations WHERE source_id = ? OR target_id = ?`,
-		syncA, syncA,
-	).Scan(&count); err != nil {
-		t.Fatalf("count query: %v", err)
+	relation, err := s.GetRelation(syncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("expected 0 rows for not_conflict pair; got %d", count)
+	if relation.Relation != RelationNotConflict || relation.JudgmentStatus != JudgmentStatusJudged {
+		t.Errorf("persisted relation = %+v, want judged not_conflict", relation)
 	}
 }
 

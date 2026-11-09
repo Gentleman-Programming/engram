@@ -5,19 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
-	engramproject "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"golang.org/x/mod/semver"
+
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/dashboard"
+	engramproject "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
 )
 
 type Option func(*CloudServer)
@@ -75,6 +78,7 @@ type CloudServer struct {
 	principalState      principalStateStore
 	adminIdentity       AdminIdentityStore
 	managedHasher       *cloudauth.ManagedTokenHasher
+	dashboardScope      func([]string) (dashboard.DashboardStore, error)
 	dashboardSessionKey []byte
 	dashboardAdmin      string
 	port                int
@@ -83,6 +87,10 @@ type CloudServer struct {
 	mux                 *http.ServeMux
 	syncStatus          dashboard.SyncStatusProvider
 	listenAndServe      func(addr string, handler http.Handler) error
+	// version is the optional running build identifier surfaced in the
+	// dashboard chrome (Layout footer + LoginPage). An empty identifier is
+	// displayed as "version unknown" on both surfaces.
+	version string
 }
 
 const defaultHost = "127.0.0.1"
@@ -91,6 +99,38 @@ const maxDashboardLoginBodyBytes int64 = 16 * 1024
 const dashboardSessionCookieName = "engram_dashboard_token"
 
 var ErrDashboardSessionCodecRequired = errors.New("dashboard session codec is required for dashboard auth")
+
+// Request-auth audit vocabulary (engram#1134): every rejected sync/admin
+// request authentication is audited best-effort into cloud_auth_audit_log via
+// the same AdminIdentityStore sink the dashboard login/bootstrap flows use.
+const (
+	authAuditActionRequestAuth            = "sync.auth"
+	authAuditActionProjectAuthorize       = "sync.authorize"
+	authAuditActorSourceRequest           = "request"
+	authAuditReasonMissingHeader          = "missing_header"
+	authAuditReasonMalformedBearer        = "malformed_bearer"
+	authAuditReasonUnknownToken           = "unknown_token"
+	authAuditReasonTokenRevoked           = "token_revoked"
+	authAuditReasonPrincipalDisabled      = "principal_disabled"
+	authAuditReasonTokenPrincipalMismatch = "token_principal_mismatch"
+	authAuditReasonPepperMissing          = "pepper_missing"
+	authAuditReasonResolverError          = "resolver_error"
+	authAuditReasonAuthorizeError         = "authorize_error"
+	authAuditReasonProjectForbidden       = "project_forbidden"
+)
+
+// requestAuthAuditInsertTimeout bounds the best-effort insert after a rejected
+// request auth: the rejection is already decided, so a stalled audit insert
+// may delay the response only within this fixed budget, never indefinitely.
+const requestAuthAuditInsertTimeout = 3 * time.Second
+
+// Bearer-extraction failure sentinels. bearerTokenFromRequest's error text is
+// part of the established 401 response body; the sentinels keep audit reason
+// classification independent from those byte-sensitive messages.
+var (
+	errMissingAuthorizationHeader = errors.New("missing authorization header")
+	errAuthorizationNotBearer     = errors.New("authorization must use Bearer token")
+)
 
 func WithSyncStatusProvider(provider dashboard.SyncStatusProvider) Option {
 	return func(s *CloudServer) {
@@ -143,6 +183,33 @@ func WithMaxPushBodyBytes(limit int64) Option {
 			s.maxPushBodyBytes = limit
 		}
 	}
+}
+
+// WithVersion sets the build identifier (e.g. ldflags-injected semver) that
+// the dashboard chrome surfaces in the Layout footer and the LoginPage so
+// operators can confirm the running build from the browser alone. The stored
+// value is already display-ready, because MountConfig.Version is rendered
+// verbatim: a semver build carries exactly one leading "v" whichever shape
+// reached us ("v1.20.3" and "1.20.3" both display as "v1.20.3"), while a
+// non-semver build identifier such as "dev" is preserved as-is so a local
+// build is never mislabelled "vdev". Empty and whitespace-only values stay
+// empty; the chrome presents those builds as "version unknown".
+func WithVersion(version string) Option {
+	return func(s *CloudServer) {
+		s.version = displayVersion(version)
+	}
+}
+
+// displayVersion maps a raw build identifier onto its dashboard display form.
+func displayVersion(version string) string {
+	trimmed := strings.TrimSpace(version)
+	if semver.IsValid(trimmed) {
+		return trimmed
+	}
+	if semver.IsValid("v" + trimmed) {
+		return "v" + trimmed
+	}
+	return trimmed
 }
 
 func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *CloudServer {
@@ -201,6 +268,9 @@ func (s *CloudServer) pushBodyLimit() int64 {
 
 func (s *CloudServer) routes() {
 	s.mux = http.NewServeMux()
+	s.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusFound)
+	})
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	var dashboardStore dashboard.DashboardStore
 	if store, ok := s.store.(dashboard.DashboardStore); ok {
@@ -249,13 +319,18 @@ func (s *CloudServer) routes() {
 		IsAdmin: func(r *http.Request) bool {
 			return s.isDashboardAdmin(r)
 		},
+		CanManageManagedUsers: func(r *http.Request) bool {
+			return s.canManageManagedUsers(r)
+		},
 		GetDisplayName: func(r *http.Request) string {
 			return s.dashboardDisplayName(r)
 		},
 		Store:             dashboardStore,
+		StoreForRequest:   s.dashboardStoreForRequest(dashboardStore),
 		ManagedUsers:      managedUsersStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,
+		Version:           s.version,
 	})
 	s.mux.HandleFunc("GET /dashboard/bootstrap", s.handleDashboardBootstrapPage)
 	s.mux.HandleFunc("POST /dashboard/bootstrap", s.handleDashboardBootstrapSubmit)
@@ -277,6 +352,10 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("GET /sync/pull", s.withAuth(s.handlePullManifest))
 	s.mux.HandleFunc("GET /sync/pull/{chunkID}", s.withAuth(s.handlePullChunk))
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))
+	s.mux.HandleFunc("POST /sync/session-authorities", s.withAuth(s.handleRegisterSessionAuthority))
+	s.mux.HandleFunc("POST /sync/prompt-pair-claims", s.withAuth(s.handlePromptPairClaim))
+	s.mux.HandleFunc("POST /sync/prompt-source-attestations", s.withAuth(s.handlePromptSourceAttestation))
+	s.mux.HandleFunc("POST /sync/prompt-source-attestations/verify", s.withAuth(s.handleVerifyPromptSourceAttestation))
 	s.mux.HandleFunc("POST /sync/mutations/push", s.withAuth(s.handleMutationPush))
 	s.mux.HandleFunc("GET /sync/mutations/pull", s.withAuth(s.handleMutationPull))
 	s.mux.HandleFunc("GET /admin/users", s.withAuth(s.handleAdminListUsers))
@@ -289,6 +368,43 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("GET /admin/users/{principalID}/grants", s.withAuth(s.handleAdminListGrants))
 	s.mux.HandleFunc("POST /admin/users/{principalID}/grants", s.withAuth(s.handleAdminCreateGrant))
 	s.mux.HandleFunc("POST /admin/users/{principalID}/grants/{project}/revoke", s.withAuth(s.handleAdminRevokeGrant))
+}
+
+// dashboardStoreForRequest creates a fresh immutable view for managed
+// principals. Legacy and local dashboard sessions retain the existing store
+// behavior, while missing grant authority or scoped-store support fails closed.
+func (s *CloudServer) dashboardStoreForRequest(store dashboard.DashboardStore) func(*http.Request) (dashboard.DashboardStore, error) {
+	if store == nil {
+		return nil
+	}
+	return func(r *http.Request) (dashboard.DashboardStore, error) {
+		principal, ok := s.dashboardPrincipalFromRequest(r)
+		if !ok || principal.Source != cloudauth.PrincipalSourceManagedToken {
+			return store, nil
+		}
+		if s.principalProject == nil {
+			return nil, errors.New("managed dashboard scope authorizer is not configured")
+		}
+		projects, err := s.principalProject.EnrolledProjectsForPrincipal(r.Context(), principal)
+		if err != nil {
+			return nil, fmt.Errorf("resolve managed dashboard project grants: %w", err)
+		}
+		var view dashboard.DashboardStore
+		if s.dashboardScope != nil {
+			view, err = s.dashboardScope(projects)
+		} else if cloudStore, ok := s.store.(*cloudstore.CloudStore); ok {
+			view, err = cloudStore.DashboardStoreForProjects(projects)
+		} else {
+			return nil, errors.New("managed dashboard scoped store is not configured")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("build managed dashboard project scope: %w", err)
+		}
+		if view == nil {
+			return nil, errors.New("managed dashboard scoped store is unavailable")
+		}
+		return view, nil
+	}
 }
 
 func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -315,11 +431,13 @@ func (s *CloudServer) authenticateRequest(w http.ResponseWriter, r *http.Request
 	if s.principalAuth != nil {
 		token, err := bearerTokenFromRequest(r)
 		if err != nil {
+			s.recordRequestAuthDeniedAudit(r, requestAuthDenyReason(err))
 			http.Error(w, fmt.Sprintf("unauthorized: %v", err), http.StatusUnauthorized)
 			return r, false
 		}
 		principal, err := s.principalAuth.ResolveBearerToken(r.Context(), token)
 		if err != nil {
+			s.recordRequestAuthDeniedAudit(r, requestAuthDenyReason(err))
 			http.Error(w, fmt.Sprintf("unauthorized: %v", err), http.StatusUnauthorized)
 			return r, false
 		}
@@ -327,6 +445,7 @@ func (s *CloudServer) authenticateRequest(w http.ResponseWriter, r *http.Request
 	}
 	if s.auth != nil {
 		if err := s.auth.Authorize(r); err != nil {
+			s.recordRequestAuthDeniedAudit(r, authAuditReasonAuthorizeError)
 			http.Error(w, fmt.Sprintf("unauthorized: %v", err), http.StatusUnauthorized)
 			return r, false
 		}
@@ -334,20 +453,102 @@ func (s *CloudServer) authenticateRequest(w http.ResponseWriter, r *http.Request
 	return r, true
 }
 
+// requestAuthDenyReason maps a request-auth rejection to its audit
+// reason_code. Resolver errors are classified with errors.Is against the
+// sentinel classes ResolveBearerToken returns and wraps. A token record whose
+// principal ID does not match the resolved principal is
+// ErrTokenPrincipalMismatch (token_principal_mismatch); a stored principal
+// that fails Validate() wraps ErrInvalidPrincipal and is a malformed stored
+// principal, so it falls to the generic resolver_error bucket.
+func requestAuthDenyReason(err error) string {
+	switch {
+	case errors.Is(err, errMissingAuthorizationHeader):
+		return authAuditReasonMissingHeader
+	case errors.Is(err, errAuthorizationNotBearer):
+		return authAuditReasonMalformedBearer
+	case errors.Is(err, cloudauth.ErrUnknownToken):
+		return authAuditReasonUnknownToken
+	case errors.Is(err, cloudauth.ErrTokenRevoked):
+		return authAuditReasonTokenRevoked
+	case errors.Is(err, cloudauth.ErrPrincipalDisabled):
+		return authAuditReasonPrincipalDisabled
+	case errors.Is(err, cloudauth.ErrTokenPrincipalMismatch):
+		return authAuditReasonTokenPrincipalMismatch
+	case errors.Is(err, cloudauth.ErrTokenPepperRequired):
+		return authAuditReasonPepperMissing
+	default:
+		return authAuditReasonResolverError
+	}
+}
+
+// recordRequestAuthDeniedAudit emits the per-rejection server log line and
+// records a best-effort cloud_auth_audit_log row for a rejected request
+// authentication (engram#1134). Successful request auth is intentionally
+// unaudited per request because it is a high-volume path.
+func (s *CloudServer) recordRequestAuthDeniedAudit(r *http.Request, reason string) {
+	log.Printf("[engram-cloud] request auth denied: %s (reason=%s)", r.RemoteAddr, reason)
+	s.recordAuthAuditBestEffort(r.Context(), cloudstore.AuthAuditEvent{
+		ActorSource: authAuditActorSourceRequest,
+		Action:      authAuditActionRequestAuth,
+		Outcome:     authAuditOutcomeDenied,
+		ReasonCode:  reason,
+		Metadata:    map[string]any{"source": authAuditActorSourceRequest},
+	}, "request auth")
+}
+
+// recordProjectPolicyDeniedAudit records a project authorization denial after
+// authentication has succeeded. It deliberately carries only principal and
+// project identity; bearer credentials are never logged or persisted.
+func (s *CloudServer) recordProjectPolicyDeniedAudit(ctx context.Context, project string) {
+	principal, ok := PrincipalFromContext(ctx)
+	actorID := ""
+	actorSource := authAuditActorSourceRequest
+	if ok {
+		actorID = auditActorPrincipalIDRef(principal)
+		actorSource = auditActorSource(principal)
+	}
+	log.Printf("[engram-cloud] project authorization denied: project=%q actor=%q actor_source=%q reason=%s", project, actorID, actorSource, authAuditReasonProjectForbidden)
+	s.recordAuthAuditBestEffort(ctx, cloudstore.AuthAuditEvent{
+		ActorPrincipalID: actorID,
+		ActorSource:      actorSource,
+		Project:          project,
+		Action:           authAuditActionProjectAuthorize,
+		Outcome:          authAuditOutcomeDenied,
+		ReasonCode:       authAuditReasonProjectForbidden,
+		Metadata:         map[string]any{"source": actorSource},
+	}, "project authorization")
+}
+
+// recordAuthAuditBestEffort uses a request-derived context with cancellation
+// detached so audits survive client disconnects, while the fixed timeout keeps
+// each synchronous insert bounded.
+func (s *CloudServer) recordAuthAuditBestEffort(ctx context.Context, event cloudstore.AuthAuditEvent, auditName string) {
+	if s.adminIdentity == nil {
+		log.Printf("cloudserver: admin identity store is not configured; %s audit skipped", auditName)
+		return
+	}
+	insertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requestAuthAuditInsertTimeout)
+	defer cancel()
+	if err := s.adminIdentity.InsertAuthAuditEvent(insertCtx, event); err != nil {
+		log.Printf("[engram-cloud] %s audit insert failed (best-effort): %v", auditName, err)
+	}
+}
+
+// bearerTokenFromRequest trims outer whitespace and requires exactly two
+// whitespace-delimited Authorization fields. The Bearer scheme is matched
+// case-insensitively; tabs and multiple spaces between fields are accepted.
+// Whitespace inside a credential or a scheme glued to it is rejected. This
+// parser does not enforce RFC character grammar for the credential.
 func bearerTokenFromRequest(r *http.Request) (string, error) {
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	if header == "" {
-		return "", fmt.Errorf("missing authorization header")
+		return "", errMissingAuthorizationHeader
 	}
 	parts := strings.Fields(header)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return "", fmt.Errorf("authorization must use Bearer token")
+		return "", errAuthorizationNotBearer
 	}
-	token := strings.TrimSpace(parts[1])
-	if token == "" {
-		return "", fmt.Errorf("bearer token is required")
-	}
-	return token, nil
+	return parts[1], nil
 }
 
 func (s *CloudServer) authorizeDashboardRequest(r *http.Request) error {
@@ -419,6 +620,14 @@ func (s *CloudServer) isDashboardAdmin(r *http.Request) bool {
 	return s.verifyLegacyDashboardAdminCookie(r)
 }
 
+// canManageManagedUsers derives the rendering capability from the same
+// managed-admin principal policy enforced by requireManagedAdmin. It does not
+// authorize mutations; their handlers remain responsible for that enforcement.
+func (s *CloudServer) canManageManagedUsers(r *http.Request) bool {
+	principal, ok := s.dashboardActorPrincipal(r)
+	return ok && isManagedAdminPrincipal(principal)
+}
+
 func (s *CloudServer) handlePullManifest(w http.ResponseWriter, r *http.Request) {
 	project, ok := projectFromRequest(w, r)
 	if !ok {
@@ -457,6 +666,18 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("read chunk: %v", err), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Add("Vary", "Accept")
+	if chunkcodec.AcceptsCompressedEnvelope(r.Header.Get("Accept")) && int64(len(chunk)) <= chunkcodec.DefaultMaxDecodedBytes {
+		compressed, err := chunkcodec.EncodeCompressedEnvelope(chunk)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("compress chunk: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
+		_, _ = w.Write(compressed)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(chunk)
 }
@@ -464,20 +685,51 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	maxPushBodyBytes := s.pushBodyLimit()
 	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
-	var req struct {
-		ChunkID         string          `json:"chunk_id"`
-		CreatedBy       string          `json:"created_by"`
-		ClientCreatedAt string          `json:"client_created_at"`
-		Project         string          `json:"project"`
-		Data            json.RawMessage `json:"data"`
+	var req chunkPushRequest
+	compressed, contentTypeErr := chunkcodec.IsCompressedEnvelopeContentType(r.Header.Get("Content-Type"))
+	if contentTypeErr != nil {
+		writeActionableError(w, http.StatusUnsupportedMediaType, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("unsupported push payload: %v", contentTypeErr))
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var err error
+	if compressed {
+		var encoded []byte
+		encoded, err = io.ReadAll(r.Body)
+		if err == nil {
+			encoded, err = chunkcodec.DecodeCompressedEnvelope(encoded, maxPushBodyBytes)
+		}
+		if err == nil {
+			err = json.Unmarshal(encoded, &req)
+		}
+	} else {
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			err = readErr
+		} else if chunkcodec.HasGzipMagic(body) {
+			// Resilience against proxies that drop or rewrite the request
+			// Content-Type: a gzip stream is identified by its magic bytes, so
+			// decode the compressed envelope even though the header disagrees.
+			log.Printf("cloudserver: push body is a gzip stream but Content-Type is %q; sniffing and decoding as compressed envelope", r.Header.Get("Content-Type"))
+			var decoded []byte
+			decoded, err = chunkcodec.DecodeCompressedEnvelope(body, maxPushBodyBytes)
+			if err == nil {
+				err = json.Unmarshal(decoded, &req)
+			}
+		} else {
+			err = json.Unmarshal(body, &req)
+		}
+	}
+	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", maxPushBodyBytes))
 			return
 		}
-		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("invalid push payload: %v", err))
+		if errors.Is(err, chunkcodec.ErrPayloadTooLarge) {
+			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("decoded push payload too large (max %d bytes)", maxPushBodyBytes))
+			return
+		}
+		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("invalid push payload: %v (content-type: %q)", err, r.Header.Get("Content-Type")))
 		return
 	}
 	if len(req.Data) == 0 {
@@ -596,6 +848,14 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "chunk_id": computedChunkID})
 }
 
+type chunkPushRequest struct {
+	ChunkID         string          `json:"chunk_id"`
+	CreatedBy       string          `json:"created_by"`
+	ClientCreatedAt string          `json:"client_created_at"`
+	Project         string          `json:"project"`
+	Data            json.RawMessage `json:"data"`
+}
+
 func chunkIDFromPayload(payload []byte) string {
 	return chunkcodec.ChunkID(payload)
 }
@@ -619,12 +879,13 @@ func (s *CloudServer) authorizeProjectScope(ctx context.Context, w http.Response
 	if s.principalProject != nil {
 		principal, ok := PrincipalFromContext(ctx)
 		if !ok {
+			s.recordProjectPolicyDeniedAudit(ctx, project)
 			writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: principal is required")
 			return false
 		}
 		if usesManagedProjectGrants(principal) {
 			if err := s.principalProject.AuthorizeProjectForPrincipal(ctx, principal, project); err != nil {
-				writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project is not allowed")
+				s.writeProjectPolicyDenied(ctx, w, project)
 				return false
 			}
 			return true
@@ -634,7 +895,7 @@ func (s *CloudServer) authorizeProjectScope(ctx context.Context, w http.Response
 		return true
 	}
 	if err := s.projectAuth.AuthorizeProject(project); err != nil {
-		writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project is not allowed")
+		s.writeProjectPolicyDenied(ctx, w, project)
 		return false
 	}
 	return true
@@ -650,6 +911,11 @@ func writeActionableError(w http.ResponseWriter, status int, class, code, messag
 		"error_code":  strings.TrimSpace(code),
 		"error":       strings.TrimSpace(message),
 	})
+}
+
+func (s *CloudServer) writeProjectPolicyDenied(ctx context.Context, w http.ResponseWriter, project string) {
+	s.recordProjectPolicyDeniedAudit(ctx, project)
+	writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, fmt.Sprintf("forbidden: project %q is not allowed", project))
 }
 
 func coerceChunkProject(payload []byte, project string) ([]byte, error) {
@@ -677,7 +943,7 @@ func validateDirectChunkArrayEntries(chunk engramsync.ChunkData) error {
 		if strings.TrimSpace(session.ID) == "" {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
-		if strings.TrimSpace(session.Directory) == "" {
+		if strings.TrimSpace(session.Directory) == "" && session.OwnershipMode != store.SessionOwnershipProjectOwned {
 			return fmt.Errorf("sessions[%d].directory is required", i)
 		}
 	}
@@ -721,8 +987,8 @@ func validateDirectChunkArrayEntries(chunk engramsync.ChunkData) error {
 func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs map[string]struct{}) error {
 	chunkSessionIDs := make(map[string]struct{}, len(chunk.Sessions))
 	for i, session := range chunk.Sessions {
-		sessionID := strings.TrimSpace(session.ID)
-		if sessionID == "" {
+		sessionID := session.ID
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
 		chunkSessionIDs[sessionID] = struct{}{}
@@ -737,11 +1003,11 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 		if err := decodeSyncMutationPayload(mutation.Payload, &body); err != nil {
 			return fmt.Errorf("mutations[%d] invalid payload: %w", i, err)
 		}
-		sessionID := strings.TrimSpace(body.ID)
-		if sessionID == "" {
-			sessionID = strings.TrimSpace(mutation.EntityKey)
+		sessionID := body.ID
+		if strings.TrimSpace(sessionID) == "" {
+			sessionID = mutation.EntityKey
 		}
-		if sessionID == "" {
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("mutations[%d].payload.id is required for session upsert", i)
 		}
 		chunkSessionIDs[sessionID] = struct{}{}
@@ -756,8 +1022,8 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 	}
 
 	for i, observation := range chunk.Observations {
-		sessionID := strings.TrimSpace(observation.SessionID)
-		if sessionID == "" {
+		sessionID := observation.SessionID
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("observations[%d].session_id is required", i)
 		}
 		if !hasSession(sessionID) {
@@ -766,8 +1032,8 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 	}
 
 	for i, prompt := range chunk.Prompts {
-		sessionID := strings.TrimSpace(prompt.SessionID)
-		if sessionID == "" {
+		sessionID := prompt.SessionID
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("prompts[%d].session_id is required", i)
 		}
 		if !hasSession(sessionID) {
@@ -785,8 +1051,8 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 		if err := decodeSyncMutationPayload(mutation.Payload, &body); err != nil {
 			return fmt.Errorf("mutations[%d] invalid payload: %w", i, err)
 		}
-		sessionID := strings.TrimSpace(body.SessionID)
-		if mutation.Op == store.SyncOpUpsert && sessionID == "" {
+		sessionID := body.SessionID
+		if mutation.Op == store.SyncOpUpsert && strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("mutations[%d].payload.session_id is required for upsert", i)
 		}
 		if mutation.Op == store.SyncOpUpsert && !hasSession(sessionID) {

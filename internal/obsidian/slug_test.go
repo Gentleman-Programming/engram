@@ -17,9 +17,9 @@ func TestSlugify(t *testing.T) {
 		},
 		{
 			name:     "title with colon and mixed case",
-			title:    "SDD Proposal: obsidian-plugin",
+			title:    "Architecture Proposal: obsidian-plugin",
 			id:       1720,
-			expected: "sdd-proposal-obsidian-plugin-1720",
+			expected: "architecture-proposal-obsidian-plugin-1720",
 		},
 		{
 			name:     "empty title falls back to observation-{id}",

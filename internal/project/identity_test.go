@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -136,6 +137,9 @@ func TestRepositoryBinding_WriteFailureFailsClosed(t *testing.T) {
 	if !errors.Is(err, ErrRepositoryBinding) {
 		t.Fatalf("write failure error = %v, want ErrRepositoryBinding", err)
 	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("write failure error = %v, want underlying missing-directory error", err)
+	}
 }
 
 func TestDetectProjectFull_NonGitAndConfigRemainCompatible(t *testing.T) {
@@ -196,6 +200,33 @@ func TestRepositoryBinding_ConcurrentCreationConverges(t *testing.T) {
 		if binding != first {
 			t.Fatalf("concurrent binding = %+v, want %+v", binding, first)
 		}
+	}
+}
+
+func TestRepositoryBinding_PublicationCompleteAndPrivate(t *testing.T) {
+	commonDir := t.TempDir()
+	binding, err := loadOrCreateRepositoryBinding(commonDir, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := readRepositoryBinding(commonDir)
+	if err != nil || persisted != binding {
+		t.Fatalf("persisted binding = %+v, %v; want %+v", persisted, err, binding)
+	}
+	info, err := os.Stat(repositoryBindingPath(commonDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("binding permissions = %o", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(commonDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("publication left temporary files: %v, %v", entries, err)
+	}
+	winner, err := loadOrCreateRepositoryBinding(commonDir, "other-project")
+	if err != nil || winner != binding {
+		t.Fatalf("winner = %+v, %v; want %+v", winner, err, binding)
 	}
 }
 

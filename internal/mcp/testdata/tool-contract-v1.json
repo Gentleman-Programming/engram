@@ -22,9 +22,28 @@
       },
       "required": ["confidence","memory_id_a","memory_id_b","reasoning","relation"],
       "additionalProperties": true},
+    "mem_consolidate": {
+      "type": ["object"],
+      "properties": {
+        "confirm": {"type":["boolean"],"additionalProperties":true},
+        "expected_project": {"type":["string"],"additionalProperties":true},
+        "fingerprint": {"type":["string"],"additionalProperties":true},
+        "ids_to_delete": {
+          "type": ["array"],
+          "items": {"type":["integer"],"additionalProperties":true},
+          "additionalProperties": true},
+        "new_content": {"type":["string"],"additionalProperties":true},
+        "new_title": {"type":["string"],"additionalProperties":true},
+        "topic_key": {"type":["string"],"additionalProperties":true},
+        "type": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["expected_project","ids_to_delete","new_content","new_title"],
+      "additionalProperties": true},
     "mem_context": {
       "type": ["object"],
       "properties": {
+        "compact": {"type":["boolean"],"additionalProperties":true},
+        "max_bytes": {"type":["number"],"additionalProperties":true},
         "project": {"type":["string"],"additionalProperties":true},
         "scope": {"type":["string"],"additionalProperties":true}
       },
@@ -48,7 +67,10 @@
     "mem_get_observation": {
       "type": ["object"],
       "properties": {
-        "id": {"type":["number"],"additionalProperties":true}
+        "history_cursor": {"type":["number"],"additionalProperties":true},
+        "id": {"type":["number"],"additionalProperties":true},
+        "include_history": {"type":["boolean"],"additionalProperties":true},
+        "project": {"type":["string"],"additionalProperties":true}
       },
       "required": ["id"],
       "additionalProperties": true},
@@ -64,6 +86,7 @@
       },
       "required": ["judgment_id","relation"],
       "additionalProperties": true},
+    "mem_list_projects": {"type":["object"],"additionalProperties":true},
     "mem_merge_projects": {
       "type": ["object"],
       "properties": {
@@ -96,6 +119,7 @@
         "capture_prompt": {"type":["boolean"],"additionalProperties":true},
         "content": {"type":["string"],"additionalProperties":true},
         "observation": {"type":["string"],"additionalProperties":true},
+        "org": {"type":["string"],"additionalProperties":true},
         "project": {"type":["string"],"additionalProperties":true},
         "project_choice_reason": {"type":["string"],"additionalProperties":true},
         "recovery_token": {"type":["string"],"additionalProperties":true},
@@ -124,8 +148,10 @@
         "all_projects": {"type":["boolean"],"additionalProperties":true},
         "limit": {"type":["number"],"additionalProperties":true},
         "match_mode": {"type":["string"],"additionalProperties":true},
+        "org": {"type":["string"],"additionalProperties":true},
         "project": {"type":["string"],"additionalProperties":true},
         "query": {"type":["string"],"additionalProperties":true},
+        "response_format": {"type":["string"],"additionalProperties":true},
         "scope": {"type":["string"],"additionalProperties":true},
         "type": {"type":["string"],"additionalProperties":true}
       },
@@ -193,7 +219,9 @@
       "type": ["object"],
       "properties": {
         "content": {"type":["string"],"additionalProperties":true},
+        "find": {"type":["string"],"additionalProperties":true},
         "id": {"type":["number"],"additionalProperties":true},
+        "replace": {"type":["string"],"additionalProperties":true},
         "scope": {"type":["string"],"additionalProperties":true},
         "title": {"type":["string"],"additionalProperties":true},
         "topic_key": {"type":["string"],"additionalProperties":true},

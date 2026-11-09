@@ -1,0 +1,20 @@
+{
+  "format": "engram.agent-contract/go-json-vectors/v1",
+  "encoding": "Go encoding/json; not RFC 8785",
+  "vectors": [
+    {
+      "name": "strings-keys-arrays",
+      "verification": "reconstruct-safe-integer-input",
+      "input_json": "{\n  \"contract_id\": \"engram.agent-contract/v1\",\n  \"revision\": 1,\n  \"status\": \"mcp-foundation\",\n  \"profile\": \"agent\",\n  \"operations\": {\n    \"vector\": {\n      \"description\": \"quote\\\" backslash\\\\ slash/ <>&    café 😀 controls:\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"z\": {\n            \"type\": \"string\"\n          },\n          \"a\": {\n            \"type\": \"string\"\n          }\n        }\n      },\n      \"annotations\": null,\n      \"semantics\": {\n        \"effect\": \"read\",\n        \"risk\": \"test-only\",\n        \"project_policy\": \"none\",\n        \"session_policy\": \"none\",\n        \"guarantees\": [\n          \"z\",\n          \"a\"\n        ],\n        \"error_effects\": \"none\",\n        \"pi_runtime_fields\": {\n          \"𐀀\": \"supplementary\",\n          \"\": \"BMP\"\n        }\n      }\n    }\n  },\n  \"digest\": \"excluded root field\"\n}",
+      "canonical_utf8": "{\"contract_id\":\"engram.agent-contract/v1\",\"operations\":{\"vector\":{\"annotations\":null,\"description\":\"quote\\\" backslash\\\\ slash/ \\u003c\\u003e\\u0026 \\u2028\\u2029 café 😀 controls:\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\",\"input_schema\":{\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"type\":\"object\"},\"semantics\":{\"effect\":\"read\",\"error_effects\":\"none\",\"guarantees\":[\"z\",\"a\"],\"pi_runtime_fields\":{\"\":\"BMP\",\"𐀀\":\"supplementary\"},\"project_policy\":\"none\",\"risk\":\"test-only\",\"session_policy\":\"none\"}}},\"profile\":\"agent\",\"revision\":1,\"status\":\"mcp-foundation\"}",
+      "sha256": "82697257ad9c3ce6ded766c66806c83b11ce81cefd726a9af33605f2962c6a65"
+    },
+    {
+      "name": "number-lexemes",
+      "verification": "hash-exact-canonical-bytes-only",
+      "input_json": "{\n  \"contract_id\": \"engram.agent-contract/v1\",\n  \"revision\": 1,\n  \"status\": \"mcp-foundation\",\n  \"profile\": \"agent\",\n  \"operations\": {\n    \"vector\": {\n      \"description\": \"Number lexemes are preserved, not normalized.\",\n      \"input_schema\": {\n        \"z\": 9007199254740993,\n        \"a\": 1e+02,\n        \"m\": -0\n      },\n      \"annotations\": null,\n      \"semantics\": {\n        \"effect\": \"read\",\n        \"risk\": \"test-only\",\n        \"project_policy\": \"none\",\n        \"session_policy\": \"none\",\n        \"guarantees\": [\n          \"z\",\n          \"a\"\n        ],\n        \"error_effects\": \"none\"\n      }\n    }\n  },\n  \"digest\": \"excluded root field\"\n}",
+      "canonical_utf8": "{\"contract_id\":\"engram.agent-contract/v1\",\"operations\":{\"vector\":{\"annotations\":null,\"description\":\"Number lexemes are preserved, not normalized.\",\"input_schema\":{\"a\":1e+02,\"m\":-0,\"z\":9007199254740993},\"semantics\":{\"effect\":\"read\",\"error_effects\":\"none\",\"guarantees\":[\"z\",\"a\"],\"project_policy\":\"none\",\"risk\":\"test-only\",\"session_policy\":\"none\"}}},\"profile\":\"agent\",\"revision\":1,\"status\":\"mcp-foundation\"}",
+      "sha256": "52f12d74f36cc6017ed913911750fc19744dac7cfbf06bb7b134f38e38b90c3b"
+    }
+  ]
+}

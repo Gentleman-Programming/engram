@@ -3,10 +3,98 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
 )
+
+func TestFreshMigrationCreatesFTSTablesOnce(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "engram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+	s := &Store{db: db, hooks: defaultStoreHooks()}
+	creates := 0
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		creates += strings.Count(query, "CREATE VIRTUAL TABLE")
+		return db.Exec(query, args...)
+	}
+	if err := s.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if creates != 2 {
+		t.Fatalf("fresh migration created %d virtual tables, want exactly 2", creates)
+	}
+	assertFTSContract(t, s, "observations_fts", []string{"title", "content", "tool_name", "type", "project", "topic_key"}, "observations")
+	assertFTSContract(t, s, "prompts_fts", []string{"content", "project"}, "user_prompts")
+	var schemaBefore, schemaAfter int
+	if err := db.QueryRow("PRAGMA schema_version").Scan(&schemaBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("PRAGMA schema_version").Scan(&schemaAfter); err != nil {
+		t.Fatal(err)
+	}
+	if schemaBefore != schemaAfter {
+		t.Fatalf("repeated migration changed schema version from %d to %d", schemaBefore, schemaAfter)
+	}
+}
+
+func TestMigrateFTSBootstrapsBeforeLegacySessionUpdates(t *testing.T) {
+	s := newStoreAfterFTSChange(t, func(t *testing.T, db *sql.DB) {
+		if _, err := db.Exec(`
+			DROP TRIGGER obs_fts_insert;
+			DROP TRIGGER obs_fts_delete;
+			DROP TRIGGER obs_fts_update;
+			DROP TRIGGER obs_fts_update_insert;
+			DROP TRIGGER prompt_fts_insert;
+			DROP TRIGGER prompt_fts_delete;
+			DROP TRIGGER prompt_fts_update;
+			DROP TRIGGER prompt_fts_update_insert;
+			DROP TABLE observations_fts;
+			DROP TABLE prompts_fts;
+			INSERT INTO sessions(id, project, directory) VALUES ('legacy-fts-bootstrap', 'engram', '/tmp/engram');
+			CREATE TRIGGER legacy_session_fts AFTER UPDATE OF ownership_mode ON sessions BEGIN
+				SELECT count(*) FROM observations_fts;
+				SELECT count(*) FROM prompts_fts;
+			END;
+		`); err != nil {
+			t.Fatalf("prepare interrupted FTS migration: %v", err)
+		}
+	})
+	var ownership string
+	if err := s.db.QueryRow(`SELECT ownership_mode FROM sessions WHERE id = 'legacy-fts-bootstrap'`).Scan(&ownership); err != nil {
+		t.Fatal(err)
+	}
+	if ownership != SessionOwnershipShared {
+		t.Fatalf("legacy ownership = %q, want %q", ownership, SessionOwnershipShared)
+	}
+	assertFTSContract(t, s, "observations_fts", []string{"title", "content", "tool_name", "type", "project", "topic_key"}, "observations")
+	assertFTSContract(t, s, "prompts_fts", []string{"content", "project"}, "user_prompts")
+}
+
+func TestMigrateRejectsUnreadableInitialSchema(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{db: db}
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		t.Fatal("migration wrote after schema inspection failed")
+		return nil, nil
+	}
+	if err := s.migrate(); err == nil || !strings.Contains(err.Error(), "inspect initial schema") {
+		t.Fatalf("migration error = %v, want schema inspection failure", err)
+	}
+}
 
 func TestTrigramSearchFindsCJKObservationsAndPrompts(t *testing.T) {
 	s := newTestStore(t)

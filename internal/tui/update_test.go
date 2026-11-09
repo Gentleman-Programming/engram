@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/setup"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	"github.com/Gentleman-Programming/engram/v2/internal/version"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/version"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -930,8 +930,8 @@ func TestHandleSearchResultsAndObservationDetailRemainingBranches(t *testing.T) 
 	m.SelectedObservation = &store.Observation{ID: 5}
 	updatedModel, _ = m.handleObservationDetailKeys("down")
 	updated = updatedModel.(Model)
-	if updated.DetailScroll != 1 {
-		t.Fatal("down should increase detail scroll")
+	if updated.DetailScroll != 0 {
+		t.Fatal("detail scroll should stay at zero without an available viewport")
 	}
 	updatedModel, _ = updated.handleObservationDetailKeys("up")
 	if updatedModel.(Model).DetailScroll != 0 {

@@ -1,9 +1,10 @@
 package constants
 
-import "github.com/Gentleman-Programming/engram/v2/internal/store"
+import "github.com/Gentleman-Programming/engram/v3/internal/store"
 
 const (
-	TargetKeyCloud = store.DefaultSyncTargetKey
+	TargetKeyCloud      = store.DefaultSyncTargetKey
+	TargetKeyCloudInbox = store.SyncInboxTargetKey
 
 	ReasonBlockedUnenrolled           = "blocked_unenrolled"
 	ReasonNonEnrolledPendingMutations = "non_enrolled_pending_mutations"

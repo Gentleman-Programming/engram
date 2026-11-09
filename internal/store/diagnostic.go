@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,10 +15,11 @@ import (
 // DiagnosticSessionEvidence is the read-only session projection used by
 // operational diagnostics. It intentionally avoids observation/prompt payloads.
 type DiagnosticSessionEvidence struct {
-	ID        string `json:"id"`
-	Project   string `json:"project"`
-	Directory string `json:"directory"`
-	Name      string `json:"name"`
+	ID            string `json:"id"`
+	Project       string `json:"project"`
+	OwnershipMode string `json:"ownership_mode"`
+	Directory     string `json:"directory"`
+	Name          string `json:"name"`
 }
 
 // OrphanedObservationSessionEvidence identifies observations whose stored
@@ -27,6 +29,16 @@ type OrphanedObservationSessionEvidence struct {
 	Project          string `json:"project"`
 	SessionID        string `json:"session_id"`
 	ObservationCount int64  `json:"observation_count"`
+	FirstObservedAt  string `json:"first_observed_at"`
+}
+
+// OrphanedSessionPlaceholder is the minimal local-only session record used to
+// restore an observation foreign-key reference without fabricating sync state.
+type OrphanedSessionPlaceholder struct {
+	SessionID        string `json:"session_id"`
+	Project          string `json:"project"`
+	ObservationCount int64  `json:"observation_count"`
+	StartedAt        string `json:"started_at"`
 }
 
 // SyncMutationPayloadValidation describes deterministic required-field issues
@@ -58,13 +70,21 @@ type ObservationSourceTitleRepairAction struct {
 	Title   string `json:"title"`
 }
 
+// ObservationSourceUnrepairable records source fields that remain unresolved
+// by the existing title repair, without exposing the observation's content.
+type ObservationSourceUnrepairable struct {
+	ObservationRequiredFieldsEvidence
+	Reason string `json:"reason"`
+}
+
 // ObservationSourceTitleRepairReport is the local recovery result for source
 // observation title repairs. A backup is created only when an apply changes rows.
 type ObservationSourceTitleRepairReport struct {
-	Project    string                               `json:"project,omitempty"`
-	Applied    bool                                 `json:"applied"`
-	Actions    []ObservationSourceTitleRepairAction `json:"actions"`
-	BackupPath string                               `json:"backup_path,omitempty"`
+	Project      string                               `json:"project,omitempty"`
+	Applied      bool                                 `json:"applied"`
+	Actions      []ObservationSourceTitleRepairAction `json:"actions"`
+	BackupPath   string                               `json:"backup_path,omitempty"`
+	Unrepairable []ObservationSourceUnrepairable      `json:"unrepairable"`
 }
 
 // SyncMutationTitleRepairAction records a title restored from its matching
@@ -152,7 +172,7 @@ type SessionProjectReclassificationResult struct {
 func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvidence, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	query := `SELECT id, ifnull(project, ''), ifnull(directory, ''), id FROM sessions`
+	query := `SELECT id, ifnull(project, ''), ifnull(ownership_mode, ''), ifnull(directory, ''), id FROM sessions`
 	args := []any{}
 	if project != "" {
 		query += ` WHERE project = ?`
@@ -169,7 +189,7 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 	sessions := make([]DiagnosticSessionEvidence, 0)
 	for rows.Next() {
 		var ev DiagnosticSessionEvidence
-		if err := rows.Scan(&ev.ID, &ev.Project, &ev.Directory, &ev.Name); err != nil {
+		if err := rows.Scan(&ev.ID, &ev.Project, &ev.OwnershipMode, &ev.Directory, &ev.Name); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, ev)
@@ -183,7 +203,7 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]OrphanedObservationSessionEvidence, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	query := `SELECT ifnull(o.project, ''), o.session_id, COUNT(*)
+	query := `SELECT ifnull(o.project, ''), o.session_id, COUNT(*), MIN(o.created_at)
 		FROM observations o
 		LEFT JOIN sessions s ON s.id = o.session_id
 		WHERE s.id IS NULL
@@ -203,7 +223,7 @@ func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]Orphan
 	evidence := make([]OrphanedObservationSessionEvidence, 0)
 	for rows.Next() {
 		var item OrphanedObservationSessionEvidence
-		if err := rows.Scan(&item.Project, &item.SessionID, &item.ObservationCount); err != nil {
+		if err := rows.Scan(&item.Project, &item.SessionID, &item.ObservationCount, &item.FirstObservedAt); err != nil {
 			return nil, closeRowsWithError(rows, err)
 		}
 		evidence = append(evidence, item)
@@ -215,6 +235,351 @@ func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]Orphan
 		return nil, err
 	}
 	return evidence, nil
+}
+
+// RestoreOrphanedObservationSessions creates immediately-ended, local-only
+// placeholders for confirmed missing session references. It validates the
+// current observation evidence and any existing session ownership inside one
+// transaction, so a stale or direct caller cannot attach a session ID to the
+// wrong project. The placeholder's observation count and start time are
+// re-derived from the current observations in the same transaction, so stale
+// planned metadata can never persist. It never updates observations or emits
+// sync mutations.
+func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlaceholder) ([]OrphanedSessionPlaceholder, error) {
+	applied := make([]OrphanedSessionPlaceholder, 0, len(actions))
+	err := s.withTx(func(tx *sql.Tx) error {
+		for _, action := range actions {
+			if err := validateSessionID(action.SessionID); err != nil {
+				return err
+			}
+			project, _ := NormalizeProject(action.Project)
+			if strings.TrimSpace(project) == "" || strings.TrimSpace(action.StartedAt) == "" {
+				return fmt.Errorf("orphaned session placeholder requires project and first observation timestamp")
+			}
+
+			var existingProject string
+			err := tx.QueryRow(`SELECT ifnull(project, '') FROM sessions WHERE id = ?`, action.SessionID).Scan(&existingProject)
+			switch {
+			case err == nil:
+				existingProject, _ = NormalizeProject(existingProject)
+				if strings.TrimSpace(existingProject) != project {
+					return fmt.Errorf("orphaned session %q already belongs to project %q, not %q", action.SessionID, existingProject, project)
+				}
+				// The same project already owns this ID, so a stale plan is an
+				// explicit no-op rather than an apparently successful insert.
+				continue
+			case !errors.Is(err, sql.ErrNoRows):
+				return err
+			}
+
+			projects, err := orphanedObservationProjects(tx, action.SessionID)
+			if err != nil {
+				return err
+			}
+			if len(projects) == 0 {
+				return fmt.Errorf("orphaned session %q has no supporting observations", action.SessionID)
+			}
+			if len(projects) != 1 {
+				return fmt.Errorf("orphaned session %q is referenced by multiple projects", action.SessionID)
+			}
+			if _, ok := projects[project]; !ok {
+				return fmt.Errorf("orphaned session %q evidence belongs to a different project", action.SessionID)
+			}
+
+			// Re-derive the observation metadata inside the transaction: the
+			// planned or caller-supplied values can be stale by apply time, and
+			// the placeholder must reflect the current observation set (active
+			// and soft-deleted rows, matching the diagnostic evidence query).
+			var observationCount int64
+			var firstObservedAt sql.NullString
+			if err := tx.QueryRow(`SELECT COUNT(*), MIN(created_at) FROM observations WHERE session_id = ?`, action.SessionID).Scan(&observationCount, &firstObservedAt); err != nil {
+				return err
+			}
+			startedAt := ""
+			if firstObservedAt.Valid {
+				startedAt = strings.TrimSpace(firstObservedAt.String)
+			}
+			if observationCount == 0 {
+				return fmt.Errorf("orphaned session %q has no supporting observations", action.SessionID)
+			}
+			if startedAt == "" {
+				return fmt.Errorf("orphaned session %q has no first observation timestamp", action.SessionID)
+			}
+
+			result, err := s.execHook(tx, `INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
+				VALUES (?, ?, ?, '', ?, ?, 'Recovered local placeholder for orphaned observations.')`,
+				action.SessionID, project, SessionOwnershipProjectOwned, startedAt, startedAt)
+			if err != nil {
+				return err
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if changed != 1 {
+				return fmt.Errorf("orphaned session %q placeholder insert affected %d rows", action.SessionID, changed)
+			}
+			action.Project = project
+			action.ObservationCount = observationCount
+			action.StartedAt = startedAt
+			applied = append(applied, action)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return applied, nil
+}
+
+// orphanedObservationProjects returns the set of normalized projects whose
+// observations currently reference the given session ID inside the caller's
+// transaction.
+func orphanedObservationProjects(tx *sql.Tx, sessionID string) (_ map[string]struct{}, err error) {
+	rows, err := tx.Query(`SELECT DISTINCT ifnull(project, '') FROM observations WHERE session_id = ?`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	projects := make(map[string]struct{})
+	for rows.Next() {
+		var project string
+		if err := rows.Scan(&project); err != nil {
+			return nil, err
+		}
+		project, _ = NormalizeProject(project)
+		project = strings.TrimSpace(project)
+		if project == "" {
+			return nil, fmt.Errorf("orphaned session %q has observation evidence without a project", sessionID)
+		}
+		projects[project] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return projects, nil
+}
+
+// OrphanedPendingRelationEvidence identifies one legacy pending relation whose
+// source and target observations are both absent from the active observation
+// set. Such a row can never show a title in `engram conflicts show` and no
+// verdict can ever be recorded against it.
+type OrphanedPendingRelationEvidence struct {
+	ID       int64  `json:"id"`
+	SyncID   string `json:"sync_id"`
+	SourceID string `json:"source_id"`
+	TargetID string `json:"target_id"`
+}
+
+// OrphanedPendingRelationEvidenceReport is the read-only doctor evidence for
+// unreviewable pending relations. Candidates and counts deliberately span all
+// projects: a relation whose endpoints are both absent belongs to no project,
+// so a project-scoped query could never return the rows it exists to surface.
+type OrphanedPendingRelationEvidenceReport struct {
+	Candidates         []OrphanedPendingRelationEvidence `json:"candidates"`
+	OneEndpointMissing int64                             `json:"one_endpoint_missing"`
+	LivePending        int64                             `json:"live_pending"`
+}
+
+// Endpoint-presence fragments shared by the orphaned-pending-relation doctor
+// evidence listing and its repair apply path, so both evaluate exactly one
+// absence predicate. An endpoint is present when an active observation (one
+// with deleted_at IS NULL) carries its sync_id; a soft-deleted endpoint counts
+// as absent, matching the conflicts listing LEFT JOIN.
+const (
+	orphanedPendingRelationSourcePresent = `EXISTS (SELECT 1 FROM observations src WHERE src.sync_id = r.source_id AND src.deleted_at IS NULL)`
+	orphanedPendingRelationTargetPresent = `EXISTS (SELECT 1 FROM observations tgt WHERE tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL)`
+)
+
+// orphanedPendingRelationCandidatePredicate matches legacy pending rows whose
+// source AND target endpoints are both absent.
+var orphanedPendingRelationCandidatePredicate = fmt.Sprintf(`r.judgment_status = 'pending' AND NOT %s AND NOT %s`, orphanedPendingRelationSourcePresent, orphanedPendingRelationTargetPresent)
+
+// orphanedPendingRelationOneEndpointMissingPredicate matches pending rows with
+// exactly one absent endpoint; they stay reviewable and are never candidates.
+var orphanedPendingRelationOneEndpointMissingPredicate = fmt.Sprintf(`r.judgment_status = 'pending' AND ((NOT %s AND %s) OR (%s AND NOT %s))`, orphanedPendingRelationSourcePresent, orphanedPendingRelationTargetPresent, orphanedPendingRelationSourcePresent, orphanedPendingRelationTargetPresent)
+
+// orphanedPendingRelationLivePredicate matches pending rows with both
+// endpoints present.
+var orphanedPendingRelationLivePredicate = fmt.Sprintf(`r.judgment_status = 'pending' AND %s AND %s`, orphanedPendingRelationSourcePresent, orphanedPendingRelationTargetPresent)
+
+// ListOrphanedPendingRelationEvidence reports legacy pending relation rows
+// whose source and target observations are both absent from the active
+// observation set. It additionally counts pending rows missing exactly one
+// endpoint and fully live pending rows, so a finding can show that a repair
+// will not touch still-reviewable relations. The listing is deliberately
+// unscoped: a relation with both endpoints absent belongs to no project.
+func (s *Store) ListOrphanedPendingRelationEvidence() (OrphanedPendingRelationEvidenceReport, error) {
+	report := OrphanedPendingRelationEvidenceReport{Candidates: []OrphanedPendingRelationEvidence{}}
+
+	rows, err := s.queryItHook(s.db, `SELECT r.id, ifnull(r.sync_id, ''), ifnull(r.source_id, ''), ifnull(r.target_id, '')
+		FROM memory_relations r
+		WHERE `+orphanedPendingRelationCandidatePredicate+`
+		ORDER BY r.id`)
+	if err != nil {
+		return report, err
+	}
+
+	for rows.Next() {
+		var item OrphanedPendingRelationEvidence
+		if err := rows.Scan(&item.ID, &item.SyncID, &item.SourceID, &item.TargetID); err != nil {
+			return report, closeRowsWithError(rows, err)
+		}
+		report.Candidates = append(report.Candidates, item)
+	}
+	if err := rows.Err(); err != nil {
+		return report, closeRowsWithError(rows, err)
+	}
+	if err := rows.Close(); err != nil {
+		return report, err
+	}
+
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationOneEndpointMissingPredicate).Scan(&report.OneEndpointMissing); err != nil {
+		return report, fmt.Errorf("count one-endpoint-missing pending relations: %w", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationLivePredicate).Scan(&report.LivePending); err != nil {
+		return report, fmt.Errorf("count live pending relations: %w", err)
+	}
+	return report, nil
+}
+
+// OrphanedPendingRelationEvidenceBounded is the bounded diagnostic read for
+// the doctor check: the total candidate count plus only the first `limit`
+// evidence rows, so a large legacy backlog cannot force the check to
+// materialize every candidate. CandidateCount always spans all candidates,
+// while Sample is the id-ordered head of the same list.
+type OrphanedPendingRelationEvidenceBounded struct {
+	CandidateCount     int64
+	OneEndpointMissing int64
+	LivePending        int64
+	Sample             []OrphanedPendingRelationEvidence
+}
+
+// ListOrphanedPendingRelationEvidenceBounded reports the same evidence as
+// ListOrphanedPendingRelationEvidence with the candidate rows bounded: it
+// returns the total candidate count plus only the first limit evidence rows,
+// so the doctor check can render a large legacy backlog without materializing
+// every candidate. The full candidate set remains available to the repair
+// planner and apply path through ListOrphanedPendingRelationEvidence. The
+// listing is deliberately unscoped: a relation with both endpoints absent
+// belongs to no project.
+func (s *Store) ListOrphanedPendingRelationEvidenceBounded(limit int) (OrphanedPendingRelationEvidenceBounded, error) {
+	report := OrphanedPendingRelationEvidenceBounded{Sample: []OrphanedPendingRelationEvidence{}}
+
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationCandidatePredicate).Scan(&report.CandidateCount); err != nil {
+		return report, fmt.Errorf("count orphaned pending candidates: %w", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationOneEndpointMissingPredicate).Scan(&report.OneEndpointMissing); err != nil {
+		return report, fmt.Errorf("count one-endpoint-missing pending relations: %w", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationLivePredicate).Scan(&report.LivePending); err != nil {
+		return report, fmt.Errorf("count live pending relations: %w", err)
+	}
+
+	if report.CandidateCount == 0 || limit <= 0 {
+		return report, nil
+	}
+	rows, err := s.queryItHook(s.db, `SELECT r.id, ifnull(r.sync_id, ''), ifnull(r.source_id, ''), ifnull(r.target_id, '')
+		FROM memory_relations r
+		WHERE `+orphanedPendingRelationCandidatePredicate+`
+		ORDER BY r.id LIMIT ?`, limit)
+	if err != nil {
+		return report, err
+	}
+	for rows.Next() {
+		var item OrphanedPendingRelationEvidence
+		if err := rows.Scan(&item.ID, &item.SyncID, &item.SourceID, &item.TargetID); err != nil {
+			return report, closeRowsWithError(rows, err)
+		}
+		report.Sample = append(report.Sample, item)
+	}
+	if err := rows.Err(); err != nil {
+		return report, closeRowsWithError(rows, err)
+	}
+	if err := rows.Close(); err != nil {
+		return report, err
+	}
+	return report, nil
+}
+
+// OrphanedPendingRelationReclassificationResult reports one audited apply of
+// the orphaned-pending-relations repair. Reclassified counts the rows actually
+// moved into the `orphaned` disposition; CandidatesAtApply is the predicate
+// re-derived inside the apply transaction, so a row judged between evidence
+// and apply is never reclassified behind a reviewer's verdict.
+type OrphanedPendingRelationReclassificationResult struct {
+	Reclassified       int64  `json:"reclassified"`
+	CandidatesAtApply  int64  `json:"candidates_at_apply"`
+	OneEndpointMissing int64  `json:"one_endpoint_missing"`
+	LivePending        int64  `json:"live_pending"`
+	BackupPath         string `json:"backup_path,omitempty"`
+}
+
+// ReclassifyOrphanedPendingRelations moves every pending relation whose source
+// AND target observations are absent from the active observation set into the
+// audited `orphaned` disposition, the same terminal state the hard-delete
+// orphaning writers already produce. The SQLite writer lock is acquired first
+// and covers both the pre-apply backup and the reclassification, so no
+// concurrent write can land between the snapshot and the apply it protects
+// (the backup comes from a separate connection — the store pool is
+// single-connection and is pinned by the held transaction). The predicate is
+// revalidated inside the transaction so a stale or concurrent judgment can
+// never be overwritten, and — matching those existing orphaning writers — no
+// sync journal mutation is emitted: the reclassification is local audit
+// hygiene, not replicated state. The operation is idempotent; a second run
+// finds no pending candidates and changes nothing.
+func (s *Store) ReclassifyOrphanedPendingRelations() (OrphanedPendingRelationReclassificationResult, error) {
+	var result OrphanedPendingRelationReclassificationResult
+	err := withSQLiteWriteRetry(func() error {
+		result = OrphanedPendingRelationReclassificationResult{}
+		tx, err := s.beginTxHook()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		// The writer lock is now held (BEGIN IMMEDIATE via the store DSN):
+		// snapshot the pre-apply state through a second connection while no
+		// concurrent write can land between the snapshot and the apply below.
+		backupPath, err := s.backupSQLiteUnderWriteLock()
+		if err != nil {
+			return err
+		}
+		if err := tx.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationCandidatePredicate).Scan(&result.CandidatesAtApply); err != nil {
+			return fmt.Errorf("revalidate orphaned pending candidates: %w", err)
+		}
+		res, err := s.execHook(tx, `UPDATE memory_relations AS r
+			SET judgment_status = 'orphaned',
+			    updated_at      = datetime('now')
+			WHERE `+orphanedPendingRelationCandidatePredicate)
+		if err != nil {
+			return fmt.Errorf("reclassify orphaned pending relations: %w", err)
+		}
+		reclassified, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read reclassification count: %w", err)
+		}
+		result.Reclassified = reclassified
+		if err := tx.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationOneEndpointMissingPredicate).Scan(&result.OneEndpointMissing); err != nil {
+			return fmt.Errorf("count one-endpoint-missing pending relations: %w", err)
+		}
+		if err := tx.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationLivePredicate).Scan(&result.LivePending); err != nil {
+			return fmt.Errorf("count live pending relations: %w", err)
+		}
+		if err := s.commitHook(tx); err != nil {
+			return err
+		}
+		result.BackupPath = backupPath
+		return nil
+	})
+	if err != nil {
+		return OrphanedPendingRelationReclassificationResult{}, err
+	}
+	return result, nil
 }
 
 // ListPendingProjectMutations returns pending cloud mutations for one project,
@@ -303,6 +668,7 @@ func (s *Store) RepairObservationSourceTitles(project string, apply bool) (Obser
 		return ObservationSourceTitleRepairReport{}, fmt.Errorf("list source observation repairs: %w", err)
 	}
 	actions := observationSourceTitleRepairActions(rows)
+	report.Unrepairable = observationSourceUnrepairable(rows, actions)
 	if !apply || len(actions) == 0 {
 		report.Actions = actions
 		return report, nil
@@ -317,8 +683,9 @@ func (s *Store) RepairObservationSourceTitles(project string, apply bool) (Obser
 			return err
 		}
 		actions = observationSourceTitleRepairActions(currentRows)
+		report.Unrepairable = observationSourceUnrepairable(currentRows, actions)
 		for _, action := range actions {
-			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = datetime('now') WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, action.ID, action.SyncID)
+			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = ? WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, Now(), action.ID, action.SyncID)
 			if err != nil {
 				return fmt.Errorf("repair source observation title %d: %w", action.ID, err)
 			}
@@ -355,6 +722,33 @@ func observationSourceTitleRepairActions(rows []diagnosticObservationRow) []Obse
 		actions = append(actions, ObservationSourceTitleRepairAction{ID: row.ID, SyncID: row.SyncID, Project: row.Project, Title: title})
 	}
 	return actions
+}
+
+func observationSourceUnrepairable(rows []diagnosticObservationRow, actions []ObservationSourceTitleRepairAction) []ObservationSourceUnrepairable {
+	repairedTitles := make(map[int64]bool, len(actions))
+	for _, action := range actions {
+		repairedTitles[action.ID] = true
+	}
+	issues := make([]ObservationSourceUnrepairable, 0)
+	for _, row := range rows {
+		missing := make([]string, 0, len(row.MissingFields))
+		for _, field := range row.MissingFields {
+			if field != "title" || !repairedTitles[row.ID] {
+				missing = append(missing, field)
+			}
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		reason := "Repair cannot derive a valid title from existing content; manual investigation is required."
+		if containsString(missing, "type") || containsString(missing, "content") {
+			reason = "Repair cannot reconstruct missing type or content; manual investigation is required."
+		}
+		evidence := row.ObservationRequiredFieldsEvidence
+		evidence.MissingFields = missing
+		issues = append(issues, ObservationSourceUnrepairable{ObservationRequiredFieldsEvidence: evidence, Reason: reason})
+	}
+	return issues
 }
 
 func (s *Store) enqueueSourceObservationRepairMutationTx(tx *sql.Tx, observation *Observation) error {
@@ -564,10 +958,6 @@ func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) 
 		FROM sync_mutations
 		WHERE target_key = ? AND acked_at IS NULL`
 	args := []any{DefaultSyncTargetKey}
-	if project != "" {
-		query += ` AND project = ?`
-		args = append(args, project)
-	}
 	query += ` ORDER BY seq ASC`
 	rows, err := q.Query(query, args...)
 	if err != nil {
@@ -579,6 +969,12 @@ func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) 
 		var m SyncMutation
 		if err := rows.Scan(&m.Seq, &m.TargetKey, &m.Entity, &m.EntityKey, &m.Op, &m.Payload, &m.Source, &m.Project, &m.OccurredAt, &m.AckedAt, &m.Disposition, &m.DispositionReason, &m.DispositionEvidence, &m.DispositionAt); err != nil {
 			return nil, err
+		}
+		if project != "" {
+			owner, _ := NormalizeProject(m.Project)
+			if owner != project {
+				continue
+			}
 		}
 		mutations = append(mutations, m)
 	}
@@ -647,7 +1043,13 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 			return result
 		}
 		if op == SyncOpUpsert {
-			require("directory")
+			if rawStringField("ownership_mode") == SessionOwnershipProjectOwned {
+				if err := ValidateCloudSessionDirectory([]byte(trimmed)); err != nil {
+					missing = append(missing, "directory")
+				}
+			} else {
+				require("directory")
+			}
 		}
 	case SyncEntityObservation:
 		if field("sync_id") == "" && strings.TrimSpace(entityKey) == "" {
@@ -693,8 +1095,9 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 	return result
 }
 
-// RepairObservationMutationTitles restores the single title field that can be
-// proved from a matching titleless local observation. It deliberately does not
+// RepairObservationMutationTitles restores a missing payload title from a
+// matching local observation's current title, or derives a blank source title
+// from its content. It deliberately does not
 // enqueue a replacement mutation: the existing journal row keeps its sequence
 // and all delivery state while only its frozen payload is corrected.
 func (s *Store) RepairObservationMutationTitles(project string, apply bool) (SyncMutationTitleRepairReport, error) {
@@ -702,7 +1105,11 @@ func (s *Store) RepairObservationMutationTitles(project string, apply bool) (Syn
 	project = strings.TrimSpace(project)
 	report := SyncMutationTitleRepairReport{Project: project, Applied: apply, Actions: []SyncMutationTitleRepairAction{}}
 	var actions []SyncMutationTitleRepairAction
-	err := s.withTx(func(tx *sql.Tx) error {
+	runTx := s.withTx
+	if !apply {
+		runTx = s.withReadTx
+	}
+	err := runTx(func(tx *sql.Tx) error {
 		type titleRepair struct {
 			action        SyncMutationTitleRepairAction
 			payload       string
@@ -747,6 +1154,10 @@ func (s *Store) RepairObservationMutationTitles(project string, apply bool) (Syn
 		}
 		repairedObservations := make(map[int64]struct{})
 		for _, repair := range repairs {
+			// A valid current title is copied only into the frozen payload.
+			if strings.TrimSpace(repair.sourceTitle) != "" {
+				continue
+			}
 			if _, repaired := repairedObservations[repair.observationID]; repaired {
 				continue
 			}
@@ -806,10 +1217,21 @@ func (s *Store) observationMutationTitleRepairTx(tx *sql.Tx, mutation SyncMutati
 	observationProject, _ := NormalizeProject(derefString(observation.Project))
 	mutationProject, _ := NormalizeProject(mutation.Project)
 	payloadProject, _ := NormalizeProject(payloadString("project"))
-	if strings.TrimSpace(observation.Title) != "" || (mutationProject != "" && mutationProject != observationProject) || (payloadProject != "" && payloadProject != observationProject) {
+	if (mutationProject != "" && mutationProject != observationProject) || (payloadProject != "" && payloadProject != observationProject) {
 		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
 	}
-	title := deriveObservationRepairTitle(observation.Content)
+	var title string
+	if strings.TrimSpace(observation.Title) != "" {
+		// Trust the current local projection, not historical payload content.
+		// Legacy blank project references are safe only within the existing query.
+		if mutation.Source != SyncSourceLocal || observationProject == "" ||
+			payloadString("session_id") != observation.SessionID || payloadString("scope") != observation.Scope {
+			return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+		}
+		title = observation.Title
+	} else {
+		title = deriveObservationRepairTitle(observation.Content)
+	}
 	if err := ValidateObservationTitle(title); err != nil {
 		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
 	}
@@ -860,7 +1282,7 @@ func (s *Store) EstimateSessionProjectReclassification(actions []SessionProjectR
 			return counts, fmt.Errorf("estimate sessions: %w", err)
 		}
 		counts.Sessions += n
-		if err := s.db.QueryRow(`SELECT count(*) FROM observations WHERE session_id = ? AND project = ? AND deleted_at IS NULL`, action.SessionID, action.FromProject).Scan(&n); err != nil {
+		if err := s.db.QueryRow(`SELECT count(*) FROM observations WHERE session_id = ? AND project = ?`, action.SessionID, action.FromProject).Scan(&n); err != nil {
 			return counts, fmt.Errorf("estimate observations: %w", err)
 		}
 		counts.Observations += n
@@ -882,7 +1304,15 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 	result.BackupPath = backupPath
 	err = s.withTx(func(tx *sql.Tx) error {
 		for _, action := range normalized {
-			res, err := s.execHook(tx, `UPDATE sessions SET project = ? WHERE id = ? AND project = ?`, action.ToProject, action.SessionID, action.FromProject)
+			// The owner test is canonical, so it cannot be one SQL CASE over
+			// `id = 'manual-save-' || project`.
+			mode := SessionOwnershipShared
+			if manualSaveOwnerProject(action.SessionID, action.ToProject) {
+				mode = SessionOwnershipProjectOwned
+			}
+			res, err := s.execHook(tx, `UPDATE sessions
+				SET project = ?, ownership_mode = ?
+				WHERE id = ? AND project = ?`, action.ToProject, mode, action.SessionID, action.FromProject)
 			if err != nil {
 				return fmt.Errorf("reclassify session %q: %w", action.SessionID, err)
 			}
@@ -911,13 +1341,55 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 	return result, nil
 }
 
-func (s *Store) BackupSQLite() (string, error) {
+func (s *Store) sqliteRepairBackupPath() (string, error) {
 	backupDir := filepath.Join(s.cfg.DataDir, "backups")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
 		return "", fmt.Errorf("create sqlite backup dir: %w", err)
 	}
 	path := filepath.Join(backupDir, "engram-repair-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
+	// Reserve privately before SQLite opens the path, including in existing directories.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", fmt.Errorf("reserve sqlite backup: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close sqlite backup reservation: %w", err)
+	}
+	return path, nil
+}
+
+func (s *Store) BackupSQLite() (string, error) {
+	path, err := s.sqliteRepairBackupPath()
+	if err != nil {
+		return "", err
+	}
 	if _, err := s.execHook(s.db, `VACUUM INTO ?`, path); err != nil {
+		return "", fmt.Errorf("backup sqlite database: %w", err)
+	}
+	return path, nil
+}
+
+// backupSQLiteUnderWriteLock creates the same VACUUM INTO snapshot as
+// BackupSQLite while the caller holds the SQLite writer lock on the store's
+// pooled connection, so no concurrent write can land between the snapshot and
+// the work the caller applies under that lock. The store pool is a single
+// connection pinned by the caller's transaction, so the snapshot MUST NOT go
+// through s.db — it would block forever waiting for the pool. A separate
+// database handle on the same file takes the snapshot instead: VACUUM INTO
+// only reads the source, and in WAL mode that read runs concurrently with the
+// held write transaction, always seeing the last committed (pre-apply) state
+// and never the caller's uncommitted changes.
+func (s *Store) backupSQLiteUnderWriteLock() (string, error) {
+	path, err := s.sqliteRepairBackupPath()
+	if err != nil {
+		return "", err
+	}
+	backupDB, err := openDB(filepath.Join(s.cfg.DataDir, "engram.db"), s.generation)
+	if err != nil {
+		return "", fmt.Errorf("backup sqlite database: open snapshot connection: %w", err)
+	}
+	defer func() { _ = backupDB.Close() }()
+	if _, err := s.execHook(backupDB, `VACUUM INTO ?`, path); err != nil {
 		return "", fmt.Errorf("backup sqlite database: %w", err)
 	}
 	return path, nil

@@ -2,6 +2,8 @@
 
 # Architecture
 
+Local `POST /prompts` accepts optional `source_inbox_id` alongside `session_id`, `content`, and `project`. A nonempty ID identifies one prompt within its session: replay returns the existing prompt ID with the same `201` and `{"id":…, "status":"saved"}` response, without another sync mutation or write notification. Distinct IDs may contain identical text. Omitting the ID continues to append a new prompt on every call. Project ownership checks still apply before replay. Prompt sync upserts and exports preserve the optional identity, so replay after sync or import returns the existing prompt without a new mutation. Older payloads without the field remain valid. A pulled prompt upsert cannot move an established nonempty inbox identity to a different session or replace it with another nonempty ID for the same sync ID; it fails with an identity conflict. A missing payload ID retains the existing identity in the same session; a legacy row with no established identity may move sessions or acquire an ID. Import adoption of an inbox identity for the same sync ID refuses cross-project reassignment, comparing canonical effective projects (including session inheritance for blank prompt projects), and appends a canonical local upsert for enrolled projects, leaving earlier journal entries unchanged so acknowledgement of an in-flight original cannot consume the adopted identity. Deletion tombstones retain optional inbox identity through sync and direct backup. A pulled delete for a live prompt records the live row's session-and-inbox identity, not conflicting identity fields from its payload. Any pulled delete claiming a session-and-inbox pair held by another live prompt is quarantined before a tombstone is recorded, even when its sync ID resolves to a live prompt. Backup import rejects a tombstone that would delete a matched live prompt belonging to a different effective project; the import rolls back atomically. Reusing a deleted session-and-inbox ID fails with HTTP `409 Conflict` (no ID, mutation, or write notification), including after restore; a different ID remains a new prompt. Pulled deletes without a live prompt quarantine an inbox ID without a nonblank session ID as dead-letter evidence and advance the pull cursor without writing a tombstone; legacy deletes without an inbox ID remain valid. Sparse pulled deletes inherit project ownership from the live prompt first (which can differ from its session), then their own established prompt tombstone, then the live session or active deleted-session tombstone; project exports recover ownership from an active deleted-session tombstone after that session is removed and emit that resolved project for legacy blank-project tombstones, preserving ownership through backup import. Unscoped exports also emit the resolved project so full backup restores retain that ownership. Backup import rejects tombstones carrying an inbox ID without a session ID; legacy tombstones without an inbox ID remain valid. Once a tombstone establishes a session ID, inbox ID, or nonempty project for a sync ID, later deletes and backup imports cannot change that component: conflicting pulled deletes are quarantined with their raw evidence and advance the cursor, while conflicting imports fail atomically. Projects are compared after normalization; sparse legacy repeats retain established components, and missing components may be filled consistently.
+
 - [How It Works](#how-it-works)
 - [Session Lifecycle](#session-lifecycle)
 - [MCP Tools](#mcp-tools)
@@ -39,40 +41,31 @@ Engram trusts the **agent** to decide what's worth remembering — not a firehos
 
 ## Session Lifecycle
 
+Codex runtime identity is core-owned: startup registers a resumable root, while
+writes, prompt capture and compaction resolve an existing active identity.
+Runtime closing resolves and ends atomically without creating a continuation.
+Both root and continuation must satisfy existing project-sharing policy, exact
+ownership and canonical worktree; equivalent directory spelling is accepted without rewriting
+stored rows. Ended roots remain terminal. These operations are separate from
+ordinary exact-ID session ending; adapters maintain no identity cache.
+
 ```
 Session starts → Agent works → Agent saves memories proactively
                                     ↓
 Session ends → Agent writes session summary (Goal/Discoveries/Accomplished/Next Steps/Files)
                                     ↓
-Next session starts → Previous session context is injected automatically
+Next session starts → Agent may retrieve prior context; a host plugin may inject it
 ```
+
+Runtime registration through `POST /sessions` supports opt-in `resume: true`. Go selects and registers an effective continuation for an ended root inside one SQLite write transaction, preserving terminal rows, ownership checks, and runtime leases. Adapters forward the acknowledged ID rather than choosing suffixes. Ordinary registration and MCP callers retain the ended-session refusal; see the [session API contract](../DOCS.md#sessions).
+
+Context injection depends on the integration and available context: Claude Code with plugin setup can inject prior context at startup when available, while bare MCP does not inject it. Agents can request it with `mem_context`; see [plugin behavior](PLUGINS.md#what-the-plugin-provides-with-setup-vs-bare-mcp) and [adapter boundaries](codebase/integrations.md#runtime-session-identity).
 
 ---
 
 ## MCP Tools
 
-| Tool | Purpose |
-|------|---------|
-| `mem_save` | Save a structured observation (decision, bugfix, pattern, etc.); best-effort captures process-local current prompt context when available unless `capture_prompt=false` |
-| `mem_update` | Update an existing observation by ID |
-| `mem_delete` | Delete an observation (soft-delete by default, hard-delete optional) |
-| `mem_suggest_topic_key` | Suggest a stable `topic_key` for evolving topics before saving |
-| `mem_search` | Full-text search across all memories |
-| `mem_session_summary` | Save end-of-session summary |
-| `mem_context` | Get recent context from previous sessions |
-| `mem_timeline` | Chronological context around a specific observation |
-| `mem_get_observation` | Get full content of a specific memory |
-| `mem_save_prompt` | Save a user prompt for future context |
-| `mem_stats` | Memory system statistics |
-| `mem_session_start` | Register a session start |
-| `mem_session_end` | Mark a session as completed |
-| `mem_capture_passive` | Extract learnings from text output |
-| `mem_merge_projects` | Merge project name variants into canonical name (admin) |
-| `mem_current_project` | Detect project from cwd — never errors, recommended first call |
-| `mem_doctor` | Run read-only operational diagnostics for project detection and store health |
-| `mem_review` | List observations whose `review_after` lifecycle is stale; `mark_reviewed` resets the local review cycle |
-| `mem_judge` | Record a verdict for a pending memory conflict surfaced by `mem_save` |
-| `mem_compare` | Persist a semantic relation verdict between two existing observations |
+The stdio MCP server exposes memory capture, retrieval, session context, and administration tools to agents; project resolution occurs at tool call time. The canonical inventory and tool contracts are in [DOCS.md MCP Tools](../DOCS.md#mcp-tools-27-tools). MCP clients may use deferred `mem_judge_many` for ordered independent verdicts and `mem_session_finalize` for atomic summary/close. The local finalization journal is not a new cloud entity.
 
 ---
 
@@ -92,9 +85,11 @@ Token-efficient memory retrieval — don't dump everything, drill in:
 
 - `mem_save` now supports `scope` (`project` default, `personal` and `global` also accepted)
 - `mem_save` also supports `topic_key`; with a topic key, saves become upserts (same project+scope+topic updates the existing memory)
-- `mem_save` supports `capture_prompt` (`true` by default). When the same MCP process lifecycle has current prompt context for the same project and session, it best-effort records that prompt alongside the observation. The prompt context must be fed before the later `mem_save` (typically via `mem_save_prompt`); `mem_save` still succeeds if context is unavailable or prompt capture fails. Automated saves such as SDD artifacts should pass `capture_prompt=false`.
+- `mem_save` supports `capture_prompt` (`true` by default) in MCP and native Pi. Runtime adapters supply current prompt context for the observation's session/project; `Store.CapturePromptForSave` owns opt-out and exact prompt dedupe. MCP supplies process-local context (typically fed by `mem_save_prompt`), while Pi supplies the eligible current turn's redacted/truncated payload. Pi preserves that payload when steer/follow-up input is enqueued and when the initial user message starts after `before_agent_start`; subsequent user `message_start` events mark queued-input consumption and invalidate the preceding prompt context and ownership proof. Queued turns neither capture nor inherit context, including repeated identical input; a normal subsequent run establishes fresh context. Capture stores an independent prompt row, not an observation-ID link, and errors are nonfatal after a successful observation save. `capture_prompt=false` skips only this per-save attempt, not Pi's independent lifecycle capture.
 - `mem_save` and `mem_search` expose lifecycle metadata: computed `state` (`active` or `needs_review`) and `review_after` when a review cycle applies.
-- `mem_review` supports `action="list"` (`project`, `limit`) and `action="mark_reviewed"` (`observation_id`). Marking reviewed is local-only for now because `review_after` is intentionally not part of sync payloads in this phase.
+- New local observations use initial review defaults: `config` and `preference` 3 months; `discovery`, `pattern`, and `decision` 6 months; `architecture`, `bugfix`, and `policy` 12 months. These are review prompts, not empirically calibrated expiration deadlines. Unmapped types (including `learning`, operational events, and `session_summary`) have no default. No migration or backfill schedules existing local memories; topic revisions and deduplication preserve their existing dates, including null.
+- Overdue memories remain searchable with their original content and `state="needs_review"`; they are not hidden or deleted. `mem_review action="list"` surfaces them, and `action="mark_reviewed"` restarts the type's review interval. Hard expiry remains deferred. Queue volume and review usefulness should inform future default adjustments.
+- `mem_review` supports `action="list"` (`project`, `limit`) and `action="mark_reviewed"` (`observation_id`). Marking reviewed atomically enqueues an observation sync mutation. `review_after` is replicated, including explicit null resets; legacy missing fields preserve existing dates or derive new dates from the observation's creation time only for the original `decision`/`policy`/`preference` types. Imported legacy records of the five newly scheduled types remain unscheduled when the field is missing; explicit dates and explicit nulls retain their existing semantics.
 - Exact dedupe prevents repeated inserts in a rolling window (hash + project + scope + type + title)
 - Duplicates update metadata (`duplicate_count`, `last_seen_at`, `updated_at`) instead of creating new rows
 - Topic upserts increment `revision_count` so evolving decisions stay in one memory
@@ -211,7 +206,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (20 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (27 tools)
 │   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── cloud/                       # Optional cloud runtime (Postgres + dashboard)
 │   │   ├── cloudserver/             # /sync API + dashboard mount + auth/session bridge
@@ -232,7 +227,7 @@ engram/
 │       ├── .claude-plugin/plugin.json
 │       ├── .mcp.json
 │       ├── hooks/hooks.json
-│       ├── scripts/                # session-start, post-compaction, subagent-stop, session-stop
+│       ├── scripts/                # session-start, post-compaction, subagent-stop, session-end
 │       └── skills/memory/SKILL.md
 ├── skills/                         # Contributor AI skills (repo-wide standards + Engram-specific guardrails)
 ├── setup.sh                        # Links repo skills into .claude/.codex/.gemini (project-local)
@@ -247,54 +242,7 @@ engram/
 
 ## CLI Reference
 
-```
-engram setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
-engram serve [port]       Start HTTP API server (default: 7437)
-engram mcp                Start MCP server (stdio transport)
-engram tui                Launch interactive terminal UI
-engram search <query>     Search memories [--project P|--all]
-engram save <title> <msg> Save a memory
-engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
-engram delete session <id>
-                          Delete a session by ID (session must have no observations)
-engram delete prompt <id>
-                          Delete a prompt by ID (permanent)
-engram delete project <name> [--hard]
-                          Cascade-delete a project: soft-deletes observations (or hard-deletes
-                          with --hard, which also removes sessions); always removes prompts
-engram timeline <obs_id>  Chronological context around an observation [--project P|--all]
-engram context [project]  Recent context from previous sessions [--project P|--all]
-engram stats              Memory statistics [--project P|--all]
-engram export [file]      Export current-project memories to JSON [--project P|--all]
-engram import <file>      Import memories from JSON
-engram sync               Export new memories as compressed chunk to .engram/
-engram sync --all         Export ALL projects (ignore directory-based filter)
-engram sync --cloud --project <name>
-                          Sync against configured cloud endpoint (project-scoped)
-engram conflicts <sub>    Inspect and manage memory conflict relations
-                            list, show, stats, scan, deferred
-engram doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
-engram cloud status       Show cloud runtime/config status
-engram cloud config --server <url>
-                          Configure cloud server URL
-engram cloud enroll <project>
-                          Enroll a project for cloud sync
-engram cloud serve        Run cloud backend + dashboard
-engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>
-                          Guided upgrade workflow for existing projects
-engram cloud bootstrap admin --username <name> [--email <email>]
-                          [--grant-project <project>]... [--issue-token [name]]
-                          Create the first managed admin (see DOCS.md for details
-                          and the current server-side auth wiring limitation)
-engram projects list      Show all projects with obs/session/prompt counts
-engram projects consolidate  Interactive merge of normalization-equivalent project names [--all] [--dry-run]
-engram projects prune     Remove projects with 0 observations [--dry-run]
-engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]
-                          Assign explicit ownership to legacy rows that carry none. Reaches the local
-                          store directly, so it needs no server token and works in a zero-config install.
-engram obsidian-export    Export current-project memories to Obsidian vault (beta; --all for every project)
-engram version            Show version
-```
+The CLI offers local memory and project operations alongside optional cloud replication and administration. The canonical command inventory and detailed links are in [DOCS.md CLI Reference](../DOCS.md#cli-reference).
 
 Local server auth:
 
@@ -312,13 +260,9 @@ Cloud constraints (current behavior):
 
 Cloud route/auth split (current behavior):
 
-- Local runtime (`engram serve`) exposes local JSON APIs and `GET /sync/status` only.
-- Cloud runtime (`engram cloud serve`) exposes `GET /health`, `GET /sync/pull`, `GET /sync/pull/{chunkID}`, `POST /sync/push`, and `/dashboard/*`.
-- Dashboard public routes: `GET /dashboard/health`, `GET/POST /dashboard/login`, `POST /dashboard/logout`, `GET /dashboard/static/*`.
-- Dashboard protected routes: `GET /dashboard`, `/dashboard/stats`, `/dashboard/activity`, `/dashboard/browser` (`/observations`, `/sessions`, `/sessions/{sessionID}`, `/prompts`), `/dashboard/projects`, `/dashboard/projects/list`, `/dashboard/projects/{project}`, `/dashboard/projects/{name}/observations|sessions|prompts`, `/dashboard/contributors`, `/dashboard/contributors/list`, `/dashboard/contributors/{contributor}`, `/dashboard/admin`, `/dashboard/admin/projects`, `/dashboard/admin/users`, `/dashboard/admin/users/list`, `/dashboard/admin/health`, `POST /dashboard/admin/projects/{name}/sync`, `/dashboard/sessions/{project}/{sessionID}`, `/dashboard/observations/{project}/{sessionID}/{syncID}`, `/dashboard/prompts/{project}/{sessionID}/{syncID}`.
-- Note: `/dashboard/admin/contributors` was removed; user/contributor management lives under `/dashboard/admin/users`.
-- In authenticated mode, protected dashboard routes require a signed dashboard cookie (obtained via `/dashboard/login` + bearer token) and do not accept direct bearer headers as a browser session substitute.
-- In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` with no bearer token), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
+`engram serve` and `engram cloud serve` are distinct runtimes: the former serves local APIs, while the latter serves cloud sync and the browser dashboard. In authenticated cloud mode, sync requests use a bearer token in the Authorization header; protected dashboard browser routes instead require a signed cookie obtained through login, not a bearer header as a browser-session substitute. Insecure development mode bypasses dashboard authentication and is distinct from authenticated mode.
+
+For documented methods and paths and the dashboard route tree, see [HTTP API Endpoints](../DOCS.md#http-api-endpoints). For routes not yet documented there, check the [cloud server route registrations](../internal/cloud/cloudserver/cloudserver.go).
 
 ---
 

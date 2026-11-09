@@ -2,4 +2,4 @@ blank_issues_enabled: false
 contact_links:
   - name: Questions & Discussions
     url: https://github.com/Gentleman-Programming/engram/discussions
-    about: Use discussions for questions, not issues
+    about: Use discussions for general questions; use the tracked-question form when maintainer work or a durable decision is required

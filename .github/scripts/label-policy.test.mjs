@@ -1,0 +1,328 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import test from 'node:test';
+import { loadLabelPolicy, migrateLabels, validateLabels } from './label-policy.mjs';
+
+const policy = loadLabelPolicy();
+
+function errorsFor(labels, target = 'issue') {
+  return validateLabels(policy, labels, target).errors;
+}
+
+test('validates canonical label combinations without a global maximum', () => {
+  const labels = [
+    'type:bug',
+    'status:possible-duplicate',
+    'priority:critical',
+    'resolution:duplicate',
+    'effort:small',
+    'effort:medium',
+    'effort:large',
+    'good first issue',
+    'help wanted',
+    ...Array(100).fill('effort:small'),
+  ];
+
+  assert.deepEqual(errorsFor(labels), []);
+});
+
+test('rejects missing type, singleton conflicts, unknown labels, and deprecated aliases', () => {
+  const cases = [
+    { name: 'missing required type', labels: ['status:needs-review'], expected: 'requires exactly one type:* label' },
+    { name: 'missing required issue status', labels: ['type:bug'], expected: 'requires exactly one status:* label' },
+    { name: 'type conflict', labels: ['type:bug', 'type:docs'], expected: 'type:* permits at most one label' },
+    { name: 'status conflict', labels: ['type:bug', 'status:approved', 'status:blocked'], expected: 'status:* permits at most one label' },
+    { name: 'priority conflict', labels: ['type:bug', 'priority:high', 'priority:low'], expected: 'priority:* permits at most one label' },
+    { name: 'resolution conflict', labels: ['type:bug', 'resolution:duplicate', 'resolution:duplicate'], expected: 'resolution:* permits at most one label' },
+    { name: 'unknown label', labels: ['type:bug', 'needs-triage'], expected: 'undeclared label: needs-triage' },
+    { name: 'deprecated alias', labels: ['bug'], expected: 'deprecated label: bug; use type:bug' },
+  ];
+
+  for (const { name, labels, expected } of cases) {
+    assert.ok(errorsFor(labels).some((error) => error.includes(expected)), name);
+  }
+});
+
+test('allows only declared protected unnamespaced exceptions', () => {
+  assert.deepEqual(errorsFor(['type:feature', 'status:needs-review', 'good first issue', 'help wanted']), []);
+});
+
+test('keeps issue template initial labels canonical', () => {
+  const templates = [
+    '.github/ISSUE_TEMPLATE/bug_report.yml',
+    '.github/ISSUE_TEMPLATE/feature_request.yml',
+    '.github/ISSUE_TEMPLATE/docs_improvement.yml',
+    '.github/ISSUE_TEMPLATE/tracked_question.yml',
+  ];
+  for (const template of templates) {
+    const labels = fs.readFileSync(template, 'utf8').match(/^labels: \[(.*)]$/m)[1]
+      .split(',').map((label) => label.trim().replace(/^['"]|['"]$/g, ''));
+    assert.deepEqual(errorsFor(labels), [], template);
+  }
+});
+
+test('rejects labels outside their declared applicability', () => {
+  assert.ok(
+    errorsFor(['type:bug', 'priority:high'], 'pull-request').includes(
+      'label priority:high does not apply to pull-request',
+    ),
+  );
+  assert.ok(
+    errorsFor(['type:bug', 'good first issue'], 'pull-request').includes(
+      'label good first issue does not apply to pull-request',
+    ),
+  );
+  assert.deepEqual(errorsFor(['type:chore', 'size:exception'], 'pull-request'), []);
+  assert.deepEqual(errorsFor(['type:chore'], 'pull-request'), []);
+  assert.ok(
+    errorsFor(['type:chore', 'size:exception']).includes(
+      'label size:exception does not apply to issue',
+    ),
+  );
+  assert.equal(
+    policy.entries.find((entry) => entry.name === 'size:exception')?.policy.protected_exception,
+    true,
+  );
+});
+
+test('declares ownership and migration precedence as machine-readable policy', () => {
+  for (const entry of policy.entries) {
+    if (entry.name.includes(':')) {
+      const namespace = entry.name.split(':', 1)[0];
+      assert.equal(policy.namespaces.get(namespace)?.owner, 'maintainers', entry.name);
+    } else {
+      assert.equal(entry.policy.owner, 'maintainers', entry.name);
+    }
+  }
+
+  assert.deepEqual(policy.namespaces.get('status')?.requiredOn, ['issue']);
+  assert.deepEqual([...policy.migrations], [
+    ['bug', { canonical: 'type:bug', precedence: 'canonical', conflict: 'manual-review' }],
+    ['enhancement', { canonical: 'type:feature', precedence: 'canonical', conflict: 'manual-review' }],
+    ['question', { canonical: 'type:question', precedence: 'canonical', conflict: 'manual-review' }],
+    ['documentation', { canonical: 'type:docs', precedence: 'canonical', conflict: 'manual-review' }],
+    ['up for grabs', { canonical: 'help wanted', precedence: 'canonical', conflict: 'manual-review' }],
+  ]);
+});
+
+test('runs PR label policy from the trusted base with current API labels', () => {
+  const prWorkflow = fs.readFileSync('.github/workflows/pr-check.yml', 'utf8');
+  const labelWorkflow = fs.readFileSync('.github/workflows/pr-label-check.yml', 'utf8');
+  assert.match(prWorkflow, /^  pull_request:/m);
+  assert.doesNotMatch(prWorkflow, /^  pull_request_target:/m);
+  assert.match(
+    labelWorkflow,
+    /^  pull_request_target:\r?\n    types: \[opened, edited, labeled, unlabeled, synchronize, reopened\]/m,
+  );
+  assert.match(labelWorkflow, /name: Check PR Has type:\* Label/);
+  assert.doesNotMatch(labelWorkflow, /name: Check PR Label Policy/);
+  assert.match(
+    labelWorkflow,
+    /^  check-label-policy:\r?\n    name: Check PR Has type:\* Label\r?\n    runs-on: ubuntu-latest\r?\n    concurrency:\r?\n      group: \$\{\{ github\.workflow \}\}-type-label-\$\{\{ github\.event\.pull_request\.number \|\| github\.run_id \}\}\r?\n      cancel-in-progress: true$/m,
+  );
+  assert.match(labelWorkflow, /^  pull-requests: read$/m);
+  assert.doesNotMatch(labelWorkflow, /merge_group\.head_ref/);
+  assert.match(
+    labelWorkflow,
+    /if \(context\.eventName === 'merge_group'\) \{\r?\n              const \{ aggregatePullRequestResults, resolveAssociatedPullRequests \} = await import\(.*merge-queue\.mjs/,
+  );
+  assert.doesNotMatch(labelWorkflow, /^            const \{ aggregatePullRequestResults, resolveAssociatedPullRequests \} = await import\(.*merge-queue\.mjs/m);
+  assert.match(labelWorkflow, /resolveAssociatedPullRequests\(github, \{/);
+  assert.match(labelWorkflow, /aggregatePullRequestResults\(pulls,/);
+  assert.match(labelWorkflow, /failures = validate\(pull\)\.map\(\(error\) => `PR #\$\{pull\.number\}: \$\{error\}`\)/);
+  assert.doesNotMatch(labelWorkflow, /github\.paginate\(/);
+  assert.doesNotMatch(labelWorkflow, /listPullRequestsAssociatedWithCommit/);
+  assert.match(labelWorkflow, /validateLabels\(policy, pull\.labels\.map\(\(label\) => label\.name\), 'pull-request'\)/);
+  assert.match(labelWorkflow, /github\.event\.merge_group\.base_sha.*github\.event\.pull_request\.base\.sha/);
+  assert.doesNotMatch(labelWorkflow, /github\.event\.pull_request\.labels|context\.payload\.pull_request\.labels/);
+  assert.doesNotMatch(labelWorkflow, /pull_request\.head|head\.sha/);
+  assert.match(labelWorkflow, /await import\(.*label-policy\.mjs/);
+});
+
+test('documents the PR label policy as a required status check', () => {
+  const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
+
+  assert.match(
+    contributing,
+    /> \*\*Repo admin note:\*\*[^\r\n]*`Check PR Has type:\* Label`/,
+  );
+});
+
+test('migrates deprecated labels idempotently and preserves ambiguous combinations', () => {
+  const aliases = [
+    ['bug', 'type:bug'],
+    ['enhancement', 'type:feature'],
+    ['question', 'type:question'],
+    ['documentation', 'type:docs'],
+    ['up for grabs', 'help wanted'],
+  ];
+  for (const [alias, canonical] of aliases) {
+    const migrated = migrateLabels(policy, [alias]);
+    assert.deepEqual(migrated.labels, [canonical]);
+    assert.equal(migrated.changed, true);
+    assert.deepEqual(migrateLabels(policy, migrated.labels), { labels: migrated.labels, changed: false, conflicts: [] });
+  }
+
+  assert.deepEqual(migrateLabels(policy, ['bug', 'type:bug']), {
+    labels: ['type:bug'],
+    changed: true,
+    conflicts: [],
+  });
+
+  const ambiguous = migrateLabels(policy, ['bug', 'type:feature']);
+  assert.deepEqual(ambiguous.labels, ['bug', 'type:feature']);
+  assert.deepEqual(ambiguous.conflicts, ['type:* permits at most one label: type:bug, type:feature']);
+  assert.equal(ambiguous.changed, false);
+});
+
+test('exposes migration as an idempotent dry-run CLI', () => {
+  const command = spawnSync(
+    process.execPath,
+    ['.github/scripts/label-policy.mjs', '--migrate', '--labels-json', JSON.stringify(['bug', 'type:bug'])],
+    { encoding: 'utf8' },
+  );
+
+  assert.equal(command.status, 0, command.stderr);
+  assert.deepEqual(JSON.parse(command.stdout), {
+    labels: ['type:bug'],
+    changed: true,
+    conflicts: [],
+  });
+
+  const repeated = spawnSync(
+    process.execPath,
+    ['.github/scripts/label-policy.mjs', '--migrate', '--labels-json', JSON.stringify(['type:bug'])],
+    { encoding: 'utf8' },
+  );
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.deepEqual(JSON.parse(repeated.stdout), {
+    labels: ['type:bug'],
+    changed: false,
+    conflicts: [],
+  });
+
+  const conflict = spawnSync(
+    process.execPath,
+    ['.github/scripts/label-policy.mjs', '--migrate', '--labels-json', JSON.stringify(['bug', 'type:feature'])],
+    { encoding: 'utf8' },
+  );
+  assert.equal(conflict.status, 1);
+  assert.deepEqual(JSON.parse(conflict.stdout), {
+    labels: ['bug', 'type:feature'],
+    changed: false,
+    conflicts: ['type:* permits at most one label: type:bug, type:feature'],
+  });
+});
+
+test('aligns proportional evidence and per-merge migration across contribution surfaces', () => {
+  const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
+  for (const phrase of [
+    'Trivial change', 'first violated repository-owned invariant',
+    'High-risk change', 'no separate design document is required by default',
+    'Activation does not wait for the whole backlog',
+    'Every PR, including existing PRs, must comply before merge',
+    '23 open PRs', 'the PR author need not match', 'Issue API errors fail closed',
+  ]) assert.ok(contributing.includes(phrase), phrase);
+  const labels = fs.readFileSync('.github/labels.yml', 'utf8');
+  assert.match(labels, /Proportional evidence accepted; bugs require current-main reproduction and root-cause evidence/);
+  for (const name of ['bug_report', 'feature_request', 'docs_improvement', 'tracked_question']) {
+    const source = fs.readFileSync(`.github/ISSUE_TEMPLATE/${name}.yml`, 'utf8');
+    const start = source.indexOf('id: existing-issue-search');
+    assert.ok(start >= 0, name);
+    const field = source.slice(start, source.indexOf('\n  - ', start));
+    assert.match(field, /Search for a canonical root-cause tracker/);
+    assert.match(field, /required: true/);
+  }
+  const template = fs.readFileSync('.github/PULL_REQUEST_TEMPLATE.md', 'utf8');
+  assert.match(template, /Every linked issue is approved and has a real assignee/);
+  assert.match(template, /backlog-wide migration is not an activation prerequisite/);
+  for (const name of ['branch-pr', 'issue-creation', 'backlog-triage']) {
+    const skill = fs.readFileSync(`skills/${name}/SKILL.md`, 'utf8');
+    assert.match(skill, /proportional evidence/i, name);
+    assert.match(skill, /before merge/, name);
+    assert.match(skill, /no separate design document/i, name);
+  }
+});
+
+test('keeps the active PR template concise without activating staged admission policy', () => {
+  const template = fs.readFileSync('.github/PULL_REQUEST_TEMPLATE.md', 'utf8');
+  const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
+
+  assert.match(template, /What problem does this solve/);
+  assert.match(template, /compatibility, data\/security\/shared-contract/);
+  assert.doesNotMatch(template, /^\s*\||^- \[[ x]\]/m, 'no copied tables or checkbox classification/checklists');
+  assert.match(template, /^Closes #$/m);
+  assert.match(template, /every PR requires a closing issue reference/);
+  assert.match(template, /exactly one canonical type:\* PR label/);
+  assert.match(template, /All required checks must pass before merge, including for existing PRs/);
+  assert.match(template, /\*\*PRE-CUTOVER \/ NOT ACTIVE\*\*: optional issue\/type policy does not apply yet/);
+  assert.match(template, /actual commands\/steps and outcomes/);
+  assert.match(template, /focused regression and affected package tests/);
+  assert.match(template, /checks not run and missing CI evidence/);
+  assert.match(template, /CONTRIBUTING's proportional evidence policy; evidence may live in the issue/);
+  assert.match(contributing, /no separate design document is required by default/);
+
+  const links = [...template.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)].map((match) => match[1]);
+  // The template is copied into PR bodies, where file-relative links lose their base.
+  assert.deepEqual(links, [
+    'https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md',
+    'https://github.com/Gentleman-Programming/engram/blob/main/docs/contribution-policy-transition.md',
+  ]);
+});
+
+test('aligns branch PR body guidance with the canonical template and active prerequisites', () => {
+  const skill = fs.readFileSync('skills/branch-pr/SKILL.md', 'utf8');
+  const body = skill.split('## PR Body Format')[1]?.split('## Automated Checks')[0];
+  assert.ok(body, 'PR body guidance exists');
+  assert.match(body, /\[canonical PR template\]\(\.\.\/\.\.\/\.github\/PULL_REQUEST_TEMPLATE\.md\)/);
+  assert.doesNotMatch(body, /^\s*\||^- \[[ x]\]|Changes Table|Contributor Checklist|All boxes must be checked|Check exactly ONE/m);
+  assert.match(body, /MUST contain a closing reference/);
+  assert.match(body, /Closes #<issue-number>/);
+  assert.match(body, /Fixes #N.*Resolves #N/);
+  assert.match(body, /Every linked issue MUST have `status:approved` and a real assignee/);
+  assert.match(body, /exactly one canonical `type:\*` PR label/);
+  assert.match(body, /All required automated checks must pass before merge/);
+  assert.match(body, /proportional evidence/);
+  assert.match(body, /no separate design document is required by default/);
+  assert.match(body, /Existing PRs must comply before merge, without waiting for backlog-wide migration/);
+  assert.match(body, /Re-run native validation after issue approval\/assignment changes/);
+  assert.match(body, /actual verification commands\/steps and observed outcomes/);
+  assert.match(body, /focused regression and affected package tests/);
+  assert.match(body, /N\/A — documentation-only/);
+  assert.match(body, /checks not run and missing CI evidence/);
+  assert.match(body, /Local success is not a hosted CI pass/);
+  assert.match(body, /Omit the risk section for low-risk changes/);
+});
+
+test('documents singleton-safe duplicate status transitions', () => {
+  const skill = fs.readFileSync('skills/issue-creation/SKILL.md', 'utf8');
+  const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
+  const duplicateCommands = skill.slice(skill.indexOf('# Maintainer: replace every active status while evaluating'));
+
+  assert.deepEqual(
+    validateLabels(policy, ['type:bug', 'status:wontfix', 'resolution:duplicate'], 'issue'),
+    { errors: [] },
+  );
+  assert.match(
+    contributing,
+    /After confirming and closing the duplicate, replace `status:possible-duplicate` with `status:wontfix` and apply `resolution:duplicate`\./,
+  );
+  assert.match(
+    skill,
+    /Is it a confirmed duplicate\?\s+→ Close it, replace evaluation status with status:wontfix, then add resolution:duplicate/,
+  );
+  assert.match(duplicateCommands, /set -euo pipefail/);
+  assert.match(duplicateCommands, /other_statuses="\$\(gh issue view/);
+  assert.match(duplicateCommands, /--add-label "status:possible-duplicate"/);
+  assert.match(duplicateCommands, /--remove-label "\$\{other_statuses\/\/\$'\\n'\/,\}"/);
+  assert.match(duplicateCommands, /gh issue edit <number> "\$\{status_args\[@\]\}"/);
+  assert.match(duplicateCommands, /updated_statuses="\$\(gh issue view/);
+  assert.match(duplicateCommands, /"\$updated_statuses" != "status:possible-duplicate"/);
+  assert.match(duplicateCommands, /stop without retrying/);
+  assert.match(
+    duplicateCommands,
+    /--remove-label "status:possible-duplicate" --add-label "status:wontfix,resolution:duplicate"/,
+  );
+  assert.doesNotMatch(duplicateCommands, /while IFS=[\s\S]*gh issue edit <number> --remove-label "\$status"/);
+});

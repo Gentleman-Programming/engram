@@ -1,0 +1,56 @@
+name: Issue Status Fallback
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  ensure-review-status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recover missing review status and form type
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const issue = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            };
+            const { data } = await github.rest.issues.get(issue);
+            const additions = [];
+            if (!data.labels.some((label) => label.name.startsWith('status:'))) {
+              additions.push('status:needs-review');
+            }
+            if (!data.labels.some((label) => label.name.startsWith('type:'))) {
+              // Required form field headings only; answers and titles are not classifiers.
+              const signatures = {
+                bug: ['Existing Issue Search', '📝 Observed Consequence', '🔄 Steps to Reproduce', '✅ Expected Behavior', '❌ Actual Behavior', 'Operating System', 'Release Version (Report Context)', 'Agent / Client'],
+                feature: ['Existing Issue Search', '🔍 Observed Consequence', '💡 Desired Outcome', '📦 Affected Area', 'Release Context'],
+                docs: ['Existing Issue Search', '📄 Documentation Reference', '📄 Which Document?', '🔍 Observed Consequence', 'Release Context'],
+                question: ['Existing Issue Search', 'Question', 'Why does this need issue tracking?', 'Affected Area', 'Release Context'],
+              };
+              const headings = new Set();
+              let fence;
+              for (const line of (data.body ?? '').split(/\r\n|\n|\r/)) {
+                if (fence) {
+                  const close = line.match(/^ {0,3}(`+|~+)\s*$/);
+                  if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = undefined;
+                  continue;
+                }
+                const open = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+                if (open && (open[1][0] !== '`' || !open[2].includes('`'))) {
+                  fence = open[1];
+                  continue;
+                }
+                const heading = line.match(/^### (.+?)\s*$/);
+                if (heading) headings.add(heading[1]);
+              }
+              const matches = Object.entries(signatures).filter(([, required]) => required.every((heading) => headings.has(heading)));
+              if (matches.length === 1) additions.push(`type:${matches[0][0]}`);
+            }
+            // Additive only; the GET and write are inherently non-atomic.
+            if (additions.length) await github.rest.issues.addLabels({ ...issue, labels: additions });

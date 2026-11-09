@@ -1,7 +1,5 @@
 package dashboard
 
-//go:generate templ generate
-
 type TemplRuntimePolicy struct {
 	Mode                     string
 	RuntimeGenerationAllowed bool
@@ -12,6 +10,6 @@ func templRuntimePolicy() TemplRuntimePolicy {
 	return TemplRuntimePolicy{
 		Mode:                     "checked-in-generated",
 		RuntimeGenerationAllowed: false,
-		GenerateCommand:          "templ generate",
+		GenerateCommand:          "go tool templ generate -path ./internal/cloud/dashboard",
 	}
 }

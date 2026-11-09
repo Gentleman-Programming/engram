@@ -23,6 +23,10 @@
 | TUI | Terminal memory navigation. | `internal/tui` |
 | Obsidian beta | Experimental export/plugin to Obsidian. | `internal/obsidian`, `plugin/obsidian`, `docs/beta/obsidian-brain.md` |
 
+Doctor keeps CLI parsing, errors, and JSON presentation in `cmd/engram/doctor.go`.
+`internal/diagnostic/repair.go` owns repair orchestration and result aggregation;
+`internal/store` retains each repair's data, transaction, and backup behavior.
+
 ## How to navigate the repo
 
 ### Recommended first pass
@@ -35,7 +39,6 @@
 6. **Access surfaces**: `internal/mcp/mcp.go`, `internal/server/server.go`, `internal/tui/`.
 7. **Sync and cloud**: `internal/sync/sync.go`, `internal/cloud/*`.
 8. **Integrations**: `internal/setup/setup.go`, `plugin/`.
-9. **Historical/active specs**: `openspec/changes/` and `openspec/specs/`.
 
 ### PR review path
 
@@ -46,7 +49,14 @@
 4. Is there a test at the affected boundary?
 5. Did public docs stay aligned?
 6. Does the UI, if any, represent real behavior?
+7. Did the review inspect the complete changed-file set for prohibited transient artifacts?
 ```
+
+### Pull request artifact review
+
+- Inspect the complete changed-file set, including added, modified, copied, and renamed destinations.
+- Reject every class listed in the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy); do not rely on a partial shorthand list.
+- Treat repository-root-only restrictions as scoped: canonical documentation such as `docs/plan.md` remains allowed.
 
 ## Guardrails that must not break
 

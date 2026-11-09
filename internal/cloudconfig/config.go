@@ -55,3 +55,8 @@ func Save(dataDir string, cfg *Config) error {
 	}
 	return os.Chmod(path, 0o600)
 }
+
+// Clear removes persisted cloud settings without changing active environment overrides.
+func Clear(dataDir string) error {
+	return Save(dataDir, &Config{})
+}

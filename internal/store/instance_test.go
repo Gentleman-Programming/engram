@@ -1,0 +1,171 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestEnsureInstanceIDContextCancellationAndContinuity(t *testing.T) {
+	dir := t.TempDir()
+	want, err := EnsureInstanceID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireMigrationLock(filepath.Join(dir, ".instance-id.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err = EnsureInstanceIDContext(ctx, dir)
+	unlock()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("contended identity: %v", err)
+	}
+	got, err := EnsureInstanceIDContext(context.Background(), dir)
+	if err != nil || got != want {
+		t.Fatalf("identity continuity: %q, %v", got, err)
+	}
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	if _, err := EnsureInstanceIDContext(canceled, filepath.Join(dir, "absent")); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "absent")); !os.IsNotExist(err) {
+		t.Fatalf("expired context created directory: %v", err)
+	}
+}
+
+func TestEnsureInstanceIDRecoversMalformedAndTruncatedFiles(t *testing.T) {
+	for name, contents := range map[string]string{
+		"empty":     "",
+		"truncated": strings.Repeat("a", 31),
+		"uppercase": strings.Repeat("A", 32),
+		"non-hex":   strings.Repeat("g", 32),
+	} {
+		t.Run(name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			path := filepath.Join(dataDir, ".instance-id")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatalf("write malformed identity: %v", err)
+			}
+
+			id, err := EnsureInstanceID(dataDir)
+			if err != nil {
+				t.Fatalf("EnsureInstanceID: %v", err)
+			}
+			if !isValidInstanceID(id) {
+				t.Fatalf("recovered identity = %q, want 32 lowercase hexadecimal characters", id)
+			}
+			persisted, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read recovered identity: %v", err)
+			}
+			if strings.TrimSpace(string(persisted)) != id {
+				t.Fatalf("persisted identity = %q, want %q", persisted, id)
+			}
+		})
+	}
+}
+
+func TestEnsureInstanceIDPreservesValidID(t *testing.T) {
+	dataDir := t.TempDir()
+	want := "0123456789abcdef0123456789abcdef"
+	if err := os.WriteFile(filepath.Join(dataDir, ".instance-id"), []byte(want+"\n"), 0o600); err != nil {
+		t.Fatalf("write identity: %v", err)
+	}
+
+	got, err := EnsureInstanceID(dataDir)
+	if err != nil {
+		t.Fatalf("EnsureInstanceID: %v", err)
+	}
+	if got != want {
+		t.Fatalf("identity = %q, want %q", got, want)
+	}
+}
+
+func TestEnsureInstanceIDSerializesConcurrentRecoveryAndPublication(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, ".instance-id"), []byte("truncated"), 0o600); err != nil {
+		t.Fatalf("write truncated identity: %v", err)
+	}
+
+	const callers = 32
+	start := make(chan struct{})
+	ids := make(chan string, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			id, err := EnsureInstanceID(dataDir)
+			ids <- id
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(ids)
+	close(errs)
+
+	var winner string
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("EnsureInstanceID: %v", err)
+		}
+	}
+	for id := range ids {
+		if !isValidInstanceID(id) {
+			t.Fatalf("identity = %q, want 32 lowercase hexadecimal characters", id)
+		}
+		if winner == "" {
+			winner = id
+		} else if id != winner {
+			t.Fatalf("concurrent identity = %q, want published winner %q", id, winner)
+		}
+	}
+}
+
+func TestEnsureInstanceIDPublicationCompleteAndPrivate(t *testing.T) {
+	dataDir := t.TempDir()
+	id, err := EnsureInstanceID(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dataDir, ".instance-id")
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != id+"\n" {
+		t.Fatalf("persisted identity = %q, %v", data, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("identity permissions = %o", info.Mode().Perm())
+	}
+	temporary, err := filepath.Glob(filepath.Join(dataDir, ".instance-id-*"))
+	if err != nil || len(temporary) != 0 {
+		t.Fatalf("publication left temporary files: %v, %v", temporary, err)
+	}
+}
+
+func TestEnsureInstanceIDRejectsRegularFileDataDir(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(dataDir, []byte("regular file"), 0o600); err != nil {
+		t.Fatalf("write data directory fixture: %v", err)
+	}
+
+	if _, err := EnsureInstanceID(dataDir); err == nil {
+		t.Fatal("EnsureInstanceID accepted a regular file as data directory")
+	}
+}

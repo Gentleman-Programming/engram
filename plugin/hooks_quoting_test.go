@@ -13,7 +13,7 @@ type hooksJSON struct {
 }
 
 type hookGroup struct {
-	Matcher string     `json:"matcher,omitempty"`
+	Matcher string      `json:"matcher,omitempty"`
 	Hooks   []hookEntry `json:"hooks"`
 }
 

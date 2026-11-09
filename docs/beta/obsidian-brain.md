@@ -1,9 +1,8 @@
-# 🧠 Obsidian Brain — Beta
+# 🧠 Obsidian Brain
 
-> **Status**: Beta — feedback welcome on the [GitHub issues](https://github.com/Gentleman-Programming/engram/issues) tagged `beta:obsidian`.
-> **Available since**: `v1.12.0-beta.1`
-> **Stability**: Behavior is locked but flag names may evolve before stable release.
-> **Side-by-side**: This beta installs as `engram-beta` so it doesn't replace your stable `engram`. Both binaries share the same `~/.engram/engram.db`, so memories captured by your stable agent show up in the beta exports automatically.
+> **Status**: Stable — feedback welcome on the [GitHub issues](https://github.com/Gentleman-Programming/engram/issues).
+> **Available since**: `v1.12.0` (first shipped in `v1.12.0-beta.1`)
+> **Stability**: Included in the stable `engram` binary; no separate install is needed.
 
 Visualize your AI agent's memory as an interactive knowledge graph in [Obsidian](https://obsidian.md/). Every observation becomes a Markdown note. Sessions, projects, and topic clusters become connected hubs. Open Obsidian's Graph View and **see how your agent's brain actually thinks**.
 
@@ -25,69 +24,6 @@ The result: your agent's knowledge becomes a **navigable cognitive map** instead
 
 ---
 
-## Install Side-by-Side (`engram-beta`)
-
-The beta ships as a separate binary named `engram-beta` so it never touches your stable `engram` install. Both binaries read and write the same `~/.engram/engram.db`, so anything captured by your stable agent is immediately visible to the beta.
-
-Pick the right archive for your platform from the [release page](https://github.com/Gentleman-Programming/engram/releases/tag/v1.12.0-beta.1), then extract and rename:
-
-### macOS (Apple Silicon)
-
-```bash
-curl -L https://github.com/Gentleman-Programming/engram/releases/download/v1.12.0-beta.1/engram_1.12.0-beta.1_darwin_arm64.tar.gz -o /tmp/engram-beta.tar.gz
-tar -xzf /tmp/engram-beta.tar.gz -C /tmp
-sudo mv /tmp/engram /usr/local/bin/engram-beta
-sudo chmod +x /usr/local/bin/engram-beta
-engram-beta version
-```
-
-### macOS (Intel)
-
-```bash
-curl -L https://github.com/Gentleman-Programming/engram/releases/download/v1.12.0-beta.1/engram_1.12.0-beta.1_darwin_amd64.tar.gz -o /tmp/engram-beta.tar.gz
-tar -xzf /tmp/engram-beta.tar.gz -C /tmp
-sudo mv /tmp/engram /usr/local/bin/engram-beta
-sudo chmod +x /usr/local/bin/engram-beta
-engram-beta version
-```
-
-### Linux
-
-```bash
-curl -L https://github.com/Gentleman-Programming/engram/releases/download/v1.12.0-beta.1/engram_1.12.0-beta.1_linux_amd64.tar.gz -o /tmp/engram-beta.tar.gz
-tar -xzf /tmp/engram-beta.tar.gz -C /tmp
-sudo mv /tmp/engram /usr/local/bin/engram-beta
-sudo chmod +x /usr/local/bin/engram-beta
-engram-beta version
-```
-
-### From source (`go install`)
-
-```bash
-go install github.com/Gentleman-Programming/engram/cmd/engram@v1.12.0-beta.1
-mv ~/go/bin/engram ~/go/bin/engram-beta
-engram-beta version
-```
-
-### Verify both binaries coexist
-
-```bash
-which engram        # /usr/local/bin/engram (stable, untouched)
-which engram-beta   # /usr/local/bin/engram-beta (the beta)
-engram version      # your stable version
-engram-beta version # v1.12.0-beta.1
-```
-
-### Uninstall
-
-```bash
-sudo rm /usr/local/bin/engram-beta
-```
-
-The stable `engram`, your `~/.engram/engram.db`, and your Obsidian vault are untouched.
-
----
-
 ## Quick Start (60 seconds)
 
 ```bash
@@ -95,7 +31,7 @@ The stable `engram`, your `~/.engram/engram.db`, and your Obsidian vault are unt
 mkdir -p ~/Obsidian/engram
 
 # 2. Export your full memory + bootstrap the engram-brain graph layout
-engram-beta obsidian-export --vault ~/Obsidian/engram --graph-config force
+engram obsidian-export --vault ~/Obsidian/engram --graph-config force
 
 # 3. Open Obsidian, "Open folder as vault" → ~/Obsidian/engram
 # 4. Cmd+G (Mac) or Ctrl+G → Graph View
@@ -141,7 +77,7 @@ The exporter only writes inside `{vault}/engram/`. It will never touch other fol
 │   │   ├── session-abc123.md
 │   │   └── session-def456.md
 │   ├── _topics/                         ← topic cluster hubs
-│   │   ├── sdd--obsidian-plugin.md
+│   │   ├── architecture--obsidian-plugin.md
 │   │   └── architecture--auth-model.md
 │   ├── engram/                          ← project folder
 │   │   ├── architecture/
@@ -167,7 +103,7 @@ id: 1719
 type: architecture
 project: engram
 scope: project
-topic_key: sdd/obsidian-plugin/explore
+topic_key: architecture/obsidian-plugin/explore
 session_id: session-abc123
 created_at: "2026-04-06T14:30:00Z"
 updated_at: "2026-04-06T14:35:00Z"
@@ -175,7 +111,7 @@ revision_count: 1
 tags:
   - engram
   - architecture
-  - sdd
+  - obsidian
 aliases:
   - "Exploration: Obsidian plugin for Engram brain visualization"
 ---
@@ -189,16 +125,20 @@ aliases:
 
 ---
 *Session*: [[session-session-abc123]]
-*Topic*: [[topic-sdd--obsidian-plugin]]
+*Topic*: [[topic-architecture--obsidian-plugin]]
 ```
 
 The wikilinks at the bottom are what give the graph view its connections. Obsidian indexes them automatically.
 
 ### Hub Notes
 
+Hub generation includes only successfully written or skipped notes, not notes whose export failed. Existing hubs remain tracked while their observations are live, even when note or hub writes fail.
+
 **Session hubs** (in `_sessions/`) — one per session, contains backlinks to every observation captured in that session. Open one to see the full chronological story of a work session.
 
-**Topic hubs** (in `_topics/`) — one per `topic_key` prefix that has ≥2 observations. Groups related work across time. For example, all `sdd/obsidian-plugin/*` observations cluster under `_topics/sdd--obsidian-plugin.md`. Singletons don't get hubs (prevents orphan clutter).
+**Topic hubs** (in `_topics/`) — one per `topic_key` prefix that has ≥2 observations. Groups related work across time. For example, all `architecture/obsidian-plugin/*` observations cluster under `_topics/architecture--obsidian-plugin.md`. Singletons don't get hubs (prevents orphan clutter).
+
+Project-scoped exports preserve existing topic hub files unchanged, because those hubs may link observations from other projects. Missing topic hubs are still created when the selected project supplies ≥2 observations for the prefix. Each attempt writes and closes its own temporary file before atomic no-replace publication, preserving any competing hub. Failed writes do not leave a partial final hub blocking retry; cleanup removes only the attempt's temporary file, never the final hub. Publication or unexpected temporary cleanup failures are reported rather than falling back to overwriting a hub. Preserved hubs are not counted as regenerated. This protects hub creation, not concurrent exports or sync-state updates as a whole. Use a full-scope export (`--all`) to regenerate topic hubs with references across projects.
 
 Slashes in topic keys become `--` in filenames for filesystem safety.
 
@@ -207,7 +147,7 @@ Slashes in topic keys become `--` in filenames for filesystem safety.
 ## CLI Reference
 
 ```bash
-engram-beta obsidian-export --vault <path> [flags]
+engram obsidian-export --vault <path> [flags]
 ```
 
 | Flag | Required | Default | Description |
@@ -215,39 +155,48 @@ engram-beta obsidian-export --vault <path> [flags]
 | `--vault <path>` | ✅ | — | Path to your Obsidian vault root. The exporter writes inside `{vault}/engram/` only. |
 | `--project <name>` | No | current project | Export only observations from this known project. |
 | `--all` | No | false | Explicitly export observations from every project. |
-| `--limit <n>` | No | 0 (no limit) | Maximum observations per source query. |
+| `--limit` | Unsupported | — | Rejected with exit code 1; omit it to export all matching observations. |
 | `--since <date>` | No | (state file) | Export only observations updated after this date. Format: RFC3339 (`2026-04-06T14:30:00Z`) or `YYYY-MM-DD`. |
 | `--force` | No | false | Re-export everything, ignoring the incremental state file. |
 | `--graph-config <mode>` | No | `preserve` | Bootstrap the Obsidian graph view config. See [Graph Config](#graph-config) below. |
 | `--watch` | No | false | Run as a daemon — exports on a fixed interval until interrupted. |
 | `--interval <duration>` | No | `10m` | Sync interval for `--watch` mode. Go duration format (`30s`, `5m`, `1h`). Minimum: `1m`. |
 
+`--limit` was previously accepted but never applied. Every explicit use now fails
+with `error: --limit is not supported by obsidian-export; omit it to export all matching observations`
+before startup update checks, configuration resolution, SQLite temporary-directory
+preparation, or database migration, including in watch mode. No store or vault is
+opened for a rejected limit. Exports without this flag remain unlimited within the
+selected project/date filters.
+Truncating reconciliation reads would risk treating unexported notes as deleted;
+a safe capped export is not implemented.
+
 ### Examples
 
 ```bash
 # Single export of the current project
-engram-beta obsidian-export --vault ~/Obsidian/engram
+engram obsidian-export --vault ~/Obsidian/engram
 
 # Explicitly export every project
-engram-beta obsidian-export --vault ~/Obsidian/engram --all
+engram obsidian-export --vault ~/Obsidian/engram --all
 
 # Export only the engram project
-engram-beta obsidian-export --vault ~/Obsidian/engram --project engram
+engram obsidian-export --vault ~/Obsidian/engram --project engram
 
 # Force a complete re-export (useful after pruning observations)
-engram-beta obsidian-export --vault ~/Obsidian/engram --force
+engram obsidian-export --vault ~/Obsidian/engram --force
 
 # Auto-sync every 10 minutes (default), runs forever
-engram-beta obsidian-export --vault ~/Obsidian/engram --watch
+engram obsidian-export --vault ~/Obsidian/engram --watch
 
 # Auto-sync every 5 minutes, only the engram project
-engram-beta obsidian-export --vault ~/Obsidian/engram --watch --interval 5m --project engram
+engram obsidian-export --vault ~/Obsidian/engram --watch --interval 5m --project engram
 
 # Reset the graph layout to the engram-brain default
-engram-beta obsidian-export --vault ~/Obsidian/engram --graph-config force
+engram obsidian-export --vault ~/Obsidian/engram --graph-config force
 
 # Never touch the graph config (you have your own custom layout)
-engram-beta obsidian-export --vault ~/Obsidian/engram --graph-config skip
+engram obsidian-export --vault ~/Obsidian/engram --graph-config skip
 ```
 
 ---
@@ -273,7 +222,11 @@ The `--watch` flag turns the export into a long-running daemon. Use cases:
 2026/04/06 23:29:29 [2026-04-06T21:29:29Z] sync: created=5 updated=2 deleted=0 skipped=1731 hubs=279
 ```
 
-Counts: how many notes were created, updated, deleted (soft-deleted obs), skipped (unchanged), and total hub notes regenerated.
+Counts: how many notes were created, updated, deleted (soft-deleted obs, hard-deleted obs, obs renamed to a new path, and session/topic hubs left with no live obs), skipped (unchanged), and total hub notes regenerated.
+
+Cleanup uses tracked paths in the sync state. Renames retire the previous note even with `--project`; `files` tracks the latest successfully written note while optional `pending_retirements` records superseded paths per observation ID, including repeated renames after failed removal. Pending removals retry after note writes; currently owned live paths are protected, including filesystem aliases such as case-only renames on case-insensitive volumes. Scoped exports retry pending paths only for IDs present in the selected project's snapshot, including soft deletes. Hard-deleted observations and orphaned hubs require a full-scope export (`--all`), because a project snapshot cannot establish ownership of absent rows. Live hubs are retained if writing their replacement fails.
+
+Cleanup cannot recover stale files whose paths were already lost from the state by an earlier export. There is no recovery scan. Existing version-1 state files without `pending_retirements` remain supported; older exporters ignore and may discard this additive field on downgrade. Keep the state file to preserve pending cleanup; `--force` or deleting the state discards that tracking.
 
 ### Running Persistent
 
@@ -281,23 +234,23 @@ To keep the daemon running across reboots, use `nohup`, `launchd` (macOS), `syst
 
 **macOS quick start with `nohup`**:
 ```bash
-nohup ~/go/bin/engram-beta obsidian-export \
+nohup ~/go/bin/engram obsidian-export \
   --vault ~/Obsidian/engram \
   --watch --interval 10m \
   > ~/.engram/obsidian-sync.log 2>&1 &
 ```
 
-**macOS launchd plist** (`~/Library/LaunchAgents/com.engram-beta.obsidian-sync.plist`):
+**macOS launchd plist** (`~/Library/LaunchAgents/com.engram.obsidian-sync.plist`):
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.engram-beta.obsidian-sync</string>
+    <string>com.engram.obsidian-sync</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/engram-beta</string>
+        <string>/usr/local/bin/engram</string>
         <string>obsidian-export</string>
         <string>--vault</string>
         <string>/Users/YOU/Obsidian/engram</string>
@@ -319,7 +272,7 @@ nohup ~/go/bin/engram-beta obsidian-export \
 
 Then load it:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.engram-beta.obsidian-sync.plist
+launchctl load ~/Library/LaunchAgents/com.engram.obsidian-sync.plist
 ```
 
 ---
@@ -360,7 +313,9 @@ You can absolutely tweak the graph view in Obsidian's UI — Engram's `preserve`
 
 ---
 
-## TypeScript Plugin (Optional)
+## HTTP Obsidian Plugin (Optional)
+
+Unlike the CLI exporter above, this plugin reads `GET /export` from a running `engram serve` instance. Each poll receives a **full snapshot**; the server does not support incremental `since` export. The plugin writes one Markdown note per observation under the configured vault subfolder (`observations/observation-<id>.md`), updating changed notes in place and leaving notes absent from later snapshots untouched. It does not generate CLI session/topic hubs or graph configuration. Set a project filter to request only that project; leave it empty to explicitly request all projects (`all_projects=true`). Scoped exports may include legacy observations with no project when their exported session belongs to the selected project. Truly foreign observations fail without writing notes or recording success. An incompatible response also fails explicitly rather than treating it as an empty export.
 
 For an in-Obsidian experience with a ribbon button, settings tab, and status bar indicator, there's a TypeScript community plugin in [`plugin/obsidian/`](https://github.com/Gentleman-Programming/engram/tree/main/plugin/obsidian).
 
@@ -400,7 +355,7 @@ In the Filter panel of Graph View:
 | `tag:#bugfix` | Constellation of every bug you've ever fixed |
 | `tag:#architecture path:engram/engram` | Architectural decisions in this project only |
 | `path:_topics` | Just the topic hubs — your "table of contents" |
-| `path:_sessions sdd` | Sessions that involved SDD work |
+| `path:_sessions architecture` | Sessions that involved architecture work |
 | `tag:#decision tag:#architecture` | Big architectural decisions |
 
 ### Navigating
@@ -425,7 +380,7 @@ In the Filter panel of Graph View:
 - Minimum interval is 1 minute. This is to prevent hammering your filesystem and SQLite. If you need faster updates, consider running the export in a tight loop with your own scheduler.
 
 ### "I customized the graph and now it looks weird"
-- Run `engram-beta obsidian-export --vault ~/Obsidian/engram --graph-config force` to reset to the engram-brain default.
+- Run `engram obsidian-export --vault ~/Obsidian/engram --graph-config force` to reset to the engram-brain default.
 
 ### "I want to keep my custom graph layout AND auto-sync"
 - This is the default! `--watch` only applies graph config on the first cycle, and the default mode is `preserve` which only writes when the file is missing.
@@ -441,7 +396,7 @@ In the Filter panel of Graph View:
 
 ## Feedback & Bugs
 
-This is a beta feature. **We want to hear how it works for you, especially**:
+**We want to hear how the Obsidian export works for you, especially**:
 
 - Does the graph layout feel right at your scale (100 / 1k / 10k+ observations)?
 - Are the color groups useful, or do you wish they were configurable?
@@ -449,15 +404,14 @@ This is a beta feature. **We want to hear how it works for you, especially**:
 - Did the daemon mode crash, leak memory, or behave unexpectedly?
 - Did the graph config bootstrap clobber something you cared about?
 
-File issues at [github.com/Gentleman-Programming/engram/issues](https://github.com/Gentleman-Programming/engram/issues) with the `beta:obsidian` label.
+File issues at [github.com/Gentleman-Programming/engram/issues](https://github.com/Gentleman-Programming/engram/issues) and mention `obsidian-export` in the title.
 
 ---
 
-## Roadmap (post-beta)
+## Roadmap
 
-Once there's feedback signal:
+Ideas under consideration, prioritized by feedback:
 
-- **Move into stable** — promote docs into main README, remove beta marker
 - **Embeddings + semantic edges** — optional `--with-embeddings` flag using local Ollama
 - **Bidirectional sync** — let Obsidian edits flow back to Engram (with conflict resolution)
 - **Custom hub templates** — user-defined templates for session/topic hub notes

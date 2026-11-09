@@ -1,0 +1,37 @@
+name: Issue Approval Refresh Router
+
+on:
+  issues:
+    types: [labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  router:
+    if: ${{ github.event.label.name == 'status:approved' && !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    # Repository Actions capability; trusted helpers restrict use to admitted native metadata runs.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: write
+    env:
+      TRUSTED_SHA: ${{ github.workflow_sha }}
+    steps:
+      - name: Load trusted issue refresh router
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Request affected native metadata refreshes
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          retries: 0
+          script: |
+            try {
+              const { dispatchIssueApprovalRefresh } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-refresh-dispatch.mjs`);
+              await dispatchIssueApprovalRefresh(github, context, process.env.TRUSTED_SHA);
+            } catch (error) {
+              core.setFailed(error instanceof Error ? error.message : String(error));
+            }

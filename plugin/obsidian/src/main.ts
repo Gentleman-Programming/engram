@@ -10,10 +10,10 @@ import { syncNow, SyncResult } from "./sync";
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
 export default class EngramBrainPlugin extends Plugin {
-	settings: EngramSettings;
+	settings!: EngramSettings;
 
-	/** Node-style interval handle returned by window.setInterval. Null when auto-sync is off. */
-	private _syncInterval: ReturnType<typeof window.setInterval> | null = null;
+	/** Numeric interval handle returned by window.setInterval. Null when auto-sync is off. */
+	private _syncInterval: number | null = null;
 
 	/** Status bar element — updated after every sync attempt. */
 	private statusBarItem: HTMLElement | null = null;

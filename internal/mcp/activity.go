@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,10 +15,11 @@ const ambiguousProjectRecoveryTTL = 5 * time.Minute
 
 // SessionActivity tracks tool call activity for save reminders and activity scores.
 type SessionActivity struct {
-	mu         sync.Mutex
-	sessions   map[string]*sessionState
-	nudgeAfter time.Duration
-	now        func() time.Time // injectable for testing
+	mu                sync.Mutex
+	sessions          map[string]*sessionState
+	projectLastSaveAt map[string]time.Time
+	nudgeAfter        time.Duration
+	now               func() time.Time // injectable for testing
 }
 
 type sessionState struct {
@@ -37,6 +39,7 @@ type promptContext struct {
 type ambiguousProjectRecovery struct {
 	availableProjects []string
 	contextPath       string
+	candidatePaths    []string
 	expiresAt         time.Time
 	selectedProject   string
 }
@@ -44,16 +47,17 @@ type ambiguousProjectRecovery struct {
 // NewSessionActivity creates a new activity tracker with the given nudge threshold.
 func NewSessionActivity(nudgeAfter time.Duration) *SessionActivity {
 	return &SessionActivity{
-		sessions:   make(map[string]*sessionState),
-		nudgeAfter: nudgeAfter,
-		now:        time.Now,
+		sessions:          make(map[string]*sessionState),
+		projectLastSaveAt: make(map[string]time.Time),
+		nudgeAfter:        nudgeAfter,
+		now:               time.Now,
 	}
 }
 
 func generateRecoveryToken() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+		return ""
 	}
 	return hex.EncodeToString(b[:])
 }
@@ -95,11 +99,16 @@ func (a *SessionActivity) IssueAmbiguousProjectRecoveryToken(sessionID string, a
 		s.recoveryTokens = make(map[string]*ambiguousProjectRecovery)
 	}
 	token := generateRecoveryToken()
+	path, paths, ok := recoveryContext(availableProjects, contextPath)
+	if token == "" || !ok {
+		return ""
+	}
 	projects := append([]string(nil), availableProjects...)
 	slices.Sort(projects)
 	s.recoveryTokens[token] = &ambiguousProjectRecovery{
 		availableProjects: projects,
-		contextPath:       filepath.Clean(contextPath),
+		contextPath:       path,
+		candidatePaths:    paths,
 		expiresAt:         a.now().Add(ambiguousProjectRecoveryTTL),
 	}
 	return token
@@ -127,7 +136,8 @@ func (a *SessionActivity) ValidateAmbiguousProjectRecoveryToken(sessionID, token
 	}
 	projects := append([]string(nil), availableProjects...)
 	slices.Sort(projects)
-	if !slices.Equal(recovery.availableProjects, projects) || recovery.contextPath != filepath.Clean(contextPath) {
+	path, paths, valid := recoveryContext(availableProjects, contextPath)
+	if !valid || !slices.Contains(projects, selectedProject) || !slices.Equal(recovery.availableProjects, projects) || recovery.contextPath != path || !slices.Equal(recovery.candidatePaths, paths) {
 		return false
 	}
 	if recovery.selectedProject == "" {
@@ -137,6 +147,33 @@ func (a *SessionActivity) ValidateAmbiguousProjectRecoveryToken(sessionID, token
 	return recovery.selectedProject == selectedProject
 }
 
+// recoveryContext binds exact detector names to unique canonical repository paths.
+// Duplicate case-normalized directories must not disappear behind a single name.
+func recoveryContext(projects []string, contextPath string) (string, []string, bool) {
+	path, err := filepath.EvalSymlinks(contextPath)
+	if err != nil {
+		return "", nil, false
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", nil, false
+	}
+	names := append([]string(nil), projects...)
+	slices.Sort(names)
+	paths := make([]string, 0, len(names))
+	for i, name := range names {
+		if name == "" || (i > 0 && names[i-1] == name) {
+			return "", nil, false
+		}
+		candidate := resolveAmbiguousChoicePath(path, name)
+		if candidate == "" {
+			return "", nil, false
+		}
+		paths = append(paths, candidate)
+	}
+	return path, paths, len(paths) > 1
+}
+
 // RecordSave increments the save counter and updates lastSaveAt.
 func (a *SessionActivity) RecordSave(sessionID string) {
 	a.mu.Lock()
@@ -144,6 +181,39 @@ func (a *SessionActivity) RecordSave(sessionID string) {
 	s := a.getOrCreate(sessionID)
 	s.saveCount++
 	s.lastSaveAt = a.now()
+}
+
+// RecordSaveForProject records a save in its session and for project-level
+// nudge freshness.
+func (a *SessionActivity) RecordSaveForProject(sessionID, project string) {
+	project = strings.TrimSpace(project)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	now := a.now()
+	s := a.getOrCreate(sessionID)
+	s.saveCount++
+	s.lastSaveAt = now
+	if project == "" {
+		return
+	}
+	a.expireProjectFreshness(now)
+	a.projectLastSaveAt[project] = now
+}
+
+// RecordProjectSave records a successful save for project-level nudge freshness.
+// It does not affect per-session activity scores.
+func (a *SessionActivity) RecordProjectSave(project string) {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	a.expireProjectFreshness(now)
+	a.projectLastSaveAt[project] = now
 }
 
 // RecordPrompt stores the latest user prompt observed for a session. MCP does
@@ -176,13 +246,28 @@ func (a *SessionActivity) CurrentPrompt(sessionID, project string) (string, bool
 func (a *SessionActivity) NudgeIfNeeded(sessionID string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.nudgeIfNeeded(sessionID, "")
+}
+
+// NudgeIfNeededForProject returns a nudge using session activity unless a
+// recent successful save exists for the project.
+func (a *SessionActivity) NudgeIfNeededForProject(sessionID, project string) string {
+	project = strings.TrimSpace(project)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.nudgeIfNeeded(sessionID, project)
+}
+
+func (a *SessionActivity) nudgeIfNeeded(sessionID, project string) string {
+	now := a.now()
+	if project != "" {
+		a.expireProjectFreshness(now)
+	}
 
 	s, ok := a.sessions[sessionID]
 	if !ok {
 		return ""
 	}
-
-	now := a.now()
 
 	// Don't nudge if session is too young
 	if now.Sub(s.startedAt) < a.nudgeAfter {
@@ -205,8 +290,22 @@ func (a *SessionActivity) NudgeIfNeeded(sessionID string) string {
 		return ""
 	}
 
+	if project != "" {
+		if _, ok := a.projectLastSaveAt[project]; ok {
+			return ""
+		}
+	}
+
 	minutes := int(elapsed.Minutes())
 	return fmt.Sprintf("\n\n⚠️ No mem_save calls for this project in %d minutes. Did you make any decisions, fix bugs, or discover something worth persisting?", minutes)
+}
+
+func (a *SessionActivity) expireProjectFreshness(now time.Time) {
+	for project, savedAt := range a.projectLastSaveAt {
+		if !now.Before(savedAt.Add(a.nudgeAfter)) {
+			delete(a.projectLastSaveAt, project)
+		}
+	}
 }
 
 // ActivityScore returns a formatted activity score string for the session.

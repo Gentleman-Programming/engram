@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 const (
@@ -15,6 +17,117 @@ const (
 )
 
 type RepairMode string
+
+// repairImplementations is the authoritative registry of diagnostic checks
+// that have a doctor repair implementation. Keep the command-specific sync
+// mutation repair here with the BuildRepairPlan implementations so callers
+// cannot advertise a separate, hand-maintained support list.
+var repairImplementations = map[string]struct{}{
+	CheckSessionProjectDirectoryMismatch:  {},
+	CheckManualSessionNameProjectMismatch: {},
+	CheckInvalidSessionIdentity:           {},
+	CheckOrphanedObservationSession:       {},
+	CheckOrphanedPendingRelations:         {},
+	CheckSyncMutationRequiredFields:       {},
+	CheckSyncTargetClosedSpace:            {},
+}
+
+// RepairableCodes returns the registered repair implementations in stable
+// order for command validation and help output.
+func RepairableCodes() []string {
+	codes := make([]string, 0, len(repairImplementations))
+	for code := range repairImplementations {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	return codes
+}
+
+// IsRepairableCode reports whether a diagnostic check has a repair
+// implementation.
+func IsRepairableCode(code string) bool {
+	_, ok := repairImplementations[strings.TrimSpace(code)]
+	return ok
+}
+
+type syncMutationRepairStore interface {
+	RepairPendingSessionProjects(string, bool) ([]store.SyncMutationProjectRepairAction, error)
+	RepairPendingSessionDirectories(string, bool) ([]store.SyncMutationDirectoryRepairAction, error)
+	RepairObservationMutationTitles(string, bool) (store.SyncMutationTitleRepairReport, error)
+	SupersedeUnenrolledLegacyMutations(string, string, bool) (store.SyncMutationSupersedeReport, error)
+	QuarantineIrreparableSyncMutations(string, string, bool) (store.SyncMutationQuarantineReport, error)
+	RepairObservationSourceTitles(string, bool) (store.ObservationSourceTitleRepairReport, error)
+}
+
+// SyncMutationRepairResult aggregates the existing store repair results.
+// The caller owns presentation; store owns each repair's data and backup behavior.
+type SyncMutationRepairResult struct {
+	Quarantine             store.SyncMutationQuarantineReport
+	ProjectRepairs         []store.SyncMutationProjectRepairAction
+	DirectoryRepairs       []store.SyncMutationDirectoryRepairAction
+	Repairs                []store.SyncMutationTitleRepairAction
+	Superseded             []store.SyncMutationSupersedeAction
+	SourceRepairs          []store.ObservationSourceTitleRepairAction
+	SourceRepairBackupPath string
+	SourceUnrepairable     []store.ObservationSourceUnrepairable
+}
+
+// RepairSyncMutationRequiredFields runs the session-project repair and existing repairs in order.
+// Errors stop later repairs without rolling back earlier store effects.
+func RepairSyncMutationRequiredFields(s syncMutationRepairStore, project string, mode RepairMode) (SyncMutationRepairResult, error) {
+	apply := mode == RepairModeApply
+	projectRepairs, err := s.RepairPendingSessionProjects(project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	directoryRepairs, err := s.RepairPendingSessionDirectories(project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	repairs, err := s.RepairObservationMutationTitles(project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	superseded, err := s.SupersedeUnenrolledLegacyMutations(store.DefaultSyncTargetKey, project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	report, err := s.QuarantineIrreparableSyncMutations(store.DefaultSyncTargetKey, project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	if !apply {
+		handledSeqs := make(map[int64]struct{}, len(repairs.Actions)+len(superseded.Actions)+len(directoryRepairs))
+		for _, action := range directoryRepairs {
+			handledSeqs[action.Seq] = struct{}{}
+		}
+		for _, action := range repairs.Actions {
+			handledSeqs[action.Seq] = struct{}{}
+		}
+		for _, action := range superseded.Actions {
+			handledSeqs[action.Seq] = struct{}{}
+		}
+		remaining := report.Actions[:0]
+		for _, action := range report.Actions {
+			if _, handled := handledSeqs[action.Seq]; !handled {
+				remaining = append(remaining, action)
+			}
+		}
+		report.Actions = remaining
+	}
+	sourceRepairs, err := s.RepairObservationSourceTitles(project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	if apply {
+		report.Applied = len(projectRepairs) > 0 || len(directoryRepairs) > 0 || len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(superseded.Actions) > 0 || len(sourceRepairs.Actions) > 0
+	}
+	return SyncMutationRepairResult{
+		Quarantine: report, ProjectRepairs: projectRepairs, DirectoryRepairs: directoryRepairs, Repairs: repairs.Actions,
+		Superseded: superseded.Actions, SourceRepairs: sourceRepairs.Actions,
+		SourceRepairBackupPath: sourceRepairs.BackupPath, SourceUnrepairable: sourceRepairs.Unrepairable,
+	}, nil
+}
 
 type ProjectReclassifyAction struct {
 	SessionID      string `json:"session_id"`
@@ -32,23 +145,44 @@ type RepairSkip struct {
 }
 
 type RepairCounts struct {
-	SessionsPlanned     int64 `json:"sessions_planned"`
-	ObservationsPlanned int64 `json:"observations_planned"`
-	PromptsPlanned      int64 `json:"prompts_planned"`
-	SessionsApplied     int64 `json:"sessions_applied"`
-	ObservationsApplied int64 `json:"observations_applied"`
-	PromptsApplied      int64 `json:"prompts_applied"`
+	SessionsPlanned           int64 `json:"sessions_planned"`
+	ObservationsPlanned       int64 `json:"observations_planned"`
+	PromptsPlanned            int64 `json:"prompts_planned"`
+	SessionsApplied           int64 `json:"sessions_applied"`
+	ObservationsApplied       int64 `json:"observations_applied"`
+	PromptsApplied            int64 `json:"prompts_applied"`
+	CorrectedMutationsPlanned int64 `json:"corrected_mutations_planned"`
+	CorrectedMutationsApplied int64 `json:"corrected_mutations_applied"`
+	RelationsPlanned          int64 `json:"relations_planned"`
+	RelationsApplied          int64 `json:"relations_applied"`
+}
+
+// SyncTargetCleanupAction identifies one sync target doctor can remove without
+// deleting its journal payloads.
+type SyncTargetCleanupAction struct {
+	TargetKey           string `json:"target_key"`
+	RetargetedMutations int64  `json:"retargeted_mutations"`
+	RetainedMutations   int64  `json:"retained_mutations"`
+	StateRemoved        bool   `json:"state_removed"`
 }
 
 type RepairPlan struct {
-	Project    string                    `json:"project"`
-	Check      string                    `json:"check"`
-	Mode       RepairMode                `json:"mode"`
-	Status     string                    `json:"status"`
-	Actions    []ProjectReclassifyAction `json:"actions"`
-	Skipped    []RepairSkip              `json:"skipped,omitempty"`
-	Counts     RepairCounts              `json:"counts"`
-	BackupPath string                    `json:"backup_path,omitempty"`
+	Project             string                             `json:"project"`
+	Check               string                             `json:"check"`
+	Mode                RepairMode                         `json:"mode"`
+	Status              string                             `json:"status"`
+	Actions             []ProjectReclassifyAction          `json:"actions"`
+	TargetActions       []SyncTargetCleanupAction          `json:"target_actions,omitempty"`
+	PlaceholderSessions []store.OrphanedSessionPlaceholder `json:"placeholder_sessions,omitempty"`
+	IdentityRepair      *store.SessionIdentityRepairPlan   `json:"identity_repair,omitempty"`
+	// OrphanedPendingRelations carries the fresh store evidence behind the
+	// orphaned_pending_relations repair: candidate rows plus the
+	// one-endpoint-missing and live pending counts the repair will not touch.
+	OrphanedPendingRelations *store.OrphanedPendingRelationEvidenceReport `json:"orphaned_pending_relations,omitempty"`
+	Blockers                 []RepairSkip                                 `json:"blockers,omitempty"`
+	Skipped                  []RepairSkip                                 `json:"skipped,omitempty"`
+	Counts                   RepairCounts                                 `json:"counts"`
+	BackupPath               string                                       `json:"backup_path,omitempty"`
 }
 
 func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check string, mode RepairMode) (RepairPlan, error) {
@@ -76,15 +210,101 @@ func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check stri
 		}
 	case CheckInvalidSessionIdentity:
 		planInvalidSessionIdentityRepair(&plan, report)
+	case CheckOrphanedObservationSession:
+		planOrphanedObservationSessionRepair(&plan, report)
+	case CheckOrphanedPendingRelations:
+		if err := planOrphanedPendingRelationsRepair(&plan, scope); err != nil {
+			return RepairPlan{}, err
+		}
+	case CheckSyncTargetClosedSpace:
+		if err := planForeignSyncTargetCleanup(&plan, scope); err != nil {
+			return RepairPlan{}, err
+		}
 	default:
 		return RepairPlan{}, fmt.Errorf("unsupported repair check %q", check)
 	}
 
+	if check == CheckSessionProjectDirectoryMismatch || check == CheckManualSessionNameProjectMismatch {
+		if err := vetoProjectAliasMoves(&plan, scope); err != nil {
+			return RepairPlan{}, err
+		}
+	}
 	dedupeAndSortRepairPlan(&plan)
-	if len(plan.Actions) == 0 {
+	if len(plan.Actions) == 0 && len(plan.TargetActions) == 0 && len(plan.PlaceholderSessions) == 0 && plan.OrphanedPendingRelations == nil {
 		plan.Status = "noop"
 	}
 	return plan, nil
+}
+
+// planOrphanedPendingRelationsRepair derives its candidates from fresh store
+// evidence instead of the doctor report: both-endpoints-absent rows belong to
+// no project, so the planner never scopes or filters them. Plan and dry-run
+// only report; apply revalidates the predicate again inside the store
+// transaction.
+func planOrphanedPendingRelationsRepair(plan *RepairPlan, scope Scope) error {
+	evidence, err := scope.Store.ListOrphanedPendingRelationEvidence()
+	if err != nil {
+		return err
+	}
+	if len(evidence.Candidates) == 0 {
+		return nil
+	}
+	plan.OrphanedPendingRelations = &evidence
+	plan.Counts.RelationsPlanned = int64(len(evidence.Candidates))
+	return nil
+}
+
+func planForeignSyncTargetCleanup(plan *RepairPlan, scope Scope) error {
+	cleanup, err := scope.Store.CleanupForeignSyncTargets(false)
+	if err != nil {
+		return err
+	}
+	for _, action := range cleanup.Actions {
+		plan.TargetActions = append(plan.TargetActions, SyncTargetCleanupAction{TargetKey: action.TargetKey, RetargetedMutations: action.RetargetedMutations, RetainedMutations: action.RetainedMutations, StateRemoved: action.StateRemoved})
+	}
+	return nil
+}
+
+// planOrphanedObservationSessionRepair turns orphaned-session findings into
+// placeholder actions, grouping evidence by session ID so a session referenced
+// from multiple normalized projects is skipped deterministically instead of
+// being attached to an arbitrary project.
+func planOrphanedObservationSessionRepair(plan *RepairPlan, report Report) {
+	candidates := map[string]store.OrphanedSessionPlaceholder{}
+	ambiguous := map[string]bool{}
+	for _, check := range report.Checks {
+		for _, finding := range check.Findings {
+			if finding.ReasonCode != CheckOrphanedObservationSession {
+				continue
+			}
+			var evidence store.OrphanedObservationSessionEvidence
+			if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+				plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: "invalid_doctor_evidence", Message: err.Error()})
+				continue
+			}
+			project := normalizeProjectName(evidence.Project)
+			if strings.TrimSpace(evidence.SessionID) == "" || project == "" || strings.TrimSpace(evidence.FirstObservedAt) == "" {
+				plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: evidence.SessionID, ReasonCode: "invalid_orphaned_session_evidence", Message: "orphaned session repair requires a non-blank session ID, project, and first observation timestamp"})
+				continue
+			}
+			candidate := store.OrphanedSessionPlaceholder{SessionID: evidence.SessionID, Project: project, ObservationCount: evidence.ObservationCount, StartedAt: evidence.FirstObservedAt}
+			if existing, found := candidates[candidate.SessionID]; found && existing.Project != candidate.Project {
+				ambiguous[candidate.SessionID] = true
+				continue
+			}
+			candidates[candidate.SessionID] = candidate
+		}
+	}
+	for sessionID, candidate := range candidates {
+		if ambiguous[sessionID] {
+			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: sessionID, ReasonCode: "ambiguous_orphaned_session_project", Message: "the same missing session ID is referenced by multiple projects"})
+			continue
+		}
+		plan.PlaceholderSessions = append(plan.PlaceholderSessions, candidate)
+	}
+	sort.Slice(plan.PlaceholderSessions, func(i, j int) bool {
+		return plan.PlaceholderSessions[i].SessionID < plan.PlaceholderSessions[j].SessionID
+	})
 }
 
 func planInvalidSessionIdentityRepair(plan *RepairPlan, report Report) {
@@ -92,9 +312,15 @@ func planInvalidSessionIdentityRepair(plan *RepairPlan, report Report) {
 		for _, finding := range check.Findings {
 			switch finding.ReasonCode {
 			case CheckInvalidSessionIdentity:
+				var evidence store.InvalidSessionIdentityEvidence
+				if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+					plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: "invalid_doctor_evidence", Message: err.Error()})
+					continue
+				}
 				plan.Skipped = append(plan.Skipped, RepairSkip{
+					SessionID:  evidence.SessionID,
 					ReasonCode: "cannot_repair_without_explicit_canonical_session_id",
-					Message:    "cannot repair without explicit canonical session ID; no supported repair input exists",
+					Message:    "supply --replacement-id with a valid unused canonical session ID to plan this local repair",
 				})
 			case ReasonQuarantinedPulledSessionIdentity:
 				// The pull already skipped this mutation and advanced its
@@ -107,6 +333,89 @@ func planInvalidSessionIdentityRepair(plan *RepairPlan, report Report) {
 			}
 		}
 	}
+}
+
+// PlanSessionIdentityReplacement selects exactly one diagnostic source and
+// delegates collision and journal safety checks to the store's read-only plan.
+// An explicit source selector distinguishes the empty ID from no selection.
+func PlanSessionIdentityReplacement(scope Scope, report Report, plan RepairPlan, sourceID string, sourceSelected bool, replacementID string) RepairPlan {
+	var sources []string
+	for _, check := range report.Checks {
+		for _, finding := range check.Findings {
+			if finding.ReasonCode != CheckInvalidSessionIdentity {
+				continue
+			}
+			var evidence store.InvalidSessionIdentityEvidence
+			if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+				plan.Status = "blocked"
+				plan.Blockers = append(plan.Blockers, RepairSkip{ReasonCode: "invalid_doctor_evidence", Message: err.Error()})
+				return plan
+			}
+			if !sourceSelected || evidence.SessionID == sourceID {
+				sources = append(sources, evidence.SessionID)
+			}
+		}
+	}
+	if len(sources) != 1 {
+		plan.Status = "blocked"
+		plan.Blockers = append(plan.Blockers, RepairSkip{ReasonCode: "ambiguous_or_missing_source", Message: "select one exact source with --source-id (use --source-id '' for the empty identity)"})
+		return plan
+	}
+	// The selected source has an explicit replacement attempt, even if the
+	// store's safety checks block it. Keep guidance for unselected sources.
+	remaining := plan.Skipped[:0]
+	removed := false
+	for _, skipped := range plan.Skipped {
+		if !removed && skipped.ReasonCode == "cannot_repair_without_explicit_canonical_session_id" && skipped.SessionID == sources[0] {
+			removed = true
+			continue
+		}
+		remaining = append(remaining, skipped)
+	}
+	plan.Skipped = remaining
+	identity, err := scope.Store.PlanSessionIdentityRepair(sources[0], replacementID)
+	if err != nil {
+		plan.Status = "blocked"
+		plan.Blockers = append(plan.Blockers, RepairSkip{SessionID: sources[0], ReasonCode: "identity_repair_blocked", Message: err.Error()})
+		return plan
+	}
+	plan.IdentityRepair = &identity
+	plan.Counts.SessionsPlanned = 1
+	plan.Counts.ObservationsPlanned = identity.Observations
+	plan.Counts.PromptsPlanned = identity.Prompts
+	// Current state publishes one session mutation and one per surviving child.
+	// Retired historical journal rows are separate from corrected publications.
+	if identity.Enrolled {
+		plan.Counts.CorrectedMutationsPlanned = 1 + identity.Observations + identity.Prompts
+	}
+	return plan
+}
+
+// Re-read aliases and persisted directories even when the report predates an
+// alias change. This shared gate cannot create an action or select an owner.
+func vetoProjectAliasMoves(plan *RepairPlan, scope Scope) error {
+	sessions, err := scope.Store.ListDiagnosticSessions("")
+	if err != nil {
+		return err
+	}
+	directories := make(map[string]string, len(sessions))
+	for _, session := range sessions {
+		directories[session.ID] = session.Directory
+	}
+	actions := plan.Actions[:0]
+	for _, action := range plan.Actions {
+		aliases, err := sessionProjectAliases(scope, directories[action.SessionID])
+		if err != nil {
+			return err
+		}
+		if aliases.Conflict || ((aliases.KeyAlias != nil || aliases.CwdAlias != nil) && aliases.Project != action.ToProject) {
+			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: action.SessionID, ReasonCode: "project_alias_contradicts_reclassification", Message: "Local project aliases conflict with this move; review alias evidence. Aliases never authorize historical reclassification."})
+			continue
+		}
+		actions = append(actions, action)
+	}
+	plan.Actions = actions
+	return nil
 }
 
 func planDirectoryMismatchRepair(plan *RepairPlan, report Report) {
@@ -124,16 +433,16 @@ func planDirectoryMismatchRepair(plan *RepairPlan, report Report) {
 				continue
 			}
 			from := normalizeProjectName(ev.SessionProject)
-			to := normalizeProjectName(ev.DirectoryProject)
+			decision := decideSessionProjectAuthority(ev.SessionProject, "", false, DetectedProject{Project: ev.DirectoryProject, Source: ev.DirectoryProjectSource, Path: ev.DirectoryProjectPath})
 			if !isTrustedDirectoryEvidence(ev.DirectoryProjectSource) {
 				plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: ev.SessionID, ReasonCode: "untrusted_directory_evidence", Message: "directory evidence is not git_remote or git_root"})
 				continue
 			}
-			if ev.SessionID == "" || from == "" || to == "" || from == to || from != plan.Project {
+			if ev.SessionID == "" || from == "" || !decision.shouldRepairFromTrustedDirectory() || from == decision.repairTarget || from != plan.Project {
 				plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: ev.SessionID, ReasonCode: "invalid_reclassification_evidence", Message: "doctor evidence does not describe a supported project move"})
 				continue
 			}
-			plan.Actions = append(plan.Actions, ProjectReclassifyAction{SessionID: ev.SessionID, FromProject: from, ToProject: to, ReasonCode: finding.ReasonCode, EvidenceSource: ev.DirectoryProjectSource, EvidencePath: ev.DirectoryProjectPath})
+			plan.Actions = append(plan.Actions, ProjectReclassifyAction{SessionID: ev.SessionID, FromProject: from, ToProject: decision.repairTarget, ReasonCode: finding.ReasonCode, EvidenceSource: decision.repairEvidenceSource, EvidencePath: decision.repairEvidencePath})
 		}
 	}
 }
@@ -143,38 +452,41 @@ func planManualSessionRepair(plan *RepairPlan, scope Scope) error {
 	if err != nil {
 		return err
 	}
-	known := map[string]bool{}
-	byProject := make([]string, 0)
+	known := make(map[string]bool)
 	for _, session := range sessions {
 		project := normalizeProjectName(session.Project)
-		if project != "" && !known[project] {
+		if project != "" {
 			known[project] = true
-			byProject = append(byProject, project)
 		}
 	}
-	_ = byProject
+	detected := make(map[string]DetectedProject)
 	for _, session := range sessions {
 		from := normalizeProjectName(session.Project)
 		if from != plan.Project {
 			continue
 		}
-		name := strings.TrimSpace(session.Name)
-		if !strings.HasPrefix(name, "manual-save-") {
+		nameTarget := manualSessionNameTarget(session.Name)
+		if nameTarget == "" || from == nameTarget {
 			continue
 		}
-		to := normalizeProjectName(strings.TrimPrefix(name, "manual-save-"))
-		if to == "" || from == to {
+		_, knownManualTarget := knownManualSessionTarget(session.Name, known)
+		directoryProject, ok := detectSessionDirectoryProject(scope, detected, strings.TrimSpace(session.Directory))
+		if !ok {
+			directoryProject = DetectedProject{}
+		}
+		decision := decideSessionProjectAuthority(session.Project, nameTarget, knownManualTarget, directoryProject)
+		if decision.directoryBasenameCorroboratesPersisted {
+			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: session.ID, ReasonCode: "directory_basename_corroborates_persisted_project", Message: "directory basename corroborates the persisted project and cannot authorize a conflicting manual-name move"})
 			continue
 		}
-		if !known[to] {
+		if !knownManualTarget {
 			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: session.ID, ReasonCode: "manual_name_unknown_project", Message: "manual session suffix is not a known local project"})
 			continue
 		}
-		if detected, ok := detectSessionDirectoryProject(scope, map[string]DetectedProject{}, session.Directory); ok && isTrustedDirectoryEvidence(detected.Source) && normalizeProjectName(detected.Project) != to {
-			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: session.ID, ReasonCode: "trusted_directory_contradicts_manual_name", Message: "trusted directory evidence points at a different project"})
+		if !decision.shouldRepairFromManualName() || decision.repairTarget == from {
 			continue
 		}
-		plan.Actions = append(plan.Actions, ProjectReclassifyAction{SessionID: session.ID, FromProject: from, ToProject: to, ReasonCode: CheckManualSessionNameProjectMismatch})
+		plan.Actions = append(plan.Actions, ProjectReclassifyAction{SessionID: session.ID, FromProject: from, ToProject: decision.repairTarget, ReasonCode: CheckManualSessionNameProjectMismatch, EvidenceSource: decision.repairEvidenceSource, EvidencePath: decision.repairEvidencePath})
 	}
 	return nil
 }
@@ -199,6 +511,15 @@ func dedupeAndSortRepairPlan(plan *RepairPlan) {
 		plan.Actions = append(plan.Actions, action)
 	}
 	sort.Slice(plan.Actions, func(i, j int) bool { return plan.Actions[i].SessionID < plan.Actions[j].SessionID })
+	targets := map[string]SyncTargetCleanupAction{}
+	for _, action := range plan.TargetActions {
+		targets[action.TargetKey] = action
+	}
+	plan.TargetActions = plan.TargetActions[:0]
+	for _, action := range targets {
+		plan.TargetActions = append(plan.TargetActions, action)
+	}
+	sort.Slice(plan.TargetActions, func(i, j int) bool { return plan.TargetActions[i].TargetKey < plan.TargetActions[j].TargetKey })
 	sort.Slice(plan.Skipped, func(i, j int) bool {
 		if plan.Skipped[i].SessionID == plan.Skipped[j].SessionID {
 			return plan.Skipped[i].ReasonCode < plan.Skipped[j].ReasonCode

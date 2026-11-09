@@ -68,6 +68,79 @@ func BenchmarkScanProject_Page5000(b *testing.B) {
 		_ = scanPage(b, s, ScanOptions{Project: "scan-page"})
 	}
 }
+
+// scanUniquePageStore builds the unique-vocabulary worst case for the batched
+// scan: every observation title carries tokens that appear in no other
+// observation, so the page's distinct-term vocabulary is maximal and no
+// term's posting list is shared across sources.
+func scanUniquePageStore(tb testing.TB, count int) (*Store, []int64) {
+	tb.Helper()
+	cfg, err := DefaultConfig()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	cfg.DataDir = tb.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() { _ = s.Close() })
+	if err := s.CreateSession("scan-uniq-session", "scan-uniq", "/tmp/scan-uniq"); err != nil {
+		tb.Fatal(err)
+	}
+	ids := make([]int64, 0, count)
+	if err := s.withTx(func(tx *sql.Tx) error {
+		for i := 0; i < count; i++ {
+			result, err := tx.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at) VALUES (?, ?, 'decision', ?, ?, 'scan-uniq', 'project', ?, 1, 1, datetime('now'), datetime('now'))`,
+				fmt.Sprintf("scan-uniq-%04d", i), "scan-uniq-session",
+				fmt.Sprintf("uniq%04da uniq%04db uniq%04dc", i, i, i),
+				"scan benchmark body",
+				fmt.Sprintf("scan-uniq-hash-%04d", i))
+			if err != nil {
+				return err
+			}
+			id, err := result.LastInsertId()
+			if err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		return nil
+	}); err != nil {
+		tb.Fatal(err)
+	}
+	return s, ids
+}
+
+// BenchmarkScanProject_UniqueVocab5000 measures the batched scan on the
+// unique-vocabulary worst case (review finding R4 on PR #1017): a full
+// DefaultScanLimit page whose sources share no term, so Phase 1 issues one
+// single-phrase query per distinct term with no shared posting lists.
+func BenchmarkScanProject_UniqueVocab5000(b *testing.B) {
+	s, _ := scanUniquePageStore(b, scanPageBenchmarkObservations)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = scanPage(b, s, ScanOptions{Project: "scan-uniq"})
+	}
+}
+
+// BenchmarkScanLegacyRanking_UniqueVocab5000 measures the legacy per-source
+// ranking cost on the same unique-vocabulary corpus: one FindCandidates call
+// per inspected observation for a full page, the exact work ScanProject
+// performed before the batched path. Comparing it with
+// BenchmarkScanProject_UniqueVocab5000 bounds the worst-case tradeoff of the
+// batching change instead of relying on the repetitive-vocabulary shape alone.
+func BenchmarkScanLegacyRanking_UniqueVocab5000(b *testing.B) {
+	s, ids := scanUniquePageStore(b, scanPageBenchmarkObservations)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < DefaultScanLimit; j++ {
+			if _, err := s.FindCandidates(ids[j], CandidateOptions{Project: "scan-uniq", Scope: "project", Limit: scanCandidateLimit, SkipInsert: true}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
 func scanPage(tb testing.TB, s *Store, opts ScanOptions) ScanResult {
 	tb.Helper()
 	result, err := s.ScanProject(opts)

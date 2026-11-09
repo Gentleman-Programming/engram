@@ -16,7 +16,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -24,25 +26,26 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/syncguidance"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
-	"github.com/Gentleman-Programming/engram/v2/internal/obsidian"
-	"github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/server"
-	"github.com/Gentleman-Programming/engram/v2/internal/setup"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
-	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
-	"github.com/Gentleman-Programming/engram/v2/internal/tui"
-	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v3/internal/obsidian"
+	"github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/server"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
+	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v3/internal/tui"
+	versioncheck "github.com/Gentleman-Programming/engram/v3/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -62,31 +65,67 @@ func init() {
 }
 
 var (
-	storeNew      = store.New
-	newHTTPServer = server.New
-	startHTTP     = (*server.Server).Start
+	storeNew                   = store.New
+	storeDefaultConfig         = store.DefaultConfig
+	newHTTPServer              = server.New
+	startHTTP                  = (*server.Server).Start
+	serveGenerationInvalidated = (*server.Server).GenerationInvalidated
+	serveGenerationError       = (*store.Store).GenerationError
 
 	newMCPServer           = mcp.NewServer
 	newMCPServerWithTools  = mcp.NewServerWithTools
 	newMCPServerWithConfig = mcp.NewServerWithConfig
 	resolveMCPTools        = mcp.ResolveTools
-	serveMCP               = mcpserver.ServeStdio
+	serveMCP               = runMCPStdio
 
-	// detectProject is injectable for testing; wraps project.DetectProject.
-	detectProject = project.DetectProject
+	// mcpStdioInput is the raw stdin source for the MCP stdio transport. It is
+	// injectable for testing so tests can drive EOF-driven shutdown with an
+	// os.Pipe instead of the real stdin. runMCPStdio wraps it in exactly one
+	// eofShutdownReader; nothing else may read from it.
+	mcpStdioInput io.Reader = os.Stdin
+
+	// mcpStdioStopAutosync publishes cmdMCP's once-guarded autosync stop to
+	// runMCPStdio so the graceful shutdown sequence releases the sync lease
+	// when the parent closes the stdio pipe or SIGINT/SIGTERM arrives.
+	// It is read once when runMCPStdio starts serving. The fixed serveMCP
+	// signature leaves no other way to hand the stop closure over.
+	mcpStdioStopAutosync = func() {}
+
+	mcpStdioEOFCancelAfter = 5 * time.Second
+
+	// listenMCPStdio runs the mcp-go stdio transport on the given streams.
+	// Injectable for testing: mcp-go's StdioServer.Listen registers a
+	// package-singleton stdio session, so tests keep it to a single real
+	// invocation per test process.
+	listenMCPStdio = func(ctx context.Context, server *mcpserver.MCPServer, stdin io.Reader, stdout io.Writer) error {
+		return mcpserver.NewStdioServer(server).Listen(ctx, stdin, stdout)
+	}
+
+	// Sync-status inspection must not establish a project identity.
+	detectProject = func(dir string) string {
+		res := project.DetectProjectFullWithOptions(dir, project.DetectionOptions{InspectOnly: true})
+		if res.Error != nil || res.Source == project.SourceUnboundGit {
+			return ""
+		}
+		return res.Project
+	}
 	// detectProjectFull is injectable for commands that require unambiguous identity.
-	detectProjectFull = project.DetectProjectFull
+	detectProjectFull = project.DetectProjectFullWithOptions
 
 	newTUIModel   = func(s *store.Store) tui.Model { return tui.New(s, version) }
 	newTeaProgram = tea.NewProgram
 	runTeaProgram = (*tea.Program).Run
 
-	checkForUpdates = versioncheck.CheckLatest
+	checkForUpdates         = versioncheck.CheckLatest
+	migrateOrphanedDatabase = migrateOrphanedDB
 
-	setupSupportedAgents        = setup.SupportedAgents
-	setupInstallAgent           = setup.Install
-	setupAddClaudeCodeAllowlist = setup.AddClaudeCodeAllowlist
-	scanInputLine               = fmt.Scanln
+	setupSupportedAgents                   = setup.SupportedAgents
+	setupInstallAgent                      = setup.Install
+	setupAddClaudeCodeAllowlist            = setup.AddClaudeCodeAllowlist
+	setupAddClaudeCodeMemoryWriteAllowlist = setup.AddClaudeCodeMemoryWriteAllowlist
+	setupEnsureClaudeCodeUserMCP           = setup.EnsureClaudeCodeUserMCP
+	setupVerifyClaudeCodeSlim              = setup.VerifyClaudeCodeSlimCapability
+	scanInputLine                          = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
@@ -116,13 +155,20 @@ var (
 		}
 		return runner.RunAll(ctx, scope)
 	}
+	buildRepairPlan = diagnostic.BuildRepairPlan
 
 	syncStatus = func(sy *engramsync.Syncer) (localChunks int, remoteChunks int, pendingImport int, err error) {
 		return sy.Status()
 	}
-	syncImport = func(sy *engramsync.Syncer) (*engramsync.ImportResult, error) { return sy.Import() }
+	syncImport             = func(sy *engramsync.Syncer) (*engramsync.ImportResult, error) { return sy.Import() }
+	syncImportWithProgress = func(sy *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+		return sy.ImportWithProgress(report)
+	}
 	syncExport = func(sy *engramsync.Syncer, createdBy, project string) (*engramsync.SyncResult, error) {
 		return sy.Export(createdBy, project)
+	}
+	syncExportWithPrompts = func(sy *engramsync.Syncer, createdBy, project string) (*engramsync.SyncResult, error) {
+		return sy.ExportWithOptions(createdBy, project, engramsync.GitExportOptions{IncludePrompts: true})
 	}
 	newCloudAutosyncManager = func(s *store.Store, _ any) cloudAutosyncManager {
 		mgr := autosync.New(s, nil, autosync.DefaultConfig())
@@ -137,6 +183,9 @@ var (
 	}
 
 	exitFunc = os.Exit
+
+	notifySignals = signal.Notify
+	stopSignals   = signal.Stop
 
 	stdinScanner = func() *bufio.Scanner { return bufio.NewScanner(os.Stdin) }
 	userHomeDir  = os.UserHomeDir
@@ -156,7 +205,9 @@ var (
 // Explicit and process-level values must already exist; cwd detection remains
 // valid before a repository has written its first memory.
 func resolveCLIProject(s *store.Store, explicit string, requireKnownOverrides bool) (string, error) {
-	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, detectProjectFull)
+	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, func(dir string) project.DetectionResult {
+		return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+	})
 }
 
 func resolveCLIProjectScope(s *store.Store, explicit string, all, requireKnownOverrides bool) (string, error) {
@@ -201,10 +252,6 @@ func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnown
 	return result.Project, nil
 }
 
-func detectProjectForSync(dir string) project.DetectionResult {
-	return detectProjectFull(dir)
-}
-
 type cloudSyncStatus struct {
 	Phase               string
 	LastError           string
@@ -233,12 +280,28 @@ type startableAutosyncManager interface {
 	Stop()
 }
 
+// autosyncStartHandshake is the optional capability that starts the autosync
+// run loop through a startup handshake: Start launches Run in a goroutine and
+// guarantees the manager signals readiness only once the run loop registered
+// with its wait group, so a subsequent Stop cannot race the not-yet-scheduled
+// goroutine when the stdio pipe closes immediately after startup (CodeRabbit
+// PR #1189).
+type autosyncStartHandshake interface {
+	Start(context.Context)
+}
+
 type autosyncManagerAdapter struct {
 	manager *autosync.Manager
 }
 
 func (a autosyncManagerAdapter) Run(ctx context.Context) {
 	a.manager.Run(ctx)
+}
+
+// Start forwards to the wrapped manager's handshake start, satisfying the
+// optional autosyncStartHandshake capability used by tryStartAutosync.
+func (a autosyncManagerAdapter) Start(ctx context.Context) {
+	a.manager.Start(ctx)
 }
 
 func (a autosyncManagerAdapter) NotifyDirty() {
@@ -262,6 +325,14 @@ func (a autosyncManagerAdapter) Status() cloudSyncStatus {
 // This bridges the type gap between packages without creating a circular import.
 type mutationTransportAdapter struct {
 	remote *remote.MutationTransport
+}
+
+func (a *mutationTransportAdapter) RegisterSessionAuthority(sessionID, ownerProject string) error {
+	return a.remote.RegisterSessionAuthority(sessionID, ownerProject)
+}
+
+func (a *mutationTransportAdapter) ClaimPromptPair(sessionID, inboxID, syncID, ownerProject, promptProject string) error {
+	return a.remote.ClaimPromptPair(sessionID, inboxID, syncID, ownerProject, promptProject)
 }
 
 func (a *mutationTransportAdapter) PushMutations(entries []autosync.MutationEntry) (*autosync.PushMutationsResult, error) {
@@ -638,6 +709,18 @@ func cloudSyncFailureMessage(project string, syncErr error) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "migrate-copy" {
+		if code := runMigrateCopy(os.Args[2:], os.Stdout, os.Stderr); code != 0 {
+			exitFunc(code)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "compatibility" {
+		if code := runCompatibility(os.Args[2:], os.Stdout, os.Stderr); code != 0 {
+			exitFunc(code)
+		}
+		return
+	}
 	if len(os.Args) < 2 {
 		printUsage()
 		exitFunc(1)
@@ -651,6 +734,45 @@ func main() {
 		return
 	}
 
+	// Help for backup commands must not resolve configuration or open a store.
+	if os.Args[1] == "export" || os.Args[1] == "import" {
+		for _, arg := range os.Args[2:] {
+			if arg != "--help" {
+				continue
+			}
+			if os.Args[1] == "export" {
+				fmt.Println("Usage: engram export [file.json] [--project NAME | --all]\n\nOptions:\n  --project NAME  Export one project (default: current project)\n  --all           Export every project\n  --help          Show this help")
+			} else {
+				fmt.Println("Usage: engram import <file.json>\n\nOptions:\n  --help          Show this help")
+			}
+			return
+		}
+	}
+
+	if os.Args[1] == "serve-background" {
+		if err := cmdServeBackground(os.Args[2:]); err != nil {
+			fatal(err)
+		}
+		return
+	}
+
+	// Reject Git-only prompt options before startup can touch local or remote state.
+	if os.Args[1] == "sync" {
+		if err := validateSyncPromptPrivacy(os.Args[2:], envBool("ENGRAM_CLOUD_SYNC")); err != nil {
+			fatal(err)
+			return
+		}
+	}
+
+	// Reject unsupported export limits before any startup side effects.
+	if os.Args[1] == "obsidian-export" {
+		if err := validateObsidianExportLimit(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s\n", err)
+			exitFunc(1)
+			return
+		}
+	}
+
 	if shouldCheckForUpdates(os.Args[1:]) {
 		printUpdateCheckResult(checkForUpdates(version))
 	}
@@ -658,7 +780,13 @@ func main() {
 		return
 	}
 
-	cfg, cfgErr := store.DefaultConfig()
+	if os.Args[1] == "serve" {
+		if _, err := validateSessionOwned(os.Args[2:]); err != nil {
+			fatal(err)
+			return
+		}
+	}
+	cfg, cfgErr := storeDefaultConfig()
 	if cfgErr != nil {
 		// Fallback: try to resolve home directory from environment variables
 		// that os.UserHomeDir() might have missed (e.g. MCP subprocesses on
@@ -671,18 +799,60 @@ func main() {
 		}
 	}
 
-	// Allow overriding data dir via env
-	if dir := os.Getenv("ENGRAM_DATA_DIR"); dir != "" {
+	// Allow overriding data dir via env. Blank values retain the resolved default.
+	if dir := os.Getenv("ENGRAM_DATA_DIR"); strings.TrimSpace(dir) != "" {
 		cfg.DataDir = dir
+	}
+
+	if os.Args[1] == "instance-id" {
+		id, err := store.EnsureInstanceID(cfg.DataDir)
+		if err != nil {
+			fatal(err)
+			return
+		}
+		fmt.Println(id)
+		return
+	}
+
+	if usesLocalSQLite(os.Args[1:]) {
+		if err := prepareSQLiteTemp(cfg.DataDir); err != nil {
+			fatal(err)
+			return
+		}
 	}
 
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
-	migrateOrphanedDB(cfg.DataDir)
+	owned, _ := validateSessionOwned(os.Args[2:])
+	if os.Args[1] != "serve" || !owned {
+		migrateOrphanedDatabase(cfg.DataDir)
+	}
 
 	switch os.Args[1] {
 	case "serve":
-		cmdServe(cfg)
+		if err := cmdServe(cfg); err != nil {
+			fatal(err)
+		}
+	case "run":
+		if err := cmdRun(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "ps":
+		if err := cmdPs(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "stop":
+		if err := cmdStop(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "logs":
+		if err := cmdLogs(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "restart":
+		if err := cmdRestart(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
 	case "mcp":
 		cmdMCP(cfg)
 	case "tui":
@@ -704,7 +874,9 @@ func main() {
 	case "stats":
 		cmdStats(cfg)
 	case "export":
-		cmdExport(cfg)
+		if _, err := cmdExport(cfg); err != nil {
+			fatal(err)
+		}
 	case "import":
 		cmdImport(cfg)
 	case "sync":
@@ -736,7 +908,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode", "tui", "version", "--version", "-v", "help", "--help", "-h":
+	case "mcp", "serve", "run", "ps", "stop", "logs", "restart", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -763,6 +935,12 @@ func handleConfigFreeCommand(args []string) bool {
 				return true
 			}
 		}
+	case "init":
+		cmdInit()
+		return true
+	case "hook":
+		cmdHook(args[1:])
+		return true
 	}
 	return false
 }
@@ -776,27 +954,68 @@ func printUpdateCheckResult(result versioncheck.CheckResult) {
 
 // ─── Commands ────────────────────────────────────────────────────────────────
 
-func cmdServe(cfg store.Config) {
-	port := 7437 // "ENGR" on phone keypad vibes
-	if p := os.Getenv("ENGRAM_PORT"); p != "" {
-		if n, err := strconv.Atoi(p); err == nil {
-			port = n
-		}
-	}
-	// Allow: engram serve 8080
-	if len(os.Args) > 2 {
-		if n, err := strconv.Atoi(os.Args[2]); err == nil {
-			port = n
-		}
-	}
-
-	s, err := storeNew(cfg)
+func cmdServe(cfg store.Config) error {
+	options, err := resolveServeOptions(os.Args[2:])
 	if err != nil {
-		fatal(err)
+		return err
+	}
+	return serveWith(cfg, options)
+}
+
+// serveWith is the shared serving body behind `engram serve` and `engram run`
+// (foreground mode). It owns the store, server, autosync, and signal loop.
+func serveWith(cfg store.Config, options serveOptions) error {
+	var err error
+
+	// Owned EOF cancels startup lock waits as well as serving. Construction
+	// stays synchronous so cleanup cannot race abandoned live store work.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var parentEOF <-chan struct{}
+	var s *store.Store
+	if options.sessionOwned {
+		parentEOF = watchOwnedParent(os.Stdin, cancel)
+		s, err = store.NewWithContext(ctx, cfg)
+	} else {
+		s, err = storeNew(cfg)
+	}
+	if err != nil {
+		if options.sessionOwned && errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
 	}
 	defer s.Close()
+	if options.sessionOwned && ctx.Err() != nil {
+		return nil
+	}
 
-	srv := newHTTPServer(s, port)
+	srv := newHTTPServer(s, options.port)
+	if options.sessionOwned {
+		srv.SetSessionOwnedToken(os.Getenv("ENGRAM_TOKEN"))
+		srv.SetOnReady(func(addr net.Addr) error {
+			select {
+			case <-parentEOF:
+				return fmt.Errorf("session-owned parent closed before readiness")
+			default:
+			}
+			return emitOwnedReadiness(addr, s.InstanceID())
+		})
+	}
+	// Daemon child mode (`engram run -d`): publish the pidfile and the parent
+	// handshake record once the listener is bound; errors abort serving so a
+	// half-started daemon never reports success. The start token is also
+	// reported on /health so pidfile owners can confirm this daemon's
+	// identity before signaling its pid.
+	if readyFile, readyToken := os.Getenv("ENGRAM_RUN_READY_FILE"), os.Getenv("ENGRAM_RUN_READY_TOKEN"); readyFile != "" && readyToken != "" && !options.sessionOwned {
+		dataDir := cfg.DataDir
+		srv.SetDaemonToken(readyToken)
+		srv.SetOnReady(func(addr net.Addr) error {
+			return writeRunReadiness(dataDir, readyFile, readyToken, addr)
+		})
+	}
+	srv.SetSocketPath(options.socketPath)
+	srv.SetVersion(version)
 
 	// Wire the semantic runner factory and prompt builder for POST /conflicts/scan.
 	// Both live in cmd/engram so internal/server avoids a direct dependency on internal/llm.
@@ -804,10 +1023,6 @@ func cmdServe(cfg store.Config) {
 	srv.SetPromptBuilder(func(a, b store.ObservationSnippet) string {
 		return llmBuildPrompt(a, b)
 	})
-
-	// Graceful shutdown context — cancelled on SIGINT/SIGTERM.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
 	// BW7: tryStartAutosync returns (status provider, stop func) so the signal
@@ -821,22 +1036,113 @@ func cmdServe(cfg store.Config) {
 		srv.SetSyncStatus(fallback)
 	}
 
-	// Graceful shutdown on SIGINT/SIGTERM.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		log.Println("[engram] shutting down...")
+	// The process owner handles notification, never the request goroutine.
+	// All exit paths stop background work before closing the store.
+	stopBackground := func() {
 		cancel()
 		if mgrStop != nil {
-			mgrStop() // BW7: wait for Manager to release lease before exiting
+			mgrStop()
+			mgrStop = nil
 		}
-		exitFunc(0)
-	}()
-
-	if err := startHTTP(srv); err != nil {
-		fatal(err)
 	}
+	defer func() {
+		stopBackground()
+		_ = srv.Close()
+	}()
+	sigCh := make(chan os.Signal, 1)
+	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals(sigCh)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- startHTTP(srv) }()
+	var terminal, serveErr error
+	select {
+	case <-serveGenerationInvalidated(srv):
+		terminal = store.ErrDatabaseGenerationChanged
+	case <-parentEOF:
+		log.Println("[engram] session owner disconnected; shutting down...")
+	case <-sigCh:
+		log.Println("[engram] shutting down...")
+	case serveErr = <-serveResult:
+		// Preserve the serving result while sharing cleanup and the late generation check.
+	}
+	stopBackground()
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	_ = srv.Shutdown(drainCtx) // expiry forces active connections closed
+	// Forced connection closure does not join handlers: the store may already be
+	// sticky-invalidated before middleware can notify us. Read only that observed
+	// state, without probing the filesystem or waiting for a handler to return.
+	if errors.Is(serveGenerationError(s), store.ErrDatabaseGenerationChanged) {
+		terminal = store.ErrDatabaseGenerationChanged
+	}
+	// Also preserve notifications that arrived during background cleanup or draining.
+	if terminal == nil {
+		select {
+		case <-serveGenerationInvalidated(srv):
+			terminal = store.ErrDatabaseGenerationChanged
+		default:
+		}
+	}
+	if terminal != nil {
+		log.Println("[engram] database generation changed; stopping server; restart Engram")
+	}
+	if terminal != nil {
+		return terminal
+	}
+	return serveErr
+}
+
+type serveOptions struct {
+	sessionOwned bool
+	port         int
+	socketPath   string
+}
+
+func resolveServeOptions(args []string) (serveOptions, error) {
+	owned, err := validateSessionOwned(args)
+	if err != nil {
+		return serveOptions{}, err
+	}
+	if owned {
+		return serveOptions{sessionOwned: true, port: 0}, nil
+	}
+	options := serveOptions{port: 7437, socketPath: strings.TrimSpace(os.Getenv("ENGRAM_SOCKET"))}
+	portExplicit := false
+	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
+		if n, err := strconv.ParseUint(p, 10, 16); err == nil && n > 0 {
+			options.port = int(n)
+			portExplicit = true
+		}
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--socket":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return serveOptions{}, fmt.Errorf("--socket requires a path")
+			}
+			i++
+			options.socketPath = strings.TrimSpace(args[i])
+		case strings.HasPrefix(arg, "--socket="):
+			options.socketPath = strings.TrimSpace(strings.TrimPrefix(arg, "--socket="))
+			if options.socketPath == "" {
+				return serveOptions{}, fmt.Errorf("--socket requires a path")
+			}
+		default:
+			if n, err := strconv.Atoi(arg); err == nil {
+				options.port = n
+				portExplicit = true
+			} else {
+				return serveOptions{}, fmt.Errorf("unknown serve argument: %s", arg)
+			}
+		}
+	}
+
+	if options.socketPath != "" && portExplicit {
+		return serveOptions{}, fmt.Errorf("socket transport cannot be combined with an explicit TCP port")
+	}
+	return options, nil
 }
 
 func resolveServeSyncStatusProject() string {
@@ -896,12 +1202,28 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 	// so tests can stub the factory and avoid real goroutine/network side effects.
 	mgr := newAutosyncManager(s, transport, mgrCfg)
 
-	go mgr.Run(ctx)
+	// Startup handshake (CodeRabbit PR #1189): when the manager supports the
+	// Start handshake, launch through it so Stop always waits until the run
+	// loop registered with its wait group — an immediate-EOF shutdown can
+	// otherwise return before the goroutine is even scheduled. Deterministic
+	// test fakes without Start keep the plain goroutine launch.
+	if starter, ok := mgr.(autosyncStartHandshake); ok {
+		starter.Start(ctx)
+	} else {
+		go mgr.Run(ctx)
+	}
 	log.Printf("[autosync] started (server=%s)", serverURL)
 	return mgr, mgr.Stop
 }
 
 func cmdMCP(cfg store.Config) {
+	// On Windows, arrange parent-owned process lifetime before opening any
+	// resources. Setup is best-effort to preserve existing MCP startup behavior
+	// when parent wrappers, nested jobs, or process permissions reject it.
+	if err := retainMCPProcessUntilParentExit(); err != nil {
+		log.Printf("[mcp] WARNING: parent-lifetime job setup unavailable: %v", err)
+	}
+
 	toolsFilter := ""
 	// The --project flag below is the explicit process argument of the shared
 	// override rule; project.ProcessOverride supplies the ENGRAM_PROJECT step.
@@ -940,26 +1262,146 @@ func cmdMCP(cfg store.Config) {
 	// startup fatal when cloud config is missing or invalid.
 	ctx, cancel := context.WithCancel(context.Background())
 	_, mgrStop := tryStartAutosync(ctx, s, cfg)
-	autosyncStopped := false
+	// stopAutosync is invoked concurrently: cmdMCP's deferred call runs on the
+	// main goroutine while the stdio EOF unwind hook may call it from the
+	// MCP reader goroutine. sync.Once provides the required synchronization.
+	var stopAutosyncOnce sync.Once
 	stopAutosync := func() {
-		if autosyncStopped {
-			return
-		}
-		autosyncStopped = true
-		cancel()
-		if mgrStop != nil {
-			mgrStop()
-		}
+		stopAutosyncOnce.Do(func() {
+			cancel()
+			if mgrStop != nil {
+				mgrStop()
+			}
+		})
 	}
 	defer stopAutosync()
 
-	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
+	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride, Version: version}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
+
+	// Publish the once-guarded autosync stop to the stdio transport so an
+	// EOF- or signal-initiated unwind (issue #886) releases the sync lease
+	// before Listen returns.
+	mcpStdioStopAutosync = stopAutosync
 
 	if err := serveMCP(mcpSrv); err != nil {
 		stopAutosync()
 		fatal(err)
+	}
+}
+
+// runMCPStdio serves server over stdio with engram-owned lifecycle handling.
+// It replaces mcp-go's ServeStdio (issue #886): when the parent closes its
+// end of the stdio pipe, EOF surfaces through eofShutdownReader, which starts
+// a bounded cancellation deadline while mcp-go drains queued tool calls. SIGINT and
+// SIGTERM still cancel the transport context. A signal-initiated shutdown
+// makes the transport return context.Canceled, which is translated to nil so
+// cmdMCP exits cleanly via its own defers instead of fatal.
+func runMCPStdio(server *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eofCancelTimer := time.AfterFunc(time.Hour, cancel)
+	eofCancelTimer.Stop()
+	var eofCancelOnce sync.Once
+	scheduleEOFCancel := func() {
+		eofCancelOnce.Do(func() { eofCancelTimer.Reset(mcpStdioEOFCancelAfter) })
+	}
+	defer eofCancelTimer.Stop()
+
+	// shutdown is the graceful sequence shared by the signal watcher and the
+	// return path; once-guarded so either trigger runs it exactly once.
+	var stopAutosyncOnce sync.Once
+	stopAutosync := func() {
+		stopAutosyncOnce.Do(mcpStdioStopAutosync)
+	}
+	defer stopAutosync()
+
+	// shutdownTransport is reserved for signal handling. EOF must reach
+	// Listen with ctx still active so its worker queue drains normally.
+	var shutdownTransportOnce sync.Once
+	shutdownTransport := func() {
+		shutdownTransportOnce.Do(func() {
+			cancel()
+			stopAutosync()
+		})
+	}
+
+	// Graceful shutdown on SIGINT/SIGTERM (mirrors cmdServe).
+	sigCh := make(chan os.Signal, 1)
+	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals(sigCh)
+	done := make(chan struct{})
+	watcherDone := make(chan struct{})
+	defer func() {
+		close(done)
+		// Closing done requests exit; join the watcher before returning so
+		// neither shutdown nor test cleanup can outlive its lifecycle owner.
+		<-watcherDone
+	}()
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-sigCh:
+			log.Println("[engram] shutting down...")
+			shutdownTransport()
+		case <-done:
+		}
+	}()
+
+	err := listenMCPStdio(ctx, server, &eofShutdownReader{inner: mcpStdioInput, onUnwind: scheduleEOFCancel}, os.Stdout)
+	if errors.Is(err, context.Canceled) {
+		// Signal-initiated shutdown is graceful: exit cleanly instead of fatal.
+		return nil
+	}
+	return err
+}
+
+// eofShutdownReader is the single reader between the MCP stdio transport and
+// the process stdin: the SDK's bufio.Reader sits on top of it, so no second
+// raw reader ever touches the stream. Bytes pass through untouched; when the
+// underlying stream reports EOF or a read error — the parent closed its end
+// of the pipe — it starts a bounded cancellation deadline while mcp-go drains
+// queued tool calls before Listen unwinds. A read that returns data together
+// with io.EOF is special: the EOF is retained (pendingEOF) and the graceful
+// sequence runs only when that retained EOF is surfaced on a later zero-byte
+// read, after bufio has served the final buffered request. onUnwind must be
+// once-guarded because bufio may issue further reads after the stream has ended.
+type eofShutdownReader struct {
+	inner      io.Reader
+	onUnwind   func()
+	pendingEOF bool
+}
+
+func (r *eofShutdownReader) Read(p []byte) (int, error) {
+	if r.pendingEOF {
+		// The retained EOF is all that is left: the transport consumed the
+		// buffered bytes, so it is safe to unwind and surface the real
+		// end of stream. pendingEOF stays set — EOF is sticky, and onUnwind
+		// is once-guarded by the caller.
+		r.onUnwind()
+		return 0, io.EOF
+	}
+	n, err := r.inner.Read(p)
+	switch {
+	case err == io.EOF && n > 0:
+		// Data arrived together with EOF. Returning the EOF now would let a
+		// cancelled context abandon the final buffered request inside mcp-go
+		// (readNextLine/processMessage), and bufio would cache the EOF so
+		// this wrapper would never be called again — the shutdown would race
+		// the last request. Retaining the EOF and returning nil forces bufio
+		// to call back once its buffer drains; that next call surfaces the
+		// retained EOF and unwinds.
+		r.pendingEOF = true
+		return n, nil
+	case err != nil:
+		// Immediate EOF (n == 0) or a real read error: unwind before the
+		// transport sees it.
+		r.onUnwind()
+		return n, err
+	default:
+		return n, err
 	}
 }
 
@@ -979,7 +1421,7 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--org ORG] [--limit N] [--match all|any]")
 		exitFunc(1)
 	}
 
@@ -1014,6 +1456,19 @@ func cmdSearch(cfg store.Config) {
 				opts.Scope = os.Args[i+1]
 				i++
 			}
+		case "--match":
+			if i+1 < len(os.Args) {
+				opts.MatchMode = os.Args[i+1]
+				i++
+			}
+		case "--org":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "-") {
+				fmt.Fprintln(os.Stderr, "error: --org requires a value")
+				exitFunc(1)
+				return
+			}
+			opts.Org = strings.TrimSpace(os.Args[i+1])
+			i++
 		default:
 			queryParts = append(queryParts, os.Args[i])
 		}
@@ -1055,54 +1510,96 @@ func cmdSearch(cfg store.Config) {
 		if r.Project != nil {
 			project = fmt.Sprintf(" | project: %s", *r.Project)
 		}
-		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n\n",
+		org := ""
+		if r.Org != nil {
+			org = fmt.Sprintf(" | org: %s", *r.Org)
+		}
+		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n\n",
 			i+1, r.ID, r.Type, r.Title,
 			truncate(r.Content, 300),
-			timeutil.FormatLocal(r.CreatedAt), project, r.Scope)
+			timeutil.FormatLocal(r.CreatedAt), project, r.Scope, org)
 	}
 }
 
-func cmdSave(cfg store.Config) {
-	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]")
-		exitFunc(1)
-	}
+const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY] [--org ORG]\nUntracked folders inside a HOME Git repository require --project, ENGRAM_PROJECT, or .engram/config.json project_name."
 
-	title := os.Args[2]
-	content := os.Args[3]
-	typ := "manual"
-	projectName := ""
-	scope := "project"
-	topicKey := ""
+type saveArgs struct {
+	title       string
+	content     string
+	typ         string
+	projectName string
+	scope       string
+	topicKey    string
+	org         string
+}
 
-	for i := 4; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--type":
-			if i+1 < len(os.Args) {
-				typ = os.Args[i+1]
-				i++
+// parseSaveArgs accepts save flags anywhere around the two required positionals.
+// A conventional -- ends option parsing so titles and content may begin with --.
+func parseSaveArgs(args []string) (saveArgs, error) {
+	parsed := saveArgs{typ: "manual", scope: "project"}
+	positionals := make([]string, 0, 2)
+	endOfOptions := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !endOfOptions && arg == "--" {
+			endOfOptions = true
+			continue
+		}
+		if !endOfOptions && strings.HasPrefix(arg, "-") {
+			if arg != "--type" && arg != "--project" && arg != "--scope" && arg != "--topic" && arg != "--org" {
+				return saveArgs{}, fmt.Errorf("unknown save flag: %s", arg)
 			}
-		case "--project":
-			if i+1 < len(os.Args) {
-				projectName = os.Args[i+1]
-				i++
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || strings.HasPrefix(args[i+1], "-") {
+				return saveArgs{}, fmt.Errorf("%s requires a value", arg)
 			}
-		case "--scope":
-			if i+1 < len(os.Args) {
-				scope = os.Args[i+1]
-				i++
+			i++
+			switch arg {
+			case "--type":
+				parsed.typ = args[i]
+			case "--project":
+				parsed.projectName = args[i]
+			case "--scope":
+				parsed.scope = args[i]
+			case "--topic":
+				parsed.topicKey = args[i]
+			case "--org":
+				parsed.org = strings.TrimSpace(args[i])
 			}
-		case "--topic":
-			if i+1 < len(os.Args) {
-				topicKey = os.Args[i+1]
-				i++
-			}
+			continue
+		}
+		positionals = append(positionals, arg)
+		if len(positionals) > 2 {
+			return saveArgs{}, errors.New("save requires exactly two positional arguments")
 		}
 	}
 
+	if len(positionals) != 2 {
+		return saveArgs{}, errors.New("save requires exactly two positional arguments")
+	}
+	parsed.title = positionals[0]
+	parsed.content = positionals[1]
+	return parsed, nil
+}
+
+func cmdSave(cfg store.Config) {
+	args, err := parseSaveArgs(os.Args[2:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, saveUsage)
+		fatal(err)
+		return
+	}
+	title := args.title
+	content := args.content
+	typ := args.typ
+	projectName := args.projectName
+	scope := args.scope
+	topicKey := args.topicKey
+	org := args.org
+
 	// Reject titleless saves before opening the store or creating a session
 	// (#459). The store applies the same rule as a backstop.
-	if err := store.ValidateObservationTitle(title); err != nil {
+	if err := store.ValidateObservationTitle(args.title); err != nil {
 		fatal(err)
 		return
 	}
@@ -1112,6 +1609,23 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 		return
 	}
+	// Reject malformed overrides/config and repository ambiguity before opening
+	// SQLite, without creating a Git identity during this preflight.
+	_, preflightErr := project.Resolve(project.ResolutionOptions{
+		Mode: project.ResolutionCurrent, Explicit: projectName, Directory: cwd,
+		Detect: func(dir string) project.DetectionResult {
+			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true, RequireExplicitHomeProject: true})
+		},
+	})
+	if preflightErr != nil {
+		fatal(fmt.Errorf("cannot save without an unambiguous project identity: %w; use --project <name>", preflightErr))
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer func() { _ = s.Close() }()
 	// The shared resolver preserves save's legitimate creation contract for an
 	// explicit name or a newly detected cwd, while rejecting malformed overrides.
 	rawProjectName := projectName
@@ -1119,7 +1633,9 @@ func cmdSave(cfg store.Config) {
 		Mode:      project.ResolutionCurrent,
 		Explicit:  projectName,
 		Directory: cwd,
-		Detect:    detectProjectFull,
+		Detect: func(dir string) project.DetectionResult {
+			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory, RequireExplicitHomeProject: true})
+		},
 	})
 	if resolveErr != nil || strings.TrimSpace(resolved.Project) == "" {
 		if resolveErr != nil {
@@ -1147,29 +1663,48 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
-	s, err := storeNew(cfg)
+	// --org wins when given explicitly; otherwise inherit from the nearest
+	// .engram/config.json org field for this cwd, independent of how the
+	// project name itself was resolved (#776).
+	if strings.TrimSpace(org) == "" {
+		// InspectOnly: this lookup only wants the org label; it must not
+		// publish a Git identity binding as a side effect (#1596).
+		if cfgResult := detectProjectFull(cwd, project.DetectionOptions{InspectOnly: true}); cfgResult.Org != "" {
+			org = cfgResult.Org
+		}
+	}
+
+	provenance := &store.ProjectProvenance{Source: resolved.Source, Directory: cwd}
+	if strings.TrimSpace(args.projectName) != "" {
+		provenance.RawProject = args.projectName
+	} else if override, ok := project.ProcessOverride(""); ok {
+		provenance.RawProject = override
+	}
+	sessionID, err := s.ResolveManualSession(projectName, cwd, provenance)
 	if err != nil {
 		fatal(err)
+		return
 	}
-	defer s.Close()
-	sessionID := "manual-save-" + projectName
-	if err := s.CreateSession(sessionID, projectName, cwd); err != nil {
-		fatal(err)
-	}
+	truncation := s.ContentTruncation(content)
 	id, err := storeAddObservation(s, store.AddObservationParams{
-		SessionID: sessionID,
-		Type:      typ,
-		Title:     title,
-		Content:   content,
-		Project:   projectName,
-		Scope:     scope,
-		TopicKey:  topicKey,
+		ProjectProvenance: provenance,
+		SessionID:         sessionID,
+		Type:              typ,
+		Title:             title,
+		Content:           content,
+		Project:           projectName,
+		Scope:             scope,
+		TopicKey:          topicKey,
+		Org:               org,
 	})
 	if err != nil {
 		fatal(err)
 	}
 
 	fmt.Printf("Memory saved: #%d %q (%s)\n", id, title, typ)
+	if truncation.Truncated {
+		fmt.Fprintf(os.Stderr, "⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.\n", truncation.OriginalBytes, truncation.LimitBytes)
+	}
 }
 
 func cmdDelete(cfg store.Config) {
@@ -1196,6 +1731,49 @@ func cmdDelete(cfg store.Config) {
 	}
 }
 
+// parseDeleteTrailingArgs validates the tokens that follow a delete command's
+// target and reports which supported flags were present. Delete paths mutate
+// persistent data, so any token other than a documented flag must be rejected
+// before the store is opened; silently ignoring an unsupported option such as
+// --dry-run would let the deletion proceed anyway. On rejection it prints the
+// offending token(s) and the usage line to stderr, calls exitFunc(1), and
+// reports ok=false.
+func parseDeleteTrailingArgs(args []string, usage string, supported ...string) (flags map[string]bool, ok bool) {
+	flags = make(map[string]bool)
+	var unexpected []string
+	for _, arg := range args {
+		known := false
+		for _, s := range supported {
+			if arg == s {
+				known = true
+				break
+			}
+		}
+		if known {
+			flags[arg] = true
+			continue
+		}
+		unexpected = append(unexpected, fmt.Sprintf("%q", arg))
+	}
+	if len(unexpected) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument(s): %s\n", strings.Join(unexpected, " "))
+		fmt.Fprintln(os.Stderr, "usage: "+usage)
+		exitFunc(1)
+		return nil, false
+	}
+	return flags, true
+}
+
+// rejectDeleteHelpTarget rejects standard CLI help tokens before store access.
+func rejectDeleteHelpTarget(target, usage string) bool {
+	if target != "--help" && target != "-h" {
+		return false
+	}
+	fmt.Fprintln(os.Stderr, "usage: "+usage)
+	exitFunc(1)
+	return true
+}
+
 func cmdDeleteObservation(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
@@ -1210,12 +1788,11 @@ func cmdDeleteObservation(cfg store.Config) {
 		return
 	}
 
-	hard := false
-	for i := 3; i < len(os.Args); i++ {
-		if os.Args[i] == "--hard" {
-			hard = true
-		}
+	flags, ok := parseDeleteTrailingArgs(os.Args[3:], "engram delete <observation_id> [--hard]", "--hard")
+	if !ok {
+		return
 	}
+	hard := flags["--hard"]
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -1244,6 +1821,13 @@ func cmdDeleteSession(cfg store.Config) {
 	}
 
 	id := os.Args[3]
+	if rejectDeleteHelpTarget(id, "engram delete session <id>") {
+		return
+	}
+
+	if _, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete session <id>"); !ok {
+		return
+	}
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -1273,6 +1857,10 @@ func cmdDeletePrompt(cfg store.Config) {
 		return
 	}
 
+	if _, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete prompt <id>"); !ok {
+		return
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -1295,12 +1883,15 @@ func cmdDeleteProject(cfg store.Config) {
 	}
 
 	name := os.Args[3]
-	hard := false
-	for i := 4; i < len(os.Args); i++ {
-		if os.Args[i] == "--hard" {
-			hard = true
-		}
+	if rejectDeleteHelpTarget(name, "engram delete project <name> [--hard]") {
+		return
 	}
+
+	flags, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete project <name> [--hard]", "--hard")
+	if !ok {
+		return
+	}
+	hard := flags["--hard"]
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -1427,7 +2018,12 @@ func cmdTimeline(cfg store.Config) {
 	}
 }
 
+var storeFormatContextWithOptions = func(s *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
+	return s.FormatContextWithOptions(project, scope, opts)
+}
+
 func cmdContext(cfg store.Config) {
+	olderHistory := false
 	projectName := ""
 	legacyProject := ""
 	scope := ""
@@ -1436,6 +2032,8 @@ func cmdContext(cfg store.Config) {
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
+		case "--older-history":
+			olderHistory = true
 		case "--project":
 			if i+1 >= len(os.Args) || strings.TrimSpace(os.Args[i+1]) == "" {
 				fatal(errors.New("context project selector requires a value"))
@@ -1487,14 +2085,19 @@ func cmdContext(cfg store.Config) {
 	if err != nil {
 		fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
 	if resolveErr != nil {
 		fatal(resolveErr)
 		return
 	}
 
-	ctx, err := storeFormatContext(s, resolved, scope)
+	var ctx string
+	if olderHistory {
+		ctx, err = storeFormatContextWithOptions(s, resolved, scope, store.ContextOptions{OlderHistory: true})
+	} else {
+		ctx, err = storeFormatContext(s, resolved, scope)
+	}
 	if err != nil {
 		fatal(err)
 	}
@@ -1558,7 +2161,7 @@ func cmdStats(cfg store.Config) {
 	fmt.Printf("  Database:     %s/engram.db\n", cfg.DataDir)
 }
 
-func cmdExport(cfg store.Config) {
+func cmdExport(cfg store.Config) (string, error) {
 	outFile := "engram-export.json"
 	projectName := ""
 	allProjects := false
@@ -1567,8 +2170,7 @@ func cmdExport(cfg store.Config) {
 		case "--project":
 			value, err := requiredProjectValue(os.Args, i)
 			if err != nil {
-				fatal(err)
-				return
+				return "", err
 			}
 			projectName = value
 			i++
@@ -1583,14 +2185,13 @@ func cmdExport(cfg store.Config) {
 
 	s, err := storeNew(cfg)
 	if err != nil {
-		fatal(err)
+		return "", err
 	}
 	defer s.Close()
 
 	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
 	if resolveErr != nil {
-		fatal(resolveErr)
-		return
+		return "", resolveErr
 	}
 	var data *store.ExportData
 	if resolved != "" {
@@ -1599,22 +2200,23 @@ func cmdExport(cfg store.Config) {
 		data, err = storeExport(s)
 	}
 	if err != nil {
-		fatal(err)
+		return "", err
 	}
 
 	out, err := jsonMarshalIndent(data, "", "  ")
 	if err != nil {
-		fatal(err)
+		return "", err
 	}
 
 	if err := os.WriteFile(outFile, out, 0644); err != nil {
-		fatal(err)
+		return "", fmt.Errorf("write %s: %w", outFile, err)
 	}
 
 	fmt.Printf("Exported to %s\n", outFile)
 	fmt.Printf("  Sessions:     %d\n", len(data.Sessions))
 	fmt.Printf("  Observations: %d\n", len(data.Observations))
 	fmt.Printf("  Prompts:      %d\n", len(data.Prompts))
+	return outFile, nil
 }
 
 func cmdImport(cfg store.Config) {
@@ -1651,12 +2253,75 @@ func cmdImport(cfg store.Config) {
 	fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
 }
 
+const maxCloudImportProgressUpdates = 10
+
+type cloudImportProgressRenderer struct {
+	initialPending int
+	interval       int
+}
+
+func (r *cloudImportProgressRenderer) Render(progress engramsync.ImportProgress) {
+	if r.initialPending == 0 && r.interval == 0 {
+		r.initialPending = progress.PendingChunks
+		r.interval = 1
+		if r.initialPending > maxCloudImportProgressUpdates {
+			r.interval = (r.initialPending + maxCloudImportProgressUpdates - 1) / maxCloudImportProgressUpdates
+		}
+		printCloudImportProgress(progress)
+		return
+	}
+	if progress.PendingChunks == 0 {
+		printCloudImportProgress(progress)
+		return
+	}
+	completed := r.initialPending - progress.PendingChunks
+	if completed > 0 && completed%r.interval == 0 {
+		printCloudImportProgress(progress)
+	}
+}
+
+func printCloudImportProgress(progress engramsync.ImportProgress) {
+	fmt.Printf("Cloud import progress: local=%d remote=%d pending=%d progress=%d%%\n",
+		progress.LocalChunks, progress.RemoteChunks, progress.PendingChunks, progress.Percentage)
+}
+
+// validateSyncPromptPrivacy is a read-only preflight shared by main and cmdSync.
+// Leave help and existing project-parse errors to their established handlers.
+func validateSyncPromptPrivacy(args []string, cloudEnabled bool) error {
+	includePrompts, incompatible := false, cloudEnabled
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--help", "-h", "help":
+			return nil
+		case "--project":
+			if _, err := requiredProjectValue(args, i); err != nil {
+				return nil
+			}
+			i++ // A project value is not a mode or help flag.
+		case "--include-prompts":
+			includePrompts = true
+		case "--import", "--status", "--cloud":
+			incompatible = true
+		}
+	}
+	if includePrompts && incompatible {
+		return fmt.Errorf("--include-prompts is only supported for local Git sync export; cannot combine with --import, --status, or cloud sync")
+	}
+	return nil
+}
+
 func cmdSync(cfg store.Config) {
+	if err := validateSyncPromptPrivacy(os.Args[2:], envBool("ENGRAM_CLOUD_SYNC")); err != nil {
+		fatal(err)
+		return
+	}
 	// Parse flags
 	doImport := false
 	doStatus := false
 	doAll := false
 	doCloud := false
+	includePrompts := false
+	literalProject := false
 	project := ""
 	projectProvided := false
 	for i := 2; i < len(os.Args); i++ {
@@ -1672,17 +2337,48 @@ func cmdSync(cfg store.Config) {
 			doAll = true
 		case "--cloud":
 			doCloud = true
+		case "--include-prompts":
+			includePrompts = true
+		case "--literal-project":
+			literalProject = true
 		case "--project":
-			if i+1 < len(os.Args) {
-				project = os.Args[i+1]
+			value, err := requiredProjectValue(os.Args, i)
+			if err != nil {
+				fatal(err)
+				return
+			}
+			project, projectProvided = value, true
+			i++
+		default:
+			if strings.HasPrefix(os.Args[i], "--project=") {
+				project = strings.TrimPrefix(os.Args[i], "--project=")
+				if strings.TrimSpace(project) == "" {
+					fatal(fmt.Errorf("--project requires a non-empty value"))
+					return
+				}
 				projectProvided = true
-				i++
 			}
 		}
 	}
 	if doAll && projectProvided {
 		fatal(fmt.Errorf("--all and --project cannot be used together"))
 		return
+	}
+	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
+	if literalProject && (!cloudEnabled || doAll || !projectProvided || strings.TrimSpace(project) == "") {
+		fatal(fmt.Errorf("--literal-project requires cloud sync with an explicit non-empty --project and cannot use --all"))
+		return
+	}
+	if cloudEnabled && projectProvided {
+		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project, literalProject)
+		if decodeErr != nil {
+			fatal(fmt.Errorf("cloud sync project: %w", decodeErr))
+			return
+		}
+		project = decodedProject
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, warning)
+		}
 	}
 
 	syncDir := ".engram"
@@ -1695,7 +2391,7 @@ func cmdSync(cfg store.Config) {
 	// Sync is project-scoped unless --all is explicit. Route its omitted project
 	// through the same process-override-before-cwd resolver as other CLI paths.
 	if !doAll {
-		resolved, resolveErr := resolveCLIProjectWithDetector(s, project, false, detectProjectForSync)
+		resolved, resolveErr := resolveCLIProject(s, project, false)
 		if resolveErr != nil {
 			fatal(resolveErr)
 			return
@@ -1703,7 +2399,6 @@ func cmdSync(cfg store.Config) {
 		project = resolved
 	}
 
-	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
 	if cloudEnabled {
 		if doAll {
 			fatal(fmt.Errorf("cloud sync requires a single explicit --project scope; --all is not supported"))
@@ -1769,6 +2464,9 @@ func cmdSync(cfg store.Config) {
 	if doStatus {
 		local, remote, pending, err := syncStatus(sy)
 		if err != nil {
+			if cloudEnabled {
+				fatal(errors.New(cloudSyncFailureMessage(project, err)))
+			}
 			fatal(err)
 		}
 		if cloudEnabled {
@@ -1786,7 +2484,13 @@ func cmdSync(cfg store.Config) {
 	}
 
 	if doImport {
-		result, err := syncImport(sy)
+		var result *engramsync.ImportResult
+		if cloudEnabled {
+			renderer := &cloudImportProgressRenderer{}
+			result, err = syncImportWithProgress(sy, renderer.Render)
+		} else {
+			result, err = syncImport(sy)
+		}
 		if err != nil {
 			if cloudEnabled {
 				markCloudSyncFailure(s, cloudTargetKey, err)
@@ -1804,6 +2508,7 @@ func cmdSync(cfg store.Config) {
 				fmt.Printf("  (%d chunks already imported)\n", result.ChunksSkipped)
 			}
 			printImportRelationCounts(result)
+			printSkippedRelationWarnings(result)
 			return
 		}
 
@@ -1819,6 +2524,7 @@ func cmdSync(cfg store.Config) {
 			fmt.Printf("  Skipped:      %d (already imported)\n", result.ChunksSkipped)
 		}
 		printImportRelationCounts(result)
+		printSkippedRelationWarnings(result)
 		return
 	}
 
@@ -1833,7 +2539,15 @@ func cmdSync(cfg store.Config) {
 			fmt.Printf("Exporting memories for project %q...\n", project)
 		}
 	}
-	result, err := syncExport(sy, username, project)
+	if !cloudEnabled && !includePrompts {
+		fmt.Println("Prompts excluded from Git sync (use --include-prompts to intentionally share them).")
+	}
+	var result *engramsync.SyncResult
+	if includePrompts {
+		result, err = syncExportWithPrompts(sy, username, project)
+	} else {
+		result, err = syncExport(sy, username, project)
+	}
 	if err != nil {
 		if cloudEnabled {
 			markCloudSyncFailure(s, cloudTargetKey, err)
@@ -1868,6 +2582,9 @@ func cmdSync(cfg store.Config) {
 		return
 	}
 	fmt.Println()
+	fmt.Println("Warning: sessions, observations, and any included prompts may contain sensitive content.")
+	fmt.Println("Review .engram/ before sharing; committed content can remain permanently in Git history.")
+	fmt.Println("Excluding prompts later does not erase existing chunks or Git history.")
 	fmt.Println("Add to git:")
 	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
 }
@@ -1878,9 +2595,20 @@ func printImportRelationCounts(result *engramsync.ImportResult) {
 	fmt.Printf("  Relations dead:     %d\n", result.RelationsDead)
 }
 
+// printSkippedRelationWarnings surfaces relation upserts that were skipped
+// because their referenced observations are permanently missing (issue #1135),
+// so a stale edge is visible instead of silently dying in the deferred queue.
+func printSkippedRelationWarnings(result *engramsync.ImportResult) {
+	for _, warning := range result.SkippedRelations {
+		fmt.Printf("  WARNING skipped %s\n", warning)
+	}
+}
+
 func printSyncUsage() {
-	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud --project PROJECT]")
-	fmt.Println("Local sync exports project-scoped chunks to .engram/ by default.")
+	fmt.Println("usage: engram sync [--import | --status] [--all] [--include-prompts] [--cloud --project PROJECT [--literal-project]]")
+	fmt.Println("--literal-project skips URL decoding of an explicit cloud project; normalization still applies.")
+	fmt.Println("Local sync exports project-scoped chunks to .engram/; prompts are excluded by default, including with --all.")
+	fmt.Println("--include-prompts intentionally shares prompts in local Git export only; incompatible with --import, --status, and cloud (including ENGRAM_CLOUD_SYNC).")
 	fmt.Println("Cloud sync requires an explicit --project and never runs from --help.")
 }
 
@@ -1902,12 +2630,37 @@ func (a *storeAdapter) Stats() *store.Stats {
 	return st
 }
 
+// validateObsidianExportLimit follows the command's value consumption and stops
+// at unknown flags so preflight does not reorder existing parser errors.
+func validateObsidianExportLimit(args []string) error {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--limit" || strings.HasPrefix(args[i], "--limit=") {
+			return errors.New("--limit is not supported by obsidian-export; omit it to export all matching observations")
+		}
+		switch args[i] {
+		case "--vault", "--project", "--since", "--graph-config", "--interval":
+			if i+1 < len(args) {
+				i++
+			}
+		case "--all", "--force", "--watch":
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 func cmdObsidianExport(cfg store.Config) {
+	if err := validateObsidianExportLimit(os.Args[2:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		exitFunc(1)
+		return
+	}
 	// Parse flags
 	var (
 		vault       string
 		project     string
-		limit       int
+		org         string
 		since       string
 		force       bool
 		graphConfig string
@@ -1928,15 +2681,16 @@ func cmdObsidianExport(cfg store.Config) {
 				project = os.Args[i+1]
 				i++
 			}
+		case "--org":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "-") {
+				fmt.Fprintln(os.Stderr, "error: --org requires a value")
+				exitFunc(1)
+				return
+			}
+			org = strings.TrimSpace(os.Args[i+1])
+			i++
 		case "--all":
 			allProjects = true
-		case "--limit":
-			if i+1 < len(os.Args) {
-				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
-					limit = n
-				}
-				i++
-			}
 		case "--since":
 			if i+1 < len(os.Args) {
 				since = os.Args[i+1]
@@ -2006,7 +2760,7 @@ func cmdObsidianExport(cfg store.Config) {
 	exportCfg := obsidian.ExportConfig{
 		VaultPath:   vault,
 		Project:     project,
-		Limit:       limit,
+		Org:         org,
 		Force:       force,
 		GraphConfig: graphMode,
 	}
@@ -2081,6 +2835,7 @@ func cmdObsidianExport(cfg store.Config) {
 		for _, e := range result.Errors {
 			fmt.Fprintf(os.Stderr, "    - %v\n", e)
 		}
+		exitFunc(1)
 	}
 }
 
@@ -2091,6 +2846,10 @@ func cmdProjects(cfg store.Config) {
 		subCmd = os.Args[2]
 	}
 	switch subCmd {
+	case "alias":
+		cmdProjectsAlias(cfg)
+	case "merge":
+		cmdProjectsMerge(cfg)
 	case "consolidate":
 		cmdProjectsConsolidate(cfg)
 	case "prune":
@@ -2107,10 +2866,76 @@ func cmdProjects(cfg store.Config) {
 }
 
 func printProjectsUsage() {
+	fmt.Fprint(os.Stderr, projectAliasUsage)
 	fmt.Fprintln(os.Stderr, "usage: engram projects list")
+	fmt.Fprintln(os.Stderr, "       engram projects merge --from <source> --to <canonical> (--dry-run|--apply)")
 	fmt.Fprintln(os.Stderr, "       engram projects consolidate [--all] [--dry-run]")
 	fmt.Fprintln(os.Stderr, "       engram projects prune [--dry-run] [--paths-only]")
 	fmt.Fprintln(os.Stderr, "       engram projects rescue-ownership --project <name> [--session <id>]... [--observation <id>]... [--prompt <id>]...")
+}
+
+func cmdProjectsMerge(cfg store.Config) {
+	var from, to string
+	var dryRun, apply bool
+	seen := map[string]bool{}
+	for i := 3; i < len(os.Args); i++ {
+		flag := os.Args[i]
+		if seen[flag] {
+			printProjectsUsage()
+			exitFunc(1)
+			return
+		}
+		seen[flag] = true
+		switch flag {
+		case "--from", "--to":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "--") {
+				printProjectsUsage()
+				exitFunc(1)
+				return
+			}
+			i++
+			if flag == "--from" {
+				from = os.Args[i]
+			} else {
+				to = os.Args[i]
+			}
+		case "--dry-run":
+			dryRun = true
+		case "--apply":
+			apply = true
+		default:
+			printProjectsUsage()
+			exitFunc(1)
+			return
+		}
+	}
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" || dryRun == apply {
+		printProjectsUsage()
+		exitFunc(1)
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer func() { _ = s.Close() }() // Closing the command's store is best effort.
+	// Preview and apply share store eligibility; apply revalidates transactionally.
+	preview, err := s.PreviewExplicitProjectMerge(from, to)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if dryRun {
+		fmt.Printf("[dry-run] Source %q -> target %q: observations %d, sessions %d, prompts %d. Sync identity changes: %t. No changes made. Point-in-time preview; apply revalidates and counts may differ.\n", preview.Source, preview.Canonical, preview.ObservationsUpdated, preview.SessionsUpdated, preview.PromptsUpdated, preview.SyncIdentityChanges)
+		return
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{from}, to)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Printf("Merged source %q into target %q: observations %d, sessions %d, prompts %d. Sync identity may also change.\n", preview.Source, result.Canonical, result.ObservationsUpdated, result.SessionsUpdated, result.PromptsUpdated)
 }
 
 // cmdProjectsRescueOwnership assigns explicit ownership to legacy rows that
@@ -2203,13 +3028,27 @@ func cmdProjectsRescueOwnership(cfg store.Config) {
 }
 
 func cmdProjectsList(cfg store.Config) {
+	org := ""
+	for i := 3; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--org":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "-") {
+				fmt.Fprintln(os.Stderr, "error: --org requires a value")
+				exitFunc(1)
+				return
+			}
+			org = strings.TrimSpace(os.Args[i+1])
+			i++
+		}
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	projects, err := s.ListProjectsWithStats()
+	projects, err := s.ListProjectsWithStats(org)
 	if err != nil {
 		fatal(err)
 	}
@@ -2219,7 +3058,11 @@ func cmdProjectsList(cfg store.Config) {
 		return
 	}
 
-	fmt.Printf("Projects (%d):\n", len(projects))
+	if org != "" {
+		fmt.Printf("Projects (%d) — org: %s\n", len(projects), org)
+	} else {
+		fmt.Printf("Projects (%d):\n", len(projects))
+	}
 	for _, p := range projects {
 		sessionWord := "sessions"
 		if p.SessionCount == 1 {
@@ -2363,7 +3206,7 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		if err != nil {
 			fatal(err)
 		}
-		res := detectProjectFull(cwd)
+		res := detectProjectFull(cwd, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
 		if res.Error != nil {
 			fatal(res.Error)
 			return
@@ -2390,7 +3233,7 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		// Only normalization-equivalent legacy names are safe automatic candidates.
 		similar := findNormalizationEquivalentProjects(canonical, allNames)
 
-		allStats, _ := s.ListProjectsWithStats()
+		allStats, _ := s.ListProjectsWithStats("")
 		statsMap := make(map[string]store.ProjectStats)
 		for _, ps := range allStats {
 			statsMap[ps.Name] = ps
@@ -2411,41 +3254,38 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			fmt.Printf("  [%d] %-30s %3d obs  (%s)\n", i+1, sm.Name, obs, sm.MatchType)
 		}
 
-		if dryRun {
-			fmt.Printf("\n[dry-run] Would merge %d project(s) into %q\n", len(similar), canonical)
-			return
-		}
-
 		fmt.Printf("\nSelect which to merge into %q (comma-separated numbers, 'all', or 'none'): ", canonical)
 		var answer string
-		scanInputLine(&answer)
+		if n, err := scanInputLine(&answer); err != nil && dryRun && n == 0 {
+			fatal(fmt.Errorf("dry-run requires a confirmed selection: %w", err))
+			return
+		}
 		answer = strings.TrimSpace(strings.ToLower(answer))
 
 		if answer == "none" || answer == "n" || answer == "" {
+			if dryRun && answer == "" {
+				fatal(errors.New("dry-run requires a confirmed selection"))
+				return
+			}
 			fmt.Println("Cancelled.")
 			return
 		}
 
-		var sources []string
-		if answer == "all" || answer == "a" {
-			for _, sm := range similar {
-				sources = append(sources, sm.Name)
+		plan := planDetectedProjectConsolidation(canonical, similar, answer)
+		if len(plan.invalidSelections) > 0 {
+			fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", plan.invalidSelections[0], len(similar))
+			if dryRun {
+				exitFunc(1)
 			}
-		} else {
-			// Parse comma-separated indices
-			for _, part := range strings.Split(answer, ",") {
-				part = strings.TrimSpace(part)
-				idx := 0
-				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(similar) {
-					fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", part, len(similar))
-					return
-				}
-				sources = append(sources, similar[idx-1].Name)
-			}
+			return
 		}
-
+		sources := plan.sources
 		if len(sources) == 0 {
 			fmt.Println("Nothing selected.")
+			return
+		}
+		if dryRun {
+			fmt.Printf("\n[dry-run] Would merge %d project(s) into %q\n", len(sources), canonical)
 			return
 		}
 
@@ -2470,7 +3310,7 @@ func cmdProjectsConsolidate(cfg store.Config) {
 	}
 
 	// --all mode: group all projects by normalization equivalence.
-	projects, err := s.ListProjectsWithStats()
+	projects, err := s.ListProjectsWithStats("")
 	if err != nil {
 		fatal(err)
 	}
@@ -2520,8 +3360,6 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		scanInputLine(&answer)
 		answer = strings.TrimSpace(strings.ToLower(answer))
 
-		canonical := g.Canonical
-
 		if answer == "skip" || answer == "s" || answer == "n" || answer == "" {
 			fmt.Println("  Skipped.")
 			fmt.Println()
@@ -2545,31 +3383,11 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			renameTarget, _ = store.NormalizeProject(input)
 			answer = "all" // after rename, merge everything then migrate
 		}
-		mergeCanonical, _ := store.NormalizeProject(canonical)
-
-		// Determine which sources to merge
-		var sources []string
-		if answer == "all" || answer == "a" || answer == "y" || answer == "yes" {
-			for _, name := range g.Names {
-				if name != mergeCanonical {
-					sources = append(sources, name)
-				}
-			}
-		} else {
-			// Parse comma-separated indices
-			for _, part := range strings.Split(answer, ",") {
-				part = strings.TrimSpace(part)
-				idx := 0
-				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(g.Names) {
-					fmt.Fprintf(os.Stderr, "  Invalid selection: %q (expected 1-%d)\n", part, len(g.Names))
-					fmt.Println()
-					continue
-				}
-				selected := g.Names[idx-1]
-				if selected != mergeCanonical {
-					sources = append(sources, selected)
-				}
-			}
+		plan := planGroupedProjectConsolidation(g, answer, renameTarget)
+		mergeCanonical, sources := plan.canonical, plan.sources
+		for _, part := range plan.invalidSelections {
+			fmt.Fprintf(os.Stderr, "  Invalid selection: %q (expected 1-%d)\n", part, len(g.Names))
+			fmt.Println()
 		}
 		if len(sources) == 0 {
 			fmt.Println("  Nothing to merge.")
@@ -2592,15 +3410,15 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			reportUnmergedSources(sources, result)
 		}
 
-		if renameTarget != "" && renameTarget != mergeCanonical {
-			migrateResult, err := s.MigrateProject(mergeCanonical, renameTarget)
+		if plan.renameTarget != "" && plan.renameTarget != mergeCanonical {
+			migrateResult, err := s.MigrateProject(mergeCanonical, plan.renameTarget)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error renaming %q → %q: %v\n", mergeCanonical, renameTarget, err)
+				fmt.Fprintf(os.Stderr, "  Error renaming %q → %q: %v\n", mergeCanonical, plan.renameTarget, err)
 				fmt.Println()
 				continue
 			}
 			fmt.Printf("  Renamed %q → %q: %d obs, %d sessions, %d prompts\n",
-				mergeCanonical, renameTarget,
+				mergeCanonical, plan.renameTarget,
 				migrateResult.ObservationsUpdated, migrateResult.SessionsUpdated, migrateResult.PromptsUpdated)
 		}
 		fmt.Println()
@@ -2625,7 +3443,7 @@ func cmdProjectsPrune(cfg store.Config) {
 	}
 	defer s.Close()
 
-	allStats, err := s.ListProjectsWithStats()
+	allStats, err := s.ListProjectsWithStats("")
 	if err != nil {
 		fatal(err)
 	}
@@ -2706,13 +3524,86 @@ func cmdProjectsPrune(cfg store.Config) {
 	fmt.Printf("\nPruned %d project(s): %d sessions, %d prompts removed.\n", successful, totalSessions, totalPrompts)
 }
 
+func cmdInit() {
+	var (
+		force       bool
+		projectName string
+	)
+
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		switch {
+		case token == "-h" || token == "--help" || token == "help":
+			fmt.Println("usage: engram init [project_name] [--force]")
+			return
+		case token == "-f" || token == "--force":
+			force = true
+		case strings.HasPrefix(token, "-"):
+			fmt.Fprintf(os.Stderr, "engram: unknown flag: %s\n\nusage: engram init [project_name] [--force]\n", token)
+			exitFunc(1)
+			return
+		default:
+			if projectName == "" {
+				projectName = token
+			} else {
+				fmt.Fprintf(os.Stderr, "engram: unexpected argument: %s\n\nusage: engram init [project_name] [--force]\n", token)
+				exitFunc(1)
+				return
+			}
+		}
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatal(fmt.Errorf("get current directory: %w", err))
+		return
+	}
+
+	if projectName == "" {
+		projectName = filepath.Base(cwd)
+	}
+
+	trimmed := strings.TrimSpace(projectName)
+	if trimmed == "" {
+		fatal(errors.New("project name is required"))
+		return
+	}
+	if strings.ContainsAny(trimmed, `/\\`) {
+		fatal(errors.New("project name must be a name, not a path"))
+		return
+	}
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f {
+			fatal(errors.New("project name contains control characters"))
+			return
+		}
+	}
+
+	data := map[string]string{
+		"project_name": trimmed,
+	}
+	bytes, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		fatal(fmt.Errorf("marshal config: %w", err))
+		return
+	}
+	bytes = append(bytes, '\n')
+
+	if err := writeInitConfig(cwd, bytes, force); err != nil {
+		fatal(err)
+		return
+	}
+
+	fmt.Printf("Initialized Engram project %q in .engram/config.json\n", trimmed)
+}
+
 func isPathLikeProjectName(name string) bool {
 	return strings.ContainsAny(name, `/\`)
 }
 
 // cmdSetup classifies os.Args[2:] with a two-pass, order-independent
-// algorithm (see openspec/changes/setup-protocol-flag/proposal.md,
-// Approach; JD-014 residual fix). The FIRST pass scans every token and only
+// algorithm. The FIRST pass scans every token and only
 // accumulates classification state — it never dispatches mid-loop. This
 // guarantees a token like --protocol=<v> is always parsed regardless of
 // what precedes it (e.g. an earlier unrecognized hyphen-prefixed token no
@@ -2724,13 +3615,15 @@ func cmdSetup(cfg store.Config) {
 	args := os.Args[2:]
 
 	var (
-		helpSeen        bool
-		protocolRaw     string
-		protocolFlag    bool
-		slug            string
-		slugSeen        bool
-		extraBareSeen   bool
-		unknownFlagSeen bool
+		helpSeen          bool
+		protocolRaw       string
+		protocolFlag      bool
+		mcpOnly           bool
+		allowMemoryWrites bool
+		slug              string
+		slugSeen          bool
+		extraBareSeen     bool
+		unknownFlagSeen   bool
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -2754,10 +3647,14 @@ func cmdSetup(cfg store.Config) {
 		case strings.HasPrefix(token, "--protocol="):
 			protocolRaw = strings.TrimPrefix(token, "--protocol=")
 			protocolFlag = true
+		case token == "--allow-memory-writes":
+			allowMemoryWrites = true
+		case token == "--mcp-only":
+			mcpOnly = true
 		case strings.HasPrefix(token, "-"):
 			// Unrecognized hyphen-prefixed token: record it but keep
 			// scanning so a --protocol appearing later is still parsed
-			// (JD-014 residual).
+			// (regression fix).
 			unknownFlagSeen = true
 		default:
 			if slugSeen {
@@ -2773,6 +3670,9 @@ func cmdSetup(cfg store.Config) {
 	case helpSeen:
 		printSetupUsage()
 		return
+	case allowMemoryWrites && (!slugSeen || slug != "claude-code" || mcpOnly || extraBareSeen || unknownFlagSeen):
+		fatal(fmt.Errorf("--allow-memory-writes requires claude-code and cannot be combined with --mcp-only, unknown flags or extra arguments"))
+		return
 	case extraBareSeen:
 		fmt.Fprintln(os.Stderr, "usage: engram setup [<agent>] [--protocol=slim|full]")
 		exitFunc(1)
@@ -2781,24 +3681,46 @@ func cmdSetup(cfg store.Config) {
 		// Preserve the legacy fallback to the interactive menu (keeps
 		// TestCmdSetupHyphenArgFallsBackToInteractive green), but forward
 		// the already-parsed --protocol mode (if any) instead of dropping
-		// it (JD-014), regardless of the unknown flag's position.
+		// it, regardless of the unknown flag's position.
 		mode := ""
 		if protocolFlag {
 			mode = resolveProtocolModeFlag(protocolRaw)
 		}
 		cmdSetupInteractive(cfg, mode)
 		return
+	case mcpOnly:
+		if !slugSeen || slug != "claude-code" {
+			fatal(fmt.Errorf("--mcp-only requires claude-code"))
+			return
+		}
+		if err := setupEnsureClaudeCodeUserMCP(); err != nil {
+			fatal(err)
+		}
+		return
 	case slugSeen:
 		result, err := setupInstallAgent(slug)
 		if err != nil {
 			fatal(err)
+			return
+		}
+		if allowMemoryWrites {
+			if !result.MCPConfigured {
+				fatal(fmt.Errorf("--allow-memory-writes requires successful Claude Code MCP registration; no permissions added"))
+				return
+			}
+			if err := setupAddClaudeCodeMemoryWriteAllowlist(); err != nil {
+				fatal(err)
+				return
+			}
 		}
 		if protocolFlag {
-			applyProtocolMode(cfg, slug, resolveProtocolModeFlag(protocolRaw))
+			mode := resolveProtocolModeFlag(protocolRaw)
+			applyProtocolMode(cfg, slug, mode)
+			warnIfClaudeCodeSlimUnverified(slug, mode)
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
-		printPostInstall(result)
+		printPostInstallWithMemoryWrites(result, allowMemoryWrites)
 	default:
 		// No slug: interactive menu. Mode (if any) applies to whichever
 		// slug the user selects.
@@ -2845,6 +3767,7 @@ func cmdSetupInteractive(cfg store.Config, mode string) {
 	}
 	if mode != "" {
 		applyProtocolMode(cfg, selected.Name, mode)
+		warnIfClaudeCodeSlimUnverified(selected.Name, mode)
 	}
 
 	fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
@@ -2859,6 +3782,7 @@ func printSetupUsage() {
 	fmt.Println("usage: engram setup [<agent>] [--protocol=slim|full]")
 	fmt.Println()
 	fmt.Println("Install an agent plugin (claude-code, opencode, codex, ...).")
+	fmt.Println("Claude Code: already-installed engram@engram is updated at user scope; update failures fail setup.")
 	fmt.Println("Without <agent>, shows an interactive menu.")
 	fmt.Println()
 	fmt.Println("Flags:")
@@ -2866,7 +3790,14 @@ func printSetupUsage() {
 	fmt.Println("                          installed agent slug (default: full). Unknown or")
 	fmt.Println("                          missing values fall back to full with a warning.")
 	fmt.Println("                          slim currently only takes effect for claude-code,")
-	fmt.Println("                          and only when the installed engram is >= 1.4.0.")
+	fmt.Println("                          and only with a clean tagged engram release >= 1.4.0.")
+	fmt.Println("                          Claude Code slim also requires Engram plugin >= 0.1.1;")
+	fmt.Println("                          setup warns, but continues, when it cannot verify it.")
+	fmt.Println("  --allow-memory-writes  Claude Code only: explicitly allow the finite memory-write")
+	fmt.Println("                          tool set for both MCP prefixes, without reading stdin.")
+	fmt.Println("                          Bypasses prompts and auto-mode classification for these tools;")
+	fmt.Println("                          excludes mem_delete and mem_merge_projects. Session checks remain.")
+	fmt.Println("                          Cannot be combined with --mcp-only.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
@@ -2893,6 +3824,28 @@ func resolveProtocolModeFlag(raw string) string {
 func applyProtocolMode(cfg store.Config, slug, mode string) {
 	if err := setup.WriteProtocolMode(cfg.DataDir, slug, mode); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not persist protocol mode: %v\n", err)
+	}
+
+	classification := classifyProtocolVersion(version)
+	if mode != setup.ProtocolModeSlim || classification == protocolVersionSupported {
+		return
+	}
+
+	if classification == protocolVersionBelowFloor {
+		fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is below 1.4.0; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is not a clean tagged release; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+}
+
+func warnIfClaudeCodeSlimUnverified(slug, mode string) {
+	if slug != "claude-code" || mode != setup.ProtocolModeSlim {
+		return
+	}
+	if err := setupVerifyClaudeCodeSlim(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: unable to verify the Claude Code Engram plugin supports --protocol=slim (requires plugin 0.1.1+): %v\n", err)
+		fmt.Fprintln(os.Stderr, "  Update the plugin through your normal Claude Code plugin update path, then restart Claude Code.")
+		fmt.Fprintln(os.Stderr, "  Session-only plugins loaded with `claude --plugin-dir ...` cannot be detected by this check.")
 	}
 }
 
@@ -2924,37 +3877,61 @@ func cmdProtocolMode(cfg store.Config) {
 // MCP serverInstructions duplication fix shipped in this release.
 var protocolVersionFloor = [3]int{1, 4, 0}
 
-// meetsProtocolVersionFloor reports whether v (e.g. "1.4.0", "v1.5.2", or the
-// build-time "dev" placeholder) is >= protocolVersionFloor. Any unparseable
-// or empty value returns false — the caller then falls back to "full".
-func meetsProtocolVersionFloor(v string) bool {
+type protocolVersionClassification uint8
+
+const (
+	protocolVersionUnsupported protocolVersionClassification = iota
+	protocolVersionBelowFloor
+	protocolVersionSupported
+)
+
+// classifyProtocolVersion distinguishes clean releases that can use slim from
+// releases below the floor and development, pseudo, dirty, or other non-release
+// build versions. Legacy numeric versions such as "1.4" remain supported.
+func classifyProtocolVersion(v string) protocolVersionClassification {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if v == "" || v == "dev" {
-		return false
+	segments := strings.Split(v, ".")
+	if len(segments) < 2 || len(segments) > 3 {
+		return protocolVersionUnsupported
 	}
 
-	segments := strings.SplitN(v, ".", 3)
 	var parts [3]int
-	for i, s := range segments {
-		if i >= 3 {
-			break
+	for i, segment := range segments {
+		if segment == "" {
+			return protocolVersionUnsupported
 		}
-		n, err := strconv.Atoi(strings.TrimSpace(s))
-		if err != nil {
-			return false
+		n, err := strconv.Atoi(segment)
+		if err != nil || n < 0 {
+			return protocolVersionUnsupported
 		}
 		parts[i] = n
 	}
 
 	for i := 0; i < 3; i++ {
 		if parts[i] != protocolVersionFloor[i] {
-			return parts[i] > protocolVersionFloor[i]
+			if parts[i] > protocolVersionFloor[i] {
+				return protocolVersionSupported
+			}
+			return protocolVersionBelowFloor
 		}
 	}
-	return true
+	return protocolVersionSupported
 }
 
+// meetsProtocolVersionFloor reports whether v is a clean release at or above
+// protocolVersionFloor. Unsupported versions fall back to "full".
+func meetsProtocolVersionFloor(v string) bool {
+	return classifyProtocolVersion(v) == protocolVersionSupported
+}
+
+// printPostInstall prints the agent-specific next steps after a successful
+// setup run, including MCP registration status and allowlist prompts.
 func printPostInstall(result *setup.Result) {
+	printPostInstallWithMemoryWrites(result, false)
+}
+
+// memoryWritesAllowed means the explicit, bounded settings write already succeeded.
+func printPostInstallWithMemoryWrites(result *setup.Result, memoryWritesAllowed bool) {
 	switch result.Agent {
 	case "opencode":
 		fmt.Println("\nNext steps:")
@@ -2975,29 +3952,41 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  1. Restart Pi so packages and MCP config are reloaded")
 		fmt.Println("  2. Verify with: pi list")
 	case "claude-code":
-		// Offer to add engram tools to the permissions allowlist
-		fmt.Print("\nAdd engram tools to ~/.claude/settings.json allowlist?\n")
-		fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
-		fmt.Print("Add to allowlist? (y/N): ")
-		var answer string
-		scanInputLine(&answer)
-		answer = strings.TrimSpace(strings.ToLower(answer))
-		if answer == "y" || answer == "yes" {
-			if err := setupAddClaudeCodeAllowlist(); err != nil {
-				fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
-				fmt.Fprintln(os.Stderr, "  You can add them manually to permissions.allow in ~/.claude/settings.json")
-			} else {
-				fmt.Println("  ✓ Engram tools added to allowlist")
-			}
+		if memoryWritesAllowed {
+			fmt.Println("  Claude Code memory-write permissions added for both Engram MCP prefixes.")
+			fmt.Println("  These tools bypass permission prompts and the auto-mode classifier; session checks still apply.")
+			fmt.Println("  mem_delete and mem_merge_projects were not added; existing permissions remain unchanged.")
 		} else {
-			fmt.Println("  Skipped. You can add them later to permissions.allow in ~/.claude/settings.json")
+			// Offer to add engram tools to the permissions allowlist
+			fmt.Printf("\nAdd engram tools to %s allowlist?\n", setup.ClaudeCodeSettingsPath())
+			fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
+			fmt.Print("Add to allowlist? (y/N): ")
+			var answer string
+			// EOF or unreadable input leaves the default decision as no consent.
+			_, _ = scanInputLine(&answer)
+			answer = strings.TrimSpace(strings.ToLower(answer))
+			if answer == "y" || answer == "yes" {
+				if err := setupAddClaudeCodeAllowlist(); err != nil {
+					fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
+					fmt.Fprintf(os.Stderr, "  You can add them manually to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
+				} else {
+					fmt.Println("  ✓ Engram tools added to allowlist")
+				}
+			} else {
+				fmt.Printf("  Skipped. You can add them later to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
+			}
 		}
 
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
-		fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
-		fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+		if result.MCPConfigured {
+			fmt.Printf("  3. Claude CLI registered the user MCP server in %s using an absolute binary path\n", setup.ClaudeCodeUserMCPPath())
+			fmt.Println("     If the binary moves, run: claude mcp remove engram --scope user")
+			fmt.Println("     Then re-run: engram setup claude-code")
+		} else {
+			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
+		}
 	default:
 		// Every other agent's "next steps" are declared as data in the registry,
 		// so the message is rendered generically instead of one case per agent.
@@ -3026,19 +4015,33 @@ Usage:
 
 Commands:
   serve [port]       Start HTTP API server (default: 7437)
+  serve --session-owned  Private ephemeral HTTP server; requires ENGRAM_TOKEN, stops on stdin EOF
+  run [-d] [-p PORT]  Start the HTTP API daemon; -d detaches to the background, records
+                     the pidfile under the data dir and prints PID and port; without -d it
+                     serves in the foreground exactly like serve
+  ps                 Report daemon status: running (pid N) on port P / not running / unreachable
+  stop               Stop the daemon tracked by the pidfile (graceful stop, then force)
+  logs [-f]          Print the daemon log; -f follows it (Ctrl+C to exit)
+  restart [-p PORT]  Stop the daemon if running, then start it detached again
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
-                       Profiles: agent (15 tools), admin (4 tools), all (default, 19)
+                        Profiles: agent (%d tools), admin (%d tools), all (default, %d)
                        Combine: --tools=agent,admin or pick individual tools
                        Example: engram mcp --tools=agent
                        --project NAME  Set process-level default project (overrides cwd detection).
                                        Also accepted as ENGRAM_PROJECT=NAME env var.
+                       ENGRAM_MEM_SAVE_TIMING=1  Log mem_save stage timings to stderr (off by default).
   tui                Launch interactive terminal UI
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
-  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]
-  save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
+  migrate-copy --data-dir <absolute-source> --output-dir <new-absolute-destination> --confirm-quiescent --json
+                     Copy a stopped store completely and migrate only the copy; see docs/bundled-upgrade.md
+  compatibility --data-dir <absolute-directory> --json
+                     Read-only offline store observation (JSON). It never opens, migrates or repairs
+                     the store, and never authorizes automatic opening; see README
+  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--org ORG] [--limit N] [--match all|any]
+  save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE] [--org ORG]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>
                      Delete a session by ID (session must have no observations)
@@ -3057,14 +4060,23 @@ Commands:
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
-  context [project] [--project PROJECT|--all] [--scope SCOPE]
+                       repair --project P --check CODE (--plan|--dry-run|--apply)
+                       repair mutates state: only --apply writes.
+  context [project] [--project PROJECT|--all] [--scope SCOPE] [--older-history]
                      Show recent context from previous sessions
   stats [--project PROJECT|--all]
                      Show memory system statistics
   export [file] [--project PROJECT|--all]
                      Export memories to JSON (default: engram-export.json)
   import <file>      Import memories from a JSON export file
-  projects list      List all projects with observation, session, and prompt counts
+  init [name]        Initialize an Engram project (.engram/config.json) in current directory
+                       --force, -f   Overwrite existing .engram/config.json
+  hook resolve-hook-project
+                     Inspect the absolute cwd in hook JSON on stdin without HTTP, database or binding writes
+  projects list [--org ORG]
+                     List all projects with observation, session, and prompt counts
+  projects merge --from <source> --to <canonical> (--dry-run|--apply)
+                     Preview or apply a legacy case, separator or Unicode normalization variant merge
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
@@ -3075,13 +4087,14 @@ Commands:
                        --paths-only  Limit pruning to project names containing / or \
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
                      gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
-                     cursor, vscode-copilot, kilocode)
+                     cursor, vscode-copilot, kilocode, kimi, commandcode)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status
                          --project  Filter export to a specific project
                          --all      Export ALL projects (ignore directory-based filter)
 		                 --cloud    Run sync against configured cloud endpoint (requires explicit --project)
+                          --literal-project Skip URL decoding of explicit cloud project names
 	  cloud <subcommand> Cloud integration commands (opt-in)
 	                        status     Show cloud config status
 	                        enroll     Enroll a project for cloud sync
@@ -3091,8 +4104,9 @@ Commands:
                      Export memories to an Obsidian-compatible markdown vault
                        --vault         Path to Obsidian vault root (required)
                         --project       Filter export to a single project (optional; cannot combine with --all)
+                        --org           Filter export to a single org (optional)
                         --all           Export every project
-                       --limit         Cap exported observations at N (optional)
+                       --limit         Unsupported; rejected to protect complete reconciliation
                        --since         Export only observations after this date, e.g. 2026-01-01 (optional)
                        --force         Ignore incremental state, full re-export (optional)
                        --graph-config  Graph layout mode: preserve|force|skip (default: preserve)
@@ -3103,7 +4117,8 @@ Commands:
   help               Show this help
 
 Environment:
-  ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
+  ENGRAM_DATA_DIR    Engram CLI data directory. Empty or whitespace-only values use the
+                     platform default; nonblank values are used as provided (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
   ENGRAM_PROJECT     Process-level default project override, applied by every entry point
                      with one precedence rule: explicit request project (engram save --project,
@@ -3123,6 +4138,17 @@ Environment:
   ENGRAM_TIMEZONE    Timezone for timestamp display in TUI and cloud dashboard.
                      Accepts any IANA zone name (e.g. America/New_York, Europe/Berlin).
                      Falls back to system local time when unset or invalid.
+  ENGRAM_URL         Explicit nonblank URL selects client-local project inspection in native
+                     Claude/Codex hooks, including loopback SSH tunnel URLs. Unset/blank
+                     retains server resolution over local port/socket defaults. Registered
+                     owners and server permission checks remain authoritative.
+  ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT
+                     Total inspection/HTTP budget for Claude/Codex PreToolUse (default: 4s).
+                     Accepts a positive Go duration, e.g. 8s or 500ms; unset, blank,
+                     invalid, or nonpositive values use 4s. Increase the host hook timeout
+                     too, leaving time for process startup and verdict output.
+                     Does not change Codex prompt capture or bypass session confirmation.
+                     Mitigates slow confirmation; does not fix autosync latency.
   ENGRAM_AGENT_CLI   LLM runner for conflicts scan --semantic (claude or opencode)
   ENGRAM_CLOUD_AUTOSYNC
                      Set to 1 to enable background autosync; also requires
@@ -3158,7 +4184,7 @@ MCP Configuration (add to your agent's config):
       }
     }
   }
-`, version)
+`, version, len(mcp.ProfileAgent), len(mcp.ProfileAdmin), len(mcp.ResolveTools("agent,admin")))
 }
 
 func fatal(err error) {

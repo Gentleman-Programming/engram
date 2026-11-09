@@ -2,23 +2,28 @@ package diagnostic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 const (
 	CheckSessionProjectDirectoryMismatch  = "session_project_directory_mismatch"
 	CheckManualSessionNameProjectMismatch = "manual_session_name_project_mismatch"
 	CheckSyncMutationRequiredFields       = "sync_mutation_required_fields"
+	CheckSyncTargetClosedSpace            = "sync_target_closed_space"
 	CheckInvalidSessionIdentity           = "invalid_session_identity"
 	CheckOrphanedObservationSession       = "orphaned_observation_session"
+	CheckOrphanedPendingRelations         = "orphaned_pending_relations"
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
+	CheckAmbiguousActiveRuntimeSessions   = "ambiguous_active_runtime_sessions"
 )
 
 // ReasonQuarantinedPulledSessionIdentity marks a finding of
@@ -26,13 +31,28 @@ const (
 // apply path skipped rather than a corrupt local source row.
 const ReasonQuarantinedPulledSessionIdentity = "quarantined_pulled_session_identity"
 
+// ReasonForeignSyncTarget marks a finding of CheckSyncTargetClosedSpace whose
+// sync_state row carries a target key outside the closed set of legitimate sync
+// targets.
+const ReasonForeignSyncTarget = "foreign_sync_target"
+
+// orphanedPendingRelationSampleLimit bounds how many candidate relations the
+// store's bounded diagnostic read returns to the aggregate doctor finding, so
+// a large legacy backlog cannot flood diagnostic output. The full candidate
+// set is re-derived by the repair plan and apply path from the same store
+// evidence.
+const orphanedPendingRelationSampleLimit = 10
+
 type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
+type SyncTargetClosedSpaceCheck struct{}
 type InvalidSessionIdentityCheck struct{}
 type OrphanedObservationSessionCheck struct{}
+type OrphanedPendingRelationsCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
+type AmbiguousActiveRuntimeSessionsCheck struct{}
 
 func (SessionProjectDirectoryMismatchCheck) Code() string {
 	return CheckSessionProjectDirectoryMismatch
@@ -41,10 +61,87 @@ func (ManualSessionNameProjectMismatchCheck) Code() string {
 	return CheckManualSessionNameProjectMismatch
 }
 func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationRequiredFields }
+func (SyncTargetClosedSpaceCheck) Code() string      { return CheckSyncTargetClosedSpace }
 func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessionIdentity }
 func (OrphanedObservationSessionCheck) Code() string { return CheckOrphanedObservationSession }
+func (OrphanedPendingRelationsCheck) Code() string   { return CheckOrphanedPendingRelations }
 func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessionProject }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
+func (AmbiguousActiveRuntimeSessionsCheck) Code() string {
+	return CheckAmbiguousActiveRuntimeSessions
+}
+
+func (c AmbiguousActiveRuntimeSessionsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	sessions, err := scope.Store.ListDiagnosticSessions(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
+
+	directoriesByProject := make(map[string]map[string]struct{})
+	directoryBySessionID := make(map[string]string)
+	for _, session := range sessions {
+		project := normalizeProjectName(session.Project)
+		if project == "" || session.Directory == "" {
+			continue
+		}
+		if directoriesByProject[project] == nil {
+			directoriesByProject[project] = make(map[string]struct{})
+		}
+		directoriesByProject[project][session.Directory] = struct{}{}
+		directoryBySessionID[session.ID] = session.Directory
+	}
+
+	projects := make([]string, 0, len(directoriesByProject))
+	for project := range directoriesByProject {
+		projects = append(projects, project)
+	}
+	sort.Strings(projects)
+
+	findings := make([]Finding, 0)
+	for _, project := range projects {
+		directories := make([]string, 0, len(directoriesByProject[project]))
+		for directory := range directoriesByProject[project] {
+			directories = append(directories, directory)
+		}
+		sort.Strings(directories)
+
+		candidateIDs, err := scope.Store.ActiveRuntimeSessions(project, directories...)
+		if err != nil {
+			return CheckResult{}, err
+		}
+		candidatesByDirectory := make(map[string][]string)
+		for _, id := range candidateIDs {
+			candidatesByDirectory[directoryBySessionID[id]] = append(candidatesByDirectory[directoryBySessionID[id]], id)
+		}
+
+		ambiguousDirectories := make([]string, 0)
+		ambiguousIDs := make([]string, 0)
+		for _, directory := range directories {
+			ids := candidatesByDirectory[directory]
+			if len(ids) < 2 {
+				continue
+			}
+			ambiguousDirectories = append(ambiguousDirectories, directory)
+			ambiguousIDs = append(ambiguousIDs, ids...)
+		}
+		if len(ambiguousIDs) == 0 {
+			continue
+		}
+		sort.Strings(ambiguousIDs)
+		findings = append(findings, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityWarning,
+			ReasonCode:           c.Code(),
+			Message:              fmt.Sprintf("Project %q has %d active runtime session candidates across %d directory or directories.", project, len(ambiguousIDs), len(ambiguousDirectories)),
+			Why:                  "Omitted-session writes fail closed when multiple active runtime sessions match the same project and directory, so doctor reports the ambiguity without selecting or changing a session.",
+			Evidence:             mustJSON(map[string]any{"project": project, "active_candidate_count": len(ambiguousIDs), "directories": ambiguousDirectories, "session_ids": ambiguousIDs}),
+			SafeNextStep:         "Use `mem_session_end` to end only confirmed stale IDs; otherwise keep explicit runtime attribution with `session_id` on writes. Doctor is diagnostic-only and never selects, ends, or modifies sessions.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{"projects_evaluated": len(projects)}, findings), nil
+}
 
 func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
 	_ = ctx
@@ -52,14 +149,26 @@ func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Sco
 	if err != nil {
 		return CheckResult{}, err
 	}
+	knownProjects, err := knownSessionProjects(scope)
+	if err != nil {
+		return CheckResult{}, err
+	}
 	findings := make([]Finding, 0)
 	detected := make(map[string]DetectedProject)
 	for _, session := range sessions {
+		nameTarget, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects)
 		directory := strings.TrimSpace(session.Directory)
 		directoryProject, ok := detectSessionDirectoryProject(scope, detected, directory)
-		sessionProject := normalizeProjectName(session.Project)
-		if !ok || directoryProject.Project == "" || sessionProject == "" || directoryProject.Project == sessionProject {
+		if !ok {
+			directoryProject = DetectedProject{}
+		}
+		decision := decideSessionProjectAuthority(session.Project, nameTarget, knownManualTarget, directoryProject)
+		if !decision.shouldReportDirectoryMismatch() {
 			continue
+		}
+		aliases, err := sessionProjectAliases(scope, session.Directory)
+		if err != nil {
+			return CheckResult{}, err
 		}
 		findings = append(findings, Finding{
 			CheckID:              c.Code(),
@@ -67,12 +176,30 @@ func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Sco
 			ReasonCode:           "session_project_directory_mismatch",
 			Message:              "Session project does not match the project inferred from its directory.",
 			Why:                  "Project/directory drift can cause agents to retrieve or save memories under the wrong project scope.",
-			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_project": session.Project, "directory": session.Directory, "directory_project": directoryProject.Project, "directory_project_source": directoryProject.Source, "directory_project_path": directoryProject.Path}),
+			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_project": session.Project, "directory": session.Directory, "directory_project": directoryProject.Project, "directory_project_source": directoryProject.Source, "directory_project_path": directoryProject.Path, "project_aliases": aliases}),
 			SafeNextStep:         "Review the session evidence and use explicit `--project`/MCP project overrides until the project naming is consolidated.",
 			RequiresConfirmation: true,
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
+}
+
+// sessionProjectAliases uses the same root-only candidate as alias resolve.
+// Aliases are diagnostic evidence and a veto, never ownership authority.
+func sessionProjectAliases(scope Scope, directory string) (*store.ProjectAliasResolution, error) {
+	if strings.TrimSpace(directory) == "" {
+		return &store.ProjectAliasResolution{}, nil
+	}
+	candidate, err := projectpkg.DeriveRoutingCandidate(projectpkg.RoutingCandidateInput{GitRoot: projectpkg.ObserveGitRoot(directory), Directory: directory})
+	if err != nil {
+		if !errors.Is(err, projectpkg.ErrInvalidProjectName) {
+			return nil, err
+		}
+		// A legal filesystem root need not be a valid project key. It supplies
+		// no key alias evidence, but the exact cwd alias still applies.
+		candidate.Key = ""
+	}
+	return scope.Store.ResolveProjectAlias(candidate.Key, candidate.Directory)
 }
 
 func detectSessionDirectoryProject(scope Scope, cache map[string]DetectedProject, directory string) (DetectedProject, bool) {
@@ -84,14 +211,20 @@ func detectSessionDirectoryProject(scope Scope, cache map[string]DetectedProject
 	}
 	if scope.DetectProject != nil {
 		detected, ok := scope.DetectProject(directory)
+		if !ok || !isAcceptedDirectoryAuthoritySource(detected.Source) {
+			return DetectedProject{}, false
+		}
 		cache[directory] = detected
-		return detected, ok && detected.Project != ""
+		return detected, detected.Project != ""
 	}
 	if _, err := os.Stat(directory); err != nil {
 		return DetectedProject{}, false
 	}
-	res := projectpkg.DetectProjectFull(directory)
-	if res.Error != nil || (res.Source != projectpkg.SourceGitRemote && res.Source != projectpkg.SourceGitRoot) {
+	res := projectpkg.DetectProjectFullWithOptions(directory, projectpkg.DetectionOptions{InspectOnly: true})
+	if res.Error != nil {
+		return DetectedProject{}, false
+	}
+	if !isAcceptedDirectoryAuthoritySource(res.Source) {
 		return DetectedProject{}, false
 	}
 	detected := DetectedProject{Project: normalizeProjectName(res.Project), Source: res.Source, Path: res.Path}
@@ -110,27 +243,130 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 		return CheckResult{}, err
 	}
 	findings := make([]Finding, 0)
+	detected := make(map[string]DetectedProject)
 	for _, session := range sessions {
-		if !strings.HasPrefix(session.Name, "manual-save-") {
+		nameProject, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects)
+		directoryProject, ok := detectSessionDirectoryProject(scope, detected, strings.TrimSpace(session.Directory))
+		if !ok {
+			directoryProject = DetectedProject{}
+		}
+		decision := decideSessionProjectAuthority(session.Project, nameProject, knownManualTarget, directoryProject)
+		if !decision.shouldReportManualNameMismatch() {
 			continue
 		}
-		nameProject := normalizeProjectName(strings.TrimPrefix(session.Name, "manual-save-"))
-		sessionProject := normalizeProjectName(session.Project)
-		if nameProject == "" || sessionProject == "" || nameProject == sessionProject || !knownProjects[nameProject] {
-			continue
+		aliases, err := sessionProjectAliases(scope, session.Directory)
+		if err != nil {
+			return CheckResult{}, err
 		}
 		findings = append(findings, Finding{
 			CheckID:              c.Code(),
 			Severity:             SeverityWarning,
 			ReasonCode:           "manual_session_name_project_mismatch",
 			Message:              "Manual session name suffix does not match sessions.project.",
-			Why:                  "Manual session naming drift can hide memories from project-scoped context retrieval.",
-			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "name_project": nameProject}),
-			SafeNextStep:         "Use `engram context --project <project>` or MCP `project` overrides explicitly before deciding whether to consolidate projects.",
+			Why:                  "Manual session naming drift cannot prove project ownership and must not be auto-rescued.",
+			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "ownership_mode": session.OwnershipMode, "name_project": nameProject, "project_aliases": aliases}),
+			SafeNextStep:         "Review the persisted project, then use the ownership rescue command deliberately; its SQLite backup is the rollback point.",
 			RequiresConfirmation: true,
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
+}
+
+// sessionProjectAuthorityDecision centralizes the evidence hierarchy shared by
+// doctor findings and repair planning. Trusted Git evidence can establish a
+// move. A basename can only corroborate the persisted project and veto a
+// conflicting manual-name move; it can never establish a new target.
+type sessionProjectAuthority string
+
+const (
+	sessionProjectAuthorityNone             sessionProjectAuthority = ""
+	sessionProjectAuthorityTrustedDirectory sessionProjectAuthority = "trusted_directory"
+	sessionProjectAuthorityManualName       sessionProjectAuthority = "manual_name"
+)
+
+type sessionProjectAuthorityDecision struct {
+	persistedProject                       string
+	directoryProject                       string
+	directorySource                        string
+	directoryPath                          string
+	knownManualTarget                      bool
+	directoryBasenameCorroboratesPersisted bool
+	authority                              sessionProjectAuthority
+	repairTarget                           string
+	repairEvidenceSource                   string
+	repairEvidencePath                     string
+}
+
+func decideSessionProjectAuthority(persistedProject, manualTarget string, knownManualTarget bool, directory DetectedProject) sessionProjectAuthorityDecision {
+	decision := sessionProjectAuthorityDecision{
+		persistedProject:  normalizeProjectName(persistedProject),
+		directoryProject:  normalizeProjectName(directory.Project),
+		directorySource:   strings.TrimSpace(directory.Source),
+		directoryPath:     directory.Path,
+		knownManualTarget: knownManualTarget,
+	}
+	manualTarget = normalizeProjectName(manualTarget)
+	if decision.persistedProject == "" {
+		return decision
+	}
+	if isTrustedDirectoryEvidence(decision.directorySource) && decision.directoryProject != "" {
+		if decision.directoryProject != decision.persistedProject {
+			decision.authority = sessionProjectAuthorityTrustedDirectory
+			decision.repairTarget = decision.directoryProject
+			decision.repairEvidenceSource = decision.directorySource
+			decision.repairEvidencePath = decision.directoryPath
+		}
+		return decision
+	}
+	if decision.directorySource == projectpkg.SourceDirBasename {
+		decision.directoryBasenameCorroboratesPersisted = decision.directoryProject == decision.persistedProject
+		return decision
+	}
+	if knownManualTarget && manualTarget != "" && manualTarget != decision.persistedProject {
+		decision.authority = sessionProjectAuthorityManualName
+		decision.repairTarget = manualTarget
+	}
+	return decision
+}
+
+func (d sessionProjectAuthorityDecision) shouldReportDirectoryMismatch() bool {
+	return d.authority == sessionProjectAuthorityTrustedDirectory
+}
+
+func (d sessionProjectAuthorityDecision) shouldReportManualNameMismatch() bool {
+	return d.authority == sessionProjectAuthorityManualName
+}
+
+func (d sessionProjectAuthorityDecision) shouldRepairFromTrustedDirectory() bool {
+	return d.authority == sessionProjectAuthorityTrustedDirectory
+}
+
+func (d sessionProjectAuthorityDecision) shouldRepairFromManualName() bool {
+	return d.authority == sessionProjectAuthorityManualName
+}
+
+func isAcceptedDirectoryAuthoritySource(source string) bool {
+	switch strings.TrimSpace(source) {
+	case projectpkg.SourceGitRemote, projectpkg.SourceGitRoot, projectpkg.SourceDirBasename:
+		return true
+	default:
+		return false
+	}
+}
+
+// knownManualSessionTarget recognizes the exact manual session name convention
+// only when its normalized target is evidenced by a local session project. A
+// manual-looking name without that local evidence remains untrusted.
+func knownManualSessionTarget(name string, knownProjects map[string]bool) (string, bool) {
+	target := manualSessionNameTarget(name)
+	return target, target != "" && knownProjects[target]
+}
+
+func manualSessionNameTarget(name string) string {
+	if !strings.HasPrefix(name, "manual-save-") {
+		return ""
+	}
+	return normalizeProjectName(strings.TrimPrefix(name, "manual-save-"))
 }
 
 func knownSessionProjects(scope Scope) (map[string]bool, error) {
@@ -170,8 +406,13 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	if err != nil {
 		return CheckResult{}, err
 	}
+	usesCloudSync, err := cloudSyncInUse(scope)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	invalidProjects := make(map[string]bool)
 	blocking := make([]Finding, 0)
-	quarantined := make([]Finding, 0)
+	terminal := make([]Finding, 0)
 	for _, observation := range sourceObservations {
 		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
@@ -180,7 +421,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              fmt.Sprintf("Observation source row %d is missing required fields: %s", observation.ID, strings.Join(observation.MissingFields, ", ")),
 			Why:                  "A corrupt local observation source can produce rejected cloud payloads even when no pending mutation remains to diagnose.",
 			Evidence:             mustJSON(observation),
-			SafeNextStep:         "Run `engram cloud upgrade doctor repair --check sync_mutation_required_fields --dry-run` to inspect title-only repairs; content and type require manual recovery.",
+			SafeNextStep:         observationSourceRepairHint(scope.Project, observation.MissingFields),
 			RequiresConfirmation: true,
 		})
 	}
@@ -188,17 +429,35 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		// A quarantined row is an explicit, already-taken disposition: it no
 		// longer reaches transport, so it must not keep doctor blocked. It stays
 		// reported as non-blocking evidence of what was dropped from sync.
-		if strings.TrimSpace(mutation.Disposition) == store.SyncMutationDispositionQuarantined {
-			quarantined = append(quarantined, c.quarantinedFinding(mutation))
+		switch strings.TrimSpace(mutation.Disposition) {
+		case store.SyncMutationDispositionQuarantined:
+			terminal = append(terminal, c.quarantinedFinding(mutation))
+			continue
+		case store.SyncMutationDispositionSuperseded:
+			if missing := supersededEvidenceMissingFields(mutation); len(missing) > 0 {
+				blocking = append(blocking, c.incompleteSupersededFinding(mutation, missing))
+			} else {
+				terminal = append(terminal, c.supersededFinding(mutation))
+			}
 			continue
 		}
 		validation := store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey)
+		// Journaling is unconditional, so global rows on local-only installs are
+		// legitimate. Once Cloud is in use, match pushPage's project-column guard.
+		if usesCloudSync && (mutation.Project == "" || strings.TrimSpace(mutation.Project) != mutation.Project) {
+			invalidProjects[mutation.Project] = true
+			if validation.ReasonCode == "" {
+				validation.ReasonCode = "sync_mutation_project_invalid"
+				validation.Message = "Pending cloud mutation has an empty or padded project column."
+				validation.MissingFields = []string{"mutation.project"}
+			}
+		}
 		if validation.ReasonCode == "" {
 			continue
 		}
-		nextStep := "Run `engram cloud upgrade doctor` and inspect the mutation payload before any manual repair."
-		if strings.TrimSpace(scope.Project) != "" {
-			nextStep = "Run `engram cloud upgrade doctor --project " + scope.Project + "` and inspect the mutation payload before any manual repair."
+		repairProject := scope.Project
+		if invalidProjects[mutation.Project] {
+			repairProject = "" // Raw padded owners require an unscoped repair.
 		}
 		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
@@ -207,19 +466,19 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              validation.Message,
 			Why:                  "A pending sync mutation with missing required fields can block safe cloud replication and must fail loudly instead of being silently dropped.",
 			Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "target_key": mutation.TargetKey, "project": mutation.Project, "entity": mutation.Entity, "op": mutation.Op, "entity_key": mutation.EntityKey, "missing_fields": validation.MissingFields}),
-			SafeNextStep:         nextStep,
+			SafeNextStep:         syncMutationRequiredFieldsRepairHint(repairProject),
 			RequiresConfirmation: true,
 		})
 	}
 	// Quarantined rows are already-taken dispositions, so they never count as
 	// work still pending delivery.
-	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(quarantined), "corrupt_source_observations": len(sourceObservations)}
-	if len(quarantined) > 0 {
-		evidence["quarantined_mutations"] = len(quarantined)
+	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(terminal), "corrupt_source_observations": len(sourceObservations)}
+	if len(terminal) > 0 {
+		evidence["terminal_mutations"] = len(terminal)
 	}
 	// Blocking findings lead the roll-up so the check summary always describes the
 	// work that still needs a decision rather than already-dispositioned evidence.
-	rollUp := func() []Finding { return append(append([]Finding{}, blocking...), quarantined...) }
+	rollUp := func() []Finding { return append(append([]Finding{}, blocking...), terminal...) }
 
 	// A non-enrolled backlog is only a fault on a device that actually uses
 	// cloud sync. The store journals sync mutations unconditionally, so on a
@@ -230,10 +489,6 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	// while cloud sync is configured and running. The gate is deliberately
 	// placed after the payload/quarantine pass so a local-only install still
 	// gets its quarantined evidence reported instead of silently dropped.
-	usesCloudSync, err := cloudSyncInUse(scope)
-	if err != nil {
-		return CheckResult{}, err
-	}
 	if !usesCloudSync {
 		return resultFromFindings(c.Code(), evidence, rollUp()), nil
 	}
@@ -246,6 +501,9 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	}
 	scopedProject := normalizeProjectName(scope.Project)
 	for _, projectCount := range nonEnrolledCounts {
+		if invalidProjects[projectCount.Project] {
+			continue // Already reported as metadata corruption, not missing enrollment.
+		}
 		project := normalizeProjectName(projectCount.Project)
 		if scopedProject != "" && project != scopedProject {
 			continue
@@ -262,6 +520,75 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	return resultFromFindings(c.Code(), evidence, rollUp()), nil
+}
+
+func observationSourceRepairHint(project string, missingFields []string) string {
+	hint := syncMutationRequiredFieldsRepairHint(project)
+	for _, field := range missingFields {
+		if field == "type" || field == "content" {
+			return hint + " Repair cannot reconstruct missing type or content; manual investigation is required. Inspect source_unrepairable in the repair output."
+		}
+	}
+	return hint + " Only titles recoverable from existing content can be repaired; sources without a recoverable title require manual investigation and appear in source_unrepairable."
+}
+
+func syncMutationRequiredFieldsRepairHint(project string) string {
+	command := "engram doctor repair --check sync_mutation_required_fields --dry-run"
+	if project = strings.TrimSpace(project); project != "" {
+		command = "engram doctor repair --project " + project + " --check sync_mutation_required_fields --dry-run"
+	}
+	return "Run `" + command + "` to inspect local repairs; cloud-upgrade tooling requires configured cloud sync."
+}
+
+func supersededEvidenceMissingFields(mutation store.SyncMutation) []string {
+	missing := make([]string, 0, 3)
+	if strings.TrimSpace(mutation.DispositionReason) == "" {
+		missing = append(missing, "disposition_reason")
+	}
+	if strings.TrimSpace(mutation.DispositionEvidence) == "" {
+		missing = append(missing, "disposition_evidence")
+	}
+	if mutation.DispositionAt == nil || strings.TrimSpace(*mutation.DispositionAt) == "" {
+		missing = append(missing, "disposition_at")
+	}
+	return missing
+}
+
+func (c SyncMutationRequiredFieldsCheck) incompleteSupersededFinding(mutation store.SyncMutation, missing []string) Finding {
+	return Finding{
+		CheckID:              c.Code(),
+		Severity:             SeverityBlocking,
+		ReasonCode:           "sync_mutation_superseded_evidence_incomplete",
+		Message:              "Superseded sync mutation is missing required audit evidence: " + strings.Join(missing, ", "),
+		Why:                  "A terminal supersession without its reason, evidence, and timestamp cannot prove why transport was suppressed.",
+		Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "missing_fields": missing}),
+		SafeNextStep:         "Inspect the local journal evidence and repair it deliberately; automatic supersession metadata repair is unavailable.",
+		RequiresConfirmation: true,
+	}
+}
+
+func (c SyncMutationRequiredFieldsCheck) supersededFinding(mutation store.SyncMutation) Finding {
+	return Finding{
+		CheckID:    c.Code(),
+		Severity:   SeverityInfo,
+		ReasonCode: "sync_mutation_superseded",
+		Message:    "Sync mutation is superseded by current local lifecycle evidence and no longer blocks cloud replication.",
+		Why:        "Supersession preserves the obsolete local journal row and its reason without acknowledging or transporting it, so doctor keeps audit evidence without treating it as active work.",
+		Evidence: mustJSON(map[string]any{
+			"seq":                  mutation.Seq,
+			"target_key":           mutation.TargetKey,
+			"project":              mutation.Project,
+			"entity":               mutation.Entity,
+			"op":                   mutation.Op,
+			"entity_key":           mutation.EntityKey,
+			"disposition":          mutation.Disposition,
+			"disposition_reason":   mutation.DispositionReason,
+			"disposition_evidence": mutation.DispositionEvidence,
+			"disposition_at":       mutation.DispositionAt,
+		}),
+		SafeNextStep:         "No action required. Inspect the recorded disposition evidence if you need to audit the local reconciliation.",
+		RequiresConfirmation: false,
+	}
 }
 
 func (c SyncMutationRequiredFieldsCheck) quarantinedFinding(mutation store.SyncMutation) Finding {
@@ -286,6 +613,77 @@ func (c SyncMutationRequiredFieldsCheck) quarantinedFinding(mutation store.SyncM
 		SafeNextStep:         "No action required. Inspect the recorded disposition evidence if you need to know what was dropped from cloud sync.",
 		RequiresConfirmation: false,
 	}
+}
+
+func (c SyncTargetClosedSpaceCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	states, err := scope.Store.ListSyncStates()
+	if err != nil {
+		return CheckResult{}, err
+	}
+	enrolled, err := scope.Store.ListEnrolledProjects()
+	if err != nil {
+		return CheckResult{}, err
+	}
+	// The closed set of legitimate sync targets: the legacy global cloud target,
+	// the reserved cloud inbox target, the local chunk target, and one
+	// cloud:<project> target per enrolled project. The listing is deliberately
+	// unscoped even when scope.Project is set because sync_state rows are global:
+	// a foreign target belongs to no project, so a project-scoped query could
+	// never return it and doctor must still report the row that drifted in.
+	closed := map[string]bool{
+		store.DefaultSyncTargetKey: true,
+		store.SyncInboxTargetKey:   true,
+		store.LocalChunkTargetKey:  true,
+	}
+	for _, project := range enrolled {
+		closed[syncTargetKeyForClosedSpace(project.Project)] = true
+	}
+	findings := make([]Finding, 0)
+	for _, state := range states {
+		if closed[state.TargetKey] {
+			continue
+		}
+		severity := SeverityError
+		if state.UnackedMutations == 0 {
+			severity = SeverityWarning
+		}
+		findings = append(findings, Finding{
+			CheckID:    c.Code(),
+			Severity:   severity,
+			ReasonCode: ReasonForeignSyncTarget,
+			Message:    fmt.Sprintf("Sync target %q is outside the closed set of legitimate sync targets.", state.TargetKey),
+			Why:        "A sync_state row for an unknown target records sync progress no configured delivery pipeline can ever advance, so its state can silently rot while appearing live.",
+			Evidence: mustJSON(map[string]any{
+				"target_key":        state.TargetKey,
+				"lifecycle":         state.Lifecycle,
+				"unacked_mutations": state.UnackedMutations,
+			}),
+			SafeNextStep:         safeNextStepForForeignSyncTarget(state),
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{"sync_targets_evaluated": len(states), "enrolled_projects": len(enrolled)}, findings), nil
+}
+
+// safeNextStepForForeignSyncTarget selects the doctor guidance for a foreign
+// sync_state row. Only rows with no pending mutations are inert drift the later
+// cloud-inbox cleanup can remove safely; rows with unacknowledged mutations
+// record writes no configured pipeline will ever deliver, so they demand an
+// explicit review decision before the row is discarded.
+func safeNextStepForForeignSyncTarget(state store.SyncTargetState) string {
+	if state.UnackedMutations == 0 {
+		return "If the target belongs to a project you want synced, run `engram cloud enroll <project>`. Otherwise no action is required: the row is inert drift left by the removed derivation fallback, it cannot advance and no data is at risk, and a later cloud-inbox slice removes these legacy rows automatically."
+	}
+	return fmt.Sprintf("Review the %d unacknowledged mutation(s) recorded for this target before removing the row: they record writes that no configured pipeline will deliver. If the target belongs to a project you want synced, run `engram cloud enroll <project>` so delivery can resume; otherwise clear or re-ack the pending mutations through a supported repair workflow first.", state.UnackedMutations)
+}
+
+func syncTargetKeyForClosedSpace(project string) string {
+	project = normalizeProjectName(project)
+	if project == "" {
+		return ""
+	}
+	return store.DefaultSyncTargetKey + ":" + project
 }
 
 func (c InvalidSessionIdentityCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
@@ -352,18 +750,20 @@ func (c UnownedSessionProjectCheck) Run(ctx context.Context, scope Scope) (Check
 	}
 	findings := make([]Finding, 0)
 	for _, session := range sessions {
-		if normalizeProjectName(session.Project) != "" {
+		mode := strings.TrimSpace(session.OwnershipMode)
+		if normalizeProjectName(session.Project) != "" && (mode == store.SessionOwnershipShared || mode == store.SessionOwnershipProjectOwned) {
 			continue
 		}
 		findings = append(findings, Finding{
 			CheckID:    c.Code(),
 			Severity:   SeverityWarning,
 			ReasonCode: CheckUnownedSessionProject,
-			Message:    fmt.Sprintf("Session %q identifies no project.", session.ID),
-			Why:        "A session left over from the schema where sessions.project was nullable owns no project, so its memories stay outside every project-scoped retrieval and writes to it must resolve ownership before they can land.",
+			Message:    fmt.Sprintf("Session %q has unclassified or invalid ownership metadata.", session.ID),
+			Why:        "Legacy, blank, and invalid ownership metadata cannot safely establish a project-owned session, so an operator must classify it explicitly before relying on ownership enforcement.",
 			Evidence: mustJSON(map[string]any{
 				"session_id":      session.ID,
 				"session_project": session.Project,
+				"ownership_mode":  session.OwnershipMode,
 				"directory":       session.Directory,
 			}),
 			SafeNextStep:         fmt.Sprintf("Assign ownership with `%s --project <name> --session %s` after confirming which project the session belongs to.", store.RescueOwnershipCommand, session.ID),
@@ -388,11 +788,50 @@ func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (
 			Message:              fmt.Sprintf("%d observation(s) reference missing session %q.", item.ObservationCount, item.SessionID),
 			Why:                  "Observations reference a missing session, so their canonical session cannot be reconstructed automatically.",
 			Evidence:             mustJSON(item),
-			SafeNextStep:         "Inspect and recover the affected data deliberately. The canonical session cannot be reconstructed automatically, and no supported repair exists.",
+			SafeNextStep:         "Review the affected reference, then run `engram doctor repair --project <project> --check orphaned_observation_session --plan`; apply only after confirming the local placeholder session is appropriate.",
 			RequiresConfirmation: true,
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"orphaned_session_references_evaluated": len(evidence)}, findings), nil
+}
+
+// Run reports legacy pending relations whose source AND target observations
+// are absent from the active observation set. Such rows can never show a title
+// in `engram conflicts show` and no verdict can ever be recorded against them,
+// so they only inflate the pending backlog. The listing is deliberately
+// unscoped even when scope.Project is set: a relation with both endpoints
+// absent belongs to no project, so a project-scoped query could never return
+// the rows it exists to surface (the same reasoning as
+// UnownedSessionProjectCheck).
+func (c OrphanedPendingRelationsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	evidence, err := scope.Store.ListOrphanedPendingRelationEvidenceBounded(orphanedPendingRelationSampleLimit)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	findings := make([]Finding, 0, 1)
+	if evidence.CandidateCount > 0 {
+		findings = append(findings, Finding{
+			CheckID:    c.Code(),
+			Severity:   SeverityWarning,
+			ReasonCode: CheckOrphanedPendingRelations,
+			Message:    fmt.Sprintf("%d pending relation(s) reference missing observations on both endpoints and can never be judged.", evidence.CandidateCount),
+			Why:        "A pending relation without an active source or target observation shows no titles and no verdict can ever be recorded against it, so it only inflates the pending backlog; reclassifying it into the audited `orphaned` disposition preserves the row as history without fabricating a verdict.",
+			Evidence: mustJSON(map[string]any{
+				"candidate_count":      evidence.CandidateCount,
+				"one_endpoint_missing": evidence.OneEndpointMissing,
+				"live_pending":         evidence.LivePending,
+				"sample":               evidence.Sample,
+			}),
+			SafeNextStep:         "Review the sample, then run `engram doctor repair --check orphaned_pending_relations --dry-run`; apply reclassifies only these rows into the audited `orphaned` disposition after creating a SQLite backup.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{
+		"candidate_count":      evidence.CandidateCount,
+		"one_endpoint_missing": evidence.OneEndpointMissing,
+		"live_pending":         evidence.LivePending,
+	}, findings), nil
 }
 
 func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

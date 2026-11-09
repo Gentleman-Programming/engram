@@ -1,4 +1,7 @@
 const SUMMARY_FIELD_PATHS = [
+  // Current Pi session_compact payloads put the authoritative summary here.
+  // Keep it before legacy shapes so conflicting compatibility fields cannot win.
+  ["compactionEntry", "summary"],
   ["summary"],
   ["compactedSummary"],
   ["compacted_summary"],
@@ -18,6 +21,13 @@ const SUMMARY_FIELD_PATHS = [
   ["data", "summary"],
   ["data", "content"],
 ];
+
+export const ArchiveOutcome = Object.freeze({
+  Confirmed: "confirmed",
+  Failed: "failed",
+  Unknown: "unknown",
+  Unavailable: "unavailable",
+});
 
 function getPath(root, path) {
   let current = root;
@@ -57,8 +67,40 @@ export function recoveryInstruction(project) {
   );
 }
 
-export function buildRecoveryNotice(project, context) {
-  const instruction = recoveryInstruction(project);
+function persistedAcknowledgement(project) {
+  return (
+    `Compaction recovery summary was already saved to Engram (${project}) by gentle-engram. ` +
+    `No manual mem_session_summary call is needed for this compaction. ` +
+    `Call mem_context if you need additional recent project memory.`
+  );
+}
+
+function unknownArchiveInstruction(project) {
+  return (
+    `Compaction recovery could not confirm whether the summary was saved to Engram (${project}). ` +
+    `Do NOT retry or call mem_session_summary yet, because that could duplicate the summary. ` +
+    `First verify with mem_search or mem_doctor; save the summary once only if it is absent.`
+  );
+}
+
+function unavailableRecoveryInstruction() {
+  return (
+    "CRITICAL INSTRUCTION FOR COMPACTED SUMMARY:\n" +
+    "gentle-engram could not safely confirm the runtime session and project, so it did not archive the summary. " +
+    "Before saving manually, verify the active Engram session and project with mem_current_project or mem_doctor. " +
+    "Save the summary once only after that verification."
+  );
+}
+
+export function buildRecoveryNotice(project, context, outcome = ArchiveOutcome.Failed) {
+  const normalizedOutcome = outcome === true ? ArchiveOutcome.Confirmed : outcome;
+  const instruction = normalizedOutcome === ArchiveOutcome.Confirmed
+    ? persistedAcknowledgement(project)
+    : normalizedOutcome === ArchiveOutcome.Unknown
+      ? unknownArchiveInstruction(project)
+      : normalizedOutcome === ArchiveOutcome.Unavailable
+        ? unavailableRecoveryInstruction()
+        : recoveryInstruction(project);
   const trimmedContext = typeof context === "string" ? context.trim() : "";
   return trimmedContext ? `${trimmedContext}\n\n${instruction}` : instruction;
 }

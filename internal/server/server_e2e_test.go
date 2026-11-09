@@ -11,8 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func newE2EServer(t *testing.T) (*store.Store, *httptest.Server) {
@@ -37,6 +38,48 @@ func newE2EServer(t *testing.T) (*store.Store, *httptest.Server) {
 	return s, httpServer
 }
 
+func TestContextHistoryE2E(t *testing.T) {
+	st, ts := newE2EServer(t)
+	if err := st.CreateSession("history", "engram", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 35; i++ {
+		title := "History é " + strconv.Itoa(i)
+		if _, err := st.AddObservation(store.AddObservationParams{SessionID: "history", Project: "engram", Scope: "project", Type: "note", Title: title, Content: title}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func(query string) string {
+		t.Helper()
+		resp, err := ts.Client().Get(ts.URL + "/context?project=engram&scope=project" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("context status: %d", resp.StatusCode)
+		}
+		return decodeJSON[map[string]string](t, resp)["context"]
+	}
+	legacy := get("")
+	if disabled := get("&older_history=false"); disabled != legacy {
+		t.Fatal("explicit false changed default output")
+	}
+	if strings.Contains(legacy, "### Older History") {
+		t.Fatal("default context included older history")
+	}
+	enabled := get("&older_history=true&max_bytes=4096")
+	if !strings.Contains(enabled, "### Older History") || len(enabled) > 4096 {
+		t.Fatalf("enabled context: %s", enabled)
+	}
+	for _, n := range []int{1, 32, 128} {
+		text := get("&older_history=true&max_bytes=" + strconv.Itoa(n))
+		if len(text) > n || !utf8.ValidString(text) {
+			t.Fatalf("invalid context at budget %d: %q", n, text)
+		}
+	}
+}
+
 func postJSON(t *testing.T, client *http.Client, url string, body any) *http.Response {
 	t.Helper()
 	payload, err := json.Marshal(body)
@@ -58,6 +101,57 @@ func decodeJSON[T any](t *testing.T, resp *http.Response) T {
 		t.Fatalf("decode json: %v", err)
 	}
 	return out
+}
+
+func TestObservationExpectedProjectRouteE2E(t *testing.T) {
+	t.Setenv("ENGRAM_HTTP_TOKEN", "")
+	st, ts := newE2EServer(t)
+	if err := st.CreateSession("owner-route", "owner", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "owner-route", Project: "owner", Scope: "global", Type: "note", Title: "original", Content: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := ts.URL + "/observations/" + strconv.FormatInt(id, 10)
+	for _, tc := range []struct {
+		method, query string
+		status        int
+	}{
+		{http.MethodPatch, "", http.StatusBadRequest},
+		{http.MethodDelete, "", http.StatusBadRequest},
+		{http.MethodPatch, "?expected_project=other", http.StatusConflict},
+		{http.MethodDelete, "?expected_project=other&hard=true", http.StatusConflict},
+		{http.MethodPatch, "?expected_project=%20OWNER%20", http.StatusOK},
+		{http.MethodDelete, "?expected_project=owner", http.StatusOK},
+		{http.MethodPatch, "?expected_project=owner", http.StatusNotFound},
+		{http.MethodDelete, "?expected_project=other&hard=true", http.StatusConflict},
+		{http.MethodDelete, "?expected_project=owner&hard=true", http.StatusOK},
+		{http.MethodDelete, "?expected_project=owner&hard=true", http.StatusNotFound},
+	} {
+		req, err := http.NewRequest(tc.method, path+tc.query, strings.NewReader(`{"content":"changed"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != tc.status {
+			t.Fatalf("%s %s = %d, want %d: %s", tc.method, tc.query, resp.StatusCode, tc.status, body)
+		}
+		if tc.method == http.MethodPatch && tc.status == http.StatusOK {
+			var obs store.Observation
+			if err := json.Unmarshal(body, &obs); err != nil || obs.Content != "changed" || obs.RevisionCount != 2 {
+				t.Fatalf("matching update response = %#v, %v", obs, err)
+			}
+		}
+	}
 }
 
 func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
@@ -140,7 +234,7 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 		t.Fatalf("expected different topic to create new observation")
 	}
 
-	deleteReq, err := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(firstID, 10), nil)
+	deleteReq, err := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(firstID, 10)+"?expected_project=engram", nil)
 	if err != nil {
 		t.Fatalf("new delete request: %v", err)
 	}
@@ -175,6 +269,77 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 	}
 	if int64(searchResults[0]["id"].(float64)) != bugID {
 		t.Fatalf("expected bug observation in search results")
+	}
+}
+
+func TestObservationPinContextLifecycleE2E(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	sessionResp := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":        "s-pin-context",
+		"project":   "engram",
+		"directory": "/tmp/engram",
+	})
+	if sessionResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create session: got %d", sessionResp.StatusCode)
+	}
+	sessionResp.Body.Close()
+
+	observationResp := postJSON(t, client, ts.URL+"/observations", map[string]any{
+		"session_id": "s-pin-context",
+		"type":       "decision",
+		"title":      "Pinned through HTTP",
+		"content":    "This memory should appear in the pinned context section.",
+		"project":    "engram",
+		"scope":      "project",
+	})
+	if observationResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create observation: got %d", observationResp.StatusCode)
+	}
+	observation := decodeJSON[map[string]any](t, observationResp)
+	id := int64(observation["id"].(float64))
+
+	setPin := func(method string, wantPinned bool) {
+		t.Helper()
+		req, err := http.NewRequest(method, ts.URL+"/observations/"+strconv.FormatInt(id, 10)+"/pin", nil)
+		if err != nil {
+			t.Fatalf("new %s pin request: %v", method, err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s pin request: %v", method, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s pin request: got %d", method, resp.StatusCode)
+		}
+		body := decodeJSON[map[string]any](t, resp)
+		if body["pinned"] != wantPinned {
+			t.Fatalf("%s pinned = %v, want %t", method, body["pinned"], wantPinned)
+		}
+	}
+	context := func() string {
+		t.Helper()
+		resp, err := client.Get(ts.URL + "/context?project=engram&scope=project&observations=-1&prompts=-1&sessions=-1")
+		if err != nil {
+			t.Fatalf("get context: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("get context: got %d", resp.StatusCode)
+		}
+		return decodeJSON[map[string]string](t, resp)["context"]
+	}
+
+	setPin(http.MethodPut, true)
+	pinnedContext := context()
+	if !strings.Contains(pinnedContext, "### Pinned") || !strings.Contains(pinnedContext, "Pinned through HTTP") {
+		t.Fatalf("pinned observation missing from context:\n%s", pinnedContext)
+	}
+
+	setPin(http.MethodDelete, false)
+	unpinnedContext := context()
+	if strings.Contains(unpinnedContext, "### Pinned") || strings.Contains(unpinnedContext, "Pinned through HTTP") {
+		t.Fatalf("unpinned observation remains in pinned-only context:\n%s", unpinnedContext)
 	}
 }
 
@@ -493,6 +658,279 @@ func TestCoreReadHandlersAndHelpersE2E(t *testing.T) {
 	endResp.Body.Close()
 }
 
+// TestContextQueryParamsE2E covers the store.ContextOptions query params on
+// GET /context (feat/context-size-cap): observations/prompts/sessions/pinned
+// (signed int caps) and compact (bool). Convention: 0 = legacy default,
+// >0 = cap, <0 = omit the section (and its header) entirely.
+func TestContextQueryParamsE2E(t *testing.T) {
+	s, ts := newE2EServer(t)
+	client := ts.Client()
+
+	create := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":      "s-ctx-params",
+		"project": "engram",
+	})
+	if create.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating session, got %d", create.StatusCode)
+	}
+	create.Body.Close()
+
+	const bodyMarker = "UNIQUE_CONTEXT_PARAMS_BODY_MARKER_9f3a"
+	obsResp := postJSON(t, client, ts.URL+"/observations", map[string]any{
+		"session_id": "s-ctx-params",
+		"type":       "decision",
+		"title":      "Context params observation",
+		"content":    "Long body so compact mode has something to drop. " + bodyMarker,
+		"project":    "engram",
+		"scope":      "project",
+	})
+	if obsResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating observation, got %d", obsResp.StatusCode)
+	}
+	obsResp.Body.Close()
+
+	promptResp := postJSON(t, client, ts.URL+"/prompts", map[string]any{
+		"session_id": "s-ctx-params",
+		"content":    "prompt for context params test",
+		"project":    "engram",
+	})
+	if promptResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating prompt, got %d", promptResp.StatusCode)
+	}
+	promptResp.Body.Close()
+
+	// Two pinned observations, because pinned=N is only observable when the
+	// "### Pinned" section actually has rows — against an empty section every
+	// pinned assertion below would pass vacuously. Pinned bullets sort
+	// newest-first (created_at DESC, id DESC), so pinned=1 deterministically
+	// keeps NEW and drops OLD.
+	const (
+		pinnedOldMarker = "UNIQUE_CONTEXT_PARAMS_PINNED_OLD_4b21"
+		pinnedNewMarker = "UNIQUE_CONTEXT_PARAMS_PINNED_NEW_7e08"
+	)
+	for _, title := range []string{pinnedOldMarker, pinnedNewMarker} {
+		pinResp := postJSON(t, client, ts.URL+"/observations", map[string]any{
+			"session_id": "s-ctx-params",
+			"type":       "decision",
+			"title":      title,
+			"content":    "Pinned body so compact mode has something to drop here too.",
+			"project":    "engram",
+			"scope":      "project",
+		})
+		if pinResp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 creating pinned observation %s, got %d", title, pinResp.StatusCode)
+		}
+		id := int64(decodeJSON[map[string]any](t, pinResp)["id"].(float64))
+		if err := s.PinObservation(id); err != nil {
+			t.Fatalf("pin %s: %v", title, err)
+		}
+	}
+
+	// Same reasoning for sessions=N: a second session so the cap has
+	// something to drop, and a summary on each so the rendered bullets are
+	// distinguishable. RecentSessions orders by newest activity with an
+	// id DESC tie-break, so "s-ctx-params-newer" always outranks
+	// "s-ctx-params" — with or without a clock tick between them.
+	const (
+		oldSessionSummary = "UNIQUE_CONTEXT_PARAMS_SESSION_OLD_2c9f"
+		newSessionSummary = "UNIQUE_CONTEXT_PARAMS_SESSION_NEW_6a3d"
+	)
+	newerSession := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":      "s-ctx-params-newer",
+		"project": "engram",
+	})
+	if newerSession.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating second session, got %d", newerSession.StatusCode)
+	}
+	newerSession.Body.Close()
+
+	for _, item := range []struct{ id, summary string }{
+		{"s-ctx-params", oldSessionSummary},
+		{"s-ctx-params-newer", newSessionSummary},
+	} {
+		endResp := postJSON(t, client, ts.URL+"/sessions/"+item.id+"/end", map[string]any{"summary": item.summary})
+		if endResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 ending session %s, got %d", item.id, endResp.StatusCode)
+		}
+		endResp.Body.Close()
+	}
+
+	// ── No params: byte-identical to the legacy FormatContext call — the
+	// contract must not change for existing callers.
+	defaultResp, err := client.Get(ts.URL + "/context?project=engram&scope=project")
+	if err != nil {
+		t.Fatalf("context default: %v", err)
+	}
+	if defaultResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 context default, got %d", defaultResp.StatusCode)
+	}
+	defaultData := decodeJSON[map[string]string](t, defaultResp)
+
+	legacy, err := s.FormatContext("engram", "project")
+	if err != nil {
+		t.Fatalf("legacy FormatContext: %v", err)
+	}
+	if defaultData["context"] != legacy {
+		t.Fatalf("no-params /context should match legacy FormatContext exactly.\ngot:\n%s\nwant:\n%s", defaultData["context"], legacy)
+	}
+	if !strings.Contains(defaultData["context"], bodyMarker) {
+		t.Fatalf("default context should include the observation body preview, got:\n%s", defaultData["context"])
+	}
+	if !strings.Contains(defaultData["context"], "### Recent User Prompts") {
+		t.Fatalf("default context should include the prompts section, got:\n%s", defaultData["context"])
+	}
+	// Every section the cases below drop or cap must be present here first,
+	// otherwise those assertions prove nothing.
+	for _, want := range []string{
+		"### Recent Sessions", oldSessionSummary, newSessionSummary,
+		"### Pinned", pinnedOldMarker, pinnedNewMarker,
+	} {
+		if !strings.Contains(defaultData["context"], want) {
+			t.Fatalf("default context should include %q, got:\n%s", want, defaultData["context"])
+		}
+	}
+
+	// ── compact=1&observations=1: strictly smaller than default, no body preview.
+	compactResp, err := client.Get(ts.URL + "/context?project=engram&scope=project&compact=1&observations=1")
+	if err != nil {
+		t.Fatalf("context compact: %v", err)
+	}
+	if compactResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 context compact, got %d", compactResp.StatusCode)
+	}
+	compactData := decodeJSON[map[string]string](t, compactResp)
+	if len(compactData["context"]) >= len(defaultData["context"]) {
+		t.Fatalf("compact context (%d) should be smaller than default (%d)",
+			len(compactData["context"]), len(defaultData["context"]))
+	}
+	if strings.Contains(compactData["context"], bodyMarker) {
+		t.Fatalf("compact context should not include the observation body preview, got:\n%s", compactData["context"])
+	}
+
+	// ── prompts=-1: negative cap omits the prompts section AND its header
+	// (this is the behavior PR #162's `err == nil && n > 0` parsing would
+	// have silently discarded — negatives must reach the store as-is).
+	noPromptsResp, err := client.Get(ts.URL + "/context?project=engram&scope=project&prompts=-1")
+	if err != nil {
+		t.Fatalf("context prompts=-1: %v", err)
+	}
+	if noPromptsResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 context prompts=-1, got %d", noPromptsResp.StatusCode)
+	}
+	noPromptsData := decodeJSON[map[string]string](t, noPromptsResp)
+	if strings.Contains(noPromptsData["context"], "### Recent User Prompts") {
+		t.Fatalf("prompts=-1 should drop the '### Recent User Prompts' header, got:\n%s", noPromptsData["context"])
+	}
+	if strings.Contains(noPromptsData["context"], "prompt for context params test") {
+		t.Fatalf("prompts=-1 should drop prompt content, got:\n%s", noPromptsData["context"])
+	}
+
+	// ── observations=abc: unparseable value is ignored (never a 4xx), falls
+	// back to the same zero-value default as the no-params request.
+	garbageResp, err := client.Get(ts.URL + "/context?project=engram&scope=project&observations=abc")
+	if err != nil {
+		t.Fatalf("context garbage observations: %v", err)
+	}
+	if garbageResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 context garbage observations, got %d", garbageResp.StatusCode)
+	}
+	garbageData := decodeJSON[map[string]string](t, garbageResp)
+	if garbageData["context"] != defaultData["context"] {
+		t.Fatalf("observations=abc should be ignored and match the default output.\ngot:\n%s\nwant:\n%s",
+			garbageData["context"], defaultData["context"])
+	}
+
+	// The remaining cases each fetch one context blob and assert on which
+	// sections survived, so they share the fetch rather than repeat the
+	// err/status/decode boilerplate five more times.
+	contextFor := func(params string) string {
+		t.Helper()
+		resp, err := client.Get(ts.URL + "/context?project=engram&scope=project&" + params)
+		if err != nil {
+			t.Fatalf("context %s: %v", params, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 context %s, got %d", params, resp.StatusCode)
+		}
+		return decodeJSON[map[string]string](t, resp)["context"]
+	}
+
+	// ── sessions=-1 / pinned=-1: the omit-the-section state for the two
+	// params nothing exercised from the URL until now. The sections
+	// themselves are already covered by store.TestFormatContextWithOptions —
+	// what is unproven there is the wiring, so a typo in a query-param name
+	// would keep every store test green and still ship a dead knob.
+	noSessions := contextFor("sessions=-1")
+	if strings.Contains(noSessions, "### Recent Sessions") {
+		t.Fatalf("sessions=-1 should drop the '### Recent Sessions' header, got:\n%s", noSessions)
+	}
+	for _, dropped := range []string{oldSessionSummary, newSessionSummary} {
+		if strings.Contains(noSessions, dropped) {
+			t.Fatalf("sessions=-1 should drop session summary %q, got:\n%s", dropped, noSessions)
+		}
+	}
+	for _, kept := range []string{"### Pinned", "### Recent User Prompts", "### Recent Observations"} {
+		if !strings.Contains(noSessions, kept) {
+			t.Fatalf("sessions=-1 should leave %q alone, got:\n%s", kept, noSessions)
+		}
+	}
+
+	noPinned := contextFor("pinned=-1")
+	if strings.Contains(noPinned, "### Pinned") {
+		t.Fatalf("pinned=-1 should drop the '### Pinned' header, got:\n%s", noPinned)
+	}
+	for _, dropped := range []string{pinnedOldMarker, pinnedNewMarker} {
+		if strings.Contains(noPinned, dropped) {
+			t.Fatalf("pinned=-1 should drop pinned observation %q, got:\n%s", dropped, noPinned)
+		}
+	}
+	for _, kept := range []string{"### Recent Sessions", "### Recent User Prompts", "### Recent Observations"} {
+		if !strings.Contains(noPinned, kept) {
+			t.Fatalf("pinned=-1 should leave %q alone, got:\n%s", kept, noPinned)
+		}
+	}
+
+	// ── pinned=1 / sessions=1: a positive cap trims its own section to the
+	// newest row and leaves every other section untouched.
+	cappedPinned := contextFor("pinned=1")
+	if !strings.Contains(cappedPinned, pinnedNewMarker) {
+		t.Fatalf("pinned=1 should keep the newest pinned observation, got:\n%s", cappedPinned)
+	}
+	if strings.Contains(cappedPinned, pinnedOldMarker) {
+		t.Fatalf("pinned=1 should drop the older pinned observation, got:\n%s", cappedPinned)
+	}
+	for _, untouched := range []string{oldSessionSummary, newSessionSummary, bodyMarker, "### Recent User Prompts"} {
+		if !strings.Contains(cappedPinned, untouched) {
+			t.Fatalf("pinned=1 should not touch the other sections, %q missing:\n%s", untouched, cappedPinned)
+		}
+	}
+
+	cappedSessions := contextFor("sessions=1")
+	if !strings.Contains(cappedSessions, newSessionSummary) {
+		t.Fatalf("sessions=1 should keep the most recent session, got:\n%s", cappedSessions)
+	}
+	if strings.Contains(cappedSessions, oldSessionSummary) {
+		t.Fatalf("sessions=1 should drop the older session, got:\n%s", cappedSessions)
+	}
+	for _, untouched := range []string{pinnedOldMarker, pinnedNewMarker, bodyMarker, "### Recent User Prompts"} {
+		if !strings.Contains(cappedSessions, untouched) {
+			t.Fatalf("sessions=1 should not touch the other sections, %q missing:\n%s", untouched, cappedSessions)
+		}
+	}
+
+	// ── observations=999999: an absurd positive cap is clamped to
+	// contextMaxSectionLimit instead of reaching SQL as the LIMIT. The
+	// ceiling itself is invisible from here while the store holds fewer rows
+	// than the cap, so what this pins down is that clamping neither 4xx's nor
+	// changes the rendered output — a clamp that collapsed the value to 0 or
+	// to a negative would alter or drop the section and fail this equality.
+	huge := contextFor("observations=999999")
+	if huge != defaultData["context"] {
+		t.Fatalf("observations=999999 should be clamped and still match the default output.\ngot:\n%s\nwant:\n%s",
+			huge, defaultData["context"])
+	}
+}
+
 func TestValidationAndImportExportErrorsE2E(t *testing.T) {
 	_, ts := newE2EServer(t)
 	client := ts.Client()
@@ -521,7 +959,7 @@ func TestValidationAndImportExportErrorsE2E(t *testing.T) {
 	}
 	create.Body.Close()
 
-	updateBadIDReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/not-a-number", strings.NewReader(`{"title":"x"}`))
+	updateBadIDReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/not-a-number?expected_project=engram", strings.NewReader(`{"title":"x"}`))
 	updateBadIDReq.Header.Set("Content-Type", "application/json")
 	updateBadIDResp, err := client.Do(updateBadIDReq)
 	if err != nil {
@@ -740,7 +1178,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	obsBody := decodeJSON[map[string]any](t, obs)
 	obsID := int64(obsBody["id"].(float64))
 
-	updateReq, err := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), strings.NewReader(`{"title":"Auth handling updated","topic_key":"architecture/auth"}`))
+	updateReq, err := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", strings.NewReader(`{"title":"Auth handling updated","topic_key":"architecture/auth"}`))
 	if err != nil {
 		t.Fatalf("new patch request: %v", err)
 	}
@@ -757,7 +1195,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 		t.Fatalf("expected updated title, got %v", updated["title"])
 	}
 
-	emptyUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), strings.NewReader(`{}`))
+	emptyUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", strings.NewReader(`{}`))
 	emptyUpdateReq.Header.Set("Content-Type", "application/json")
 	emptyUpdateResp, err := client.Do(emptyUpdateReq)
 	if err != nil {
@@ -768,7 +1206,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	emptyUpdateResp.Body.Close()
 
-	badUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), strings.NewReader("{"))
+	badUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", strings.NewReader("{"))
 	badUpdateReq.Header.Set("Content-Type", "application/json")
 	badUpdateResp, err := client.Do(badUpdateReq)
 	if err != nil {
@@ -779,7 +1217,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	badUpdateResp.Body.Close()
 
-	deleteHardReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?hard=true", nil)
+	deleteHardReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram&hard=true", nil)
 	deleteHardResp, err := client.Do(deleteHardReq)
 	if err != nil {
 		t.Fatalf("delete hard observation: %v", err)
@@ -789,7 +1227,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	deleteHardResp.Body.Close()
 
-	deleteInvalidBoolReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?hard=not-bool", nil)
+	deleteInvalidBoolReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram&hard=not-bool", nil)
 	deleteInvalidBoolResp, err := client.Do(deleteInvalidBoolReq)
 	if err != nil {
 		t.Fatalf("delete with invalid bool: %v", err)
@@ -872,14 +1310,41 @@ func TestServerHandlersReturn500WhenStoreClosed(t *testing.T) {
 	}
 	contextResp.Body.Close()
 
+	healthResp, err := client.Get(ts.URL + "/health")
+	if err != nil {
+		t.Fatalf("health closed store: %v", err)
+	}
+	if healthResp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500 health with closed store, got %d", healthResp.StatusCode)
+	}
+	healthBody := decodeJSON[map[string]any](t, healthResp)
+	if healthBody["error"] != "health check failed" {
+		t.Fatalf("closed store health body = %v", healthBody)
+	}
+
 	statsResp, err := client.Get(ts.URL + "/stats")
 	if err != nil {
 		t.Fatalf("stats closed store: %v", err)
 	}
-	if statsResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 stats with closed store fallback, got %d", statsResp.StatusCode)
+	if statsResp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500 stats with closed store, got %d", statsResp.StatusCode)
 	}
-	statsResp.Body.Close()
+	statsBody := decodeJSON[map[string]any](t, statsResp)
+	if statsBody["error"] != "stats unavailable" {
+		t.Fatalf("closed store stats body = %v", statsBody)
+	}
+
+	projectResp, err := client.Get(ts.URL + "/stats?project=alpha")
+	if err != nil {
+		t.Fatalf("project stats closed store: %v", err)
+	}
+	if projectResp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("closed store project stats = %d, want 500", projectResp.StatusCode)
+	}
+	projectBody := decodeJSON[map[string]any](t, projectResp)
+	if projectBody["error"] != "project resolution failed" || projectBody["code"] != "project_resolution_failed" {
+		t.Fatalf("closed store project stats body = %v", projectBody)
+	}
 }
 
 func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
@@ -923,7 +1388,7 @@ func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
 	obsData := decodeJSON[map[string]any](t, obs)
 	obsID := int64(obsData["id"].(float64))
 
-	deleteBadIDReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/not-number", nil)
+	deleteBadIDReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/not-number?expected_project=engram", nil)
 	deleteBadIDResp, err := client.Do(deleteBadIDReq)
 	if err != nil {
 		t.Fatalf("delete bad id: %v", err)
@@ -933,7 +1398,7 @@ func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
 	}
 	deleteBadIDResp.Body.Close()
 
-	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), nil)
+	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", nil)
 	deleteResp, err := client.Do(deleteReq)
 	if err != nil {
 		t.Fatalf("delete observation: %v", err)
@@ -943,7 +1408,7 @@ func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
 	}
 	deleteResp.Body.Close()
 
-	deleteMissingReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), nil)
+	deleteMissingReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", nil)
 	deleteMissingResp, err := client.Do(deleteMissingReq)
 	if err != nil {
 		t.Fatalf("delete missing observation: %v", err)
@@ -1048,7 +1513,7 @@ func TestStoreClosedExtraServerBranchesE2E(t *testing.T) {
 	}
 	getResp.Body.Close()
 
-	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/1", nil)
+	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/1?expected_project=engram", nil)
 	deleteResp, err := client.Do(deleteReq)
 	if err != nil {
 		t.Fatalf("delete observation closed store: %v", err)

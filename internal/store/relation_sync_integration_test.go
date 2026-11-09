@@ -108,7 +108,9 @@ func TestRelationSync_PushPull_CrossMachine(t *testing.T) {
 	}
 
 	// Machine B: seed the same observations so FK preconditions are met.
-	machineB.CreateSession("ses-int-b-obs", "proj-int", "/tmp/int-b-obs") //nolint: check
+	if err := machineB.CreateSession("ses-int-b-obs", "proj-int", "/tmp/int-b-obs"); err != nil {
+		t.Fatalf("B: CreateSession observations: %v", err)
+	}
 	addTestObsSession(t, machineB, "ses-int-b-obs", "Decision X for integration", "decision", "proj-int", "project")
 	addTestObsSession(t, machineB, "ses-int-b-obs", "Decision Y for integration", "decision", "proj-int", "project")
 
@@ -139,6 +141,67 @@ func TestRelationSync_PushPull_CrossMachine(t *testing.T) {
 	}
 	if rB.Relation != RelationConflictsWith {
 		t.Errorf("G.1: relation: want %q, got %q", RelationConflictsWith, rB.Relation)
+	}
+}
+
+func TestRelationSync_NotConflictSuppressesCandidatesAfterPull(t *testing.T) {
+	machineA, machineB, syncObsX, syncObsY := setupIntegrationStores(t)
+	var sourceID int64
+	if err := machineA.db.QueryRow(`SELECT id FROM observations WHERE sync_id = ?`, syncObsX).Scan(&sourceID); err != nil {
+		t.Fatalf("A: find source observation: %v", err)
+	}
+	preJudgmentCandidates, err := machineA.FindCandidates(sourceID, CandidateOptions{Project: "proj-int", Scope: "project", SkipInsert: true})
+	if err != nil {
+		t.Fatalf("A: FindCandidates before judgment: %v", err)
+	}
+	foundCandidate := false
+	for _, candidate := range preJudgmentCandidates {
+		if candidate.SyncID == syncObsY {
+			foundCandidate = true
+			break
+		}
+	}
+	if !foundCandidate {
+		t.Fatalf("A: expected %q as a candidate before judgment, got %+v", syncObsY, preJudgmentCandidates)
+	}
+
+	relationID, err := machineA.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID: syncObsX, TargetID: syncObsY, Relation: RelationNotConflict, Confidence: 0.99,
+	})
+	if err != nil {
+		t.Fatalf("A: JudgeBySemantic: %v", err)
+	}
+	if relationID == "" {
+		t.Fatal("A: not_conflict must be persisted")
+	}
+	if countRelationMutations(t, machineA, SyncEntityRelation, "proj-int") == 0 {
+		t.Fatal("A: not_conflict must enqueue a relation mutation")
+	}
+	if transferMutations(t, machineA, machineB) == 0 {
+		t.Fatal("expected mutations to transfer")
+	}
+	relation, err := machineB.GetRelation(relationID)
+	if err != nil {
+		t.Fatalf("B: retained relation missing after pull: %v", err)
+	}
+	if relation.Relation != RelationNotConflict {
+		t.Errorf("B: relation = %q, want %q", relation.Relation, RelationNotConflict)
+	}
+	if relation.JudgmentStatus != JudgmentStatusJudged {
+		t.Errorf("B: judgment status = %q, want %q", relation.JudgmentStatus, JudgmentStatusJudged)
+	}
+	var pulledSourceID int64
+	if err := machineB.db.QueryRow(`SELECT id FROM observations WHERE sync_id = ?`, syncObsX).Scan(&pulledSourceID); err != nil {
+		t.Fatalf("B: find source observation: %v", err)
+	}
+	candidates, err := machineB.FindCandidates(pulledSourceID, CandidateOptions{Project: "proj-int", Scope: "project", SkipInsert: true})
+	if err != nil {
+		t.Fatalf("B: FindCandidates: %v", err)
+	}
+	for _, candidate := range candidates {
+		if candidate.SyncID == syncObsY {
+			t.Fatal("B: retained not_conflict pair was offered as a candidate")
+		}
 	}
 }
 

@@ -5,10 +5,6 @@ project_name: engram
 release:
   prerelease: auto
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - main: ./cmd/engram
     binary: engram
@@ -31,6 +27,9 @@ archives:
   - formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - tools/cloud-sync-projects.sh
+      - tools/cloud-sync-projects.ps1
     format_overrides:
       - goos: windows
         formats:
