@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc">
+  <title id="title">Sponsor Gentleman Programming on GitHub Sponsors</title>
+  <desc id="desc">Free forever, independent by choice. No investors, no paywalls. Gentle AI, Engram and Gentle Shell are funded by the people who use them. Sponsor on GitHub, monthly or one-time.</desc>
+  <defs>
+    <radialGradient id="glow" cx="18%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#F095C8" stop-opacity="0.30"/>
+      <stop offset="55%" stop-color="#F095C8" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#F095C8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="border" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F095C8"/>
+      <stop offset="50%" stop-color="#6E3A57"/>
+      <stop offset="100%" stop-color="#F095C8"/>
+    </linearGradient>
+    <linearGradient id="cta" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FF7AC0"/>
+      <stop offset="100%" stop-color="#F095C8"/>
+    </linearGradient>
+    <filter id="neon" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="9" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="soft" x="-20%" y="-50%" width="140%" height="200%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#F095C8" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+    <style>
+      .heart { transform-origin: 200px 200px; animation: beat 1.6s ease-in-out infinite; }
+      @keyframes beat { 0%, 100% { transform: scale(1); } 12% { transform: scale(1.12); } 24% { transform: scale(0.98); } 36% { transform: scale(1.08); } 50% { transform: scale(1); } }
+      .ring { transform-origin: 200px 200px; animation: ring 3.2s ease-out infinite; }
+      @keyframes ring { 0% { transform: scale(0.7); opacity: 0.7; } 100% { transform: scale(1.5); opacity: 0; } }
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    </style>
+  </defs>
+
+  <rect x="2" y="2" width="1196" height="396" rx="28" fill="#120D11"/>
+  <rect x="2" y="2" width="1196" height="396" rx="28" fill="url(#grid)"/>
+  <rect x="2" y="2" width="1196" height="396" rx="28" fill="url(#glow)"/>
+  <rect x="2" y="2" width="1196" height="396" rx="28" fill="none" stroke="url(#border)" stroke-width="3"/>
+
+  <circle class="ring" cx="200" cy="200" r="92" fill="none" stroke="#F095C8" stroke-width="3"/>
+  <g class="heart" filter="url(#neon)">
+    <path transform="translate(0 9)" d="M200 268 C 120 214, 112 150, 152 128 C 176 115, 194 126, 200 144 C 206 126, 224 115, 248 128 C 288 150, 280 214, 200 268 Z"
+          fill="none" stroke="#F095C8" stroke-width="9" stroke-linejoin="round"/>
+  </g>
+
+  <text x="380" y="94" fill="#F095C8" font-size="20" font-weight="700" letter-spacing="5">SUPPORT THE PROJECT</text>
+  <text x="378" y="152" fill="#FFFFFF" font-size="50" font-weight="800">Free forever.</text>
+  <text x="378" y="208" fill="#FFFFFF" font-size="50" font-weight="800">Independent <tspan fill="#F095C8">by choice.</tspan></text>
+  <text x="380" y="250" fill="#D7A0B8" font-size="21">No investors, no paywalls. Gentle AI, Engram and Gentle Shell</text>
+  <text x="380" y="278" fill="#D7A0B8" font-size="21">are funded by the people who use them.</text>
+
+  <rect x="380" y="306" width="300" height="58" rx="29" fill="#F095C8" filter="url(#soft)" opacity="0.55"/>
+  <rect x="380" y="306" width="300" height="58" rx="29" fill="url(#cta)"/>
+  <path d="M420 348 C 406 339, 404 327, 411 323 C 415 321, 419 323, 420 326 C 421 323, 425 321, 429 323 C 436 327, 434 339, 420 348 Z" fill="#1A1218"/>
+  <text x="443" y="343" fill="#1A1218" font-size="22" font-weight="800">Sponsor on GitHub</text>
+  <text x="704" y="342" fill="#8F7A86" font-size="17">Monthly or one-time · every contribution counts</text>
+</svg>
