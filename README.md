@@ -18,6 +18,12 @@
 </p>
 
 <p>
+<a href="https://trendshift.io/repositories/22750?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-22750" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/22750" alt="Gentleman-Programming%2Fengram | Trendshift" width="250" height="55"/></a>
+<a href="https://trendshift.io/repositories/22750?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-22750" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/22750/weekly?language=Go" alt="Gentleman-Programming%2Fengram | Trendshift" width="250" height="55"/></a>
+<a href="https://trendshift.io/repositories/22750?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-22750" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/22750/monthly?language=Go" alt="Gentleman-Programming%2Fengram | Trendshift" width="250" height="55"/></a>
+</p>
+
+<p>
 <a href="https://engram.gentlemanprogramming.com/"><strong>Website</strong></a> &bull;
 <a href="#get-started"><strong>Quickstart</strong></a> &bull;
 <a href="DOCS.md"><strong>Docs</strong></a> &bull;
