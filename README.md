@@ -84,6 +84,31 @@ Your AI coding agent forgets everything when the session ends.
 
 <div align="center"><img src="assets/branding/engram-logo-only.png" width="28" alt="" /></div>
 
+## Support the project
+
+Gentle AI, Engram and Gentle Shell are free and open source, for everyone, under the MIT License.
+
+We deliberately don't want to depend on investors. Keeping these projects fully independent
+means no outside agenda deciding the roadmap, no features locked behind paywalls for
+developers, and no pressure to trade the community's trust for growth.
+
+Donations are what make that possible. If these tools save you time or help your team,
+consider sponsoring the project. Donations are made through
+[GitHub Sponsors](https://github.com/sponsors/Gentleman-Programming), monthly or one-time,
+and every contribution, big or small, goes straight into maintenance, new features and
+keeping everything free and ours.
+
+<div align="center">
+
+<a href="https://github.com/sponsors/Gentleman-Programming"><img src="https://img.shields.io/badge/Donate%20on-GitHub%20Sponsors-F095C8?style=for-the-badge&labelColor=1A1218&logo=githubsponsors&logoColor=F095C8" alt="Donate on GitHub Sponsors"></a>
+
+</div>
+
+Not able to donate? A star, a bug report or a pull request helps too.
+Sponsorship never buys rankings, default selections or endorsements; see [TRADEMARKS.md](TRADEMARKS.md).
+
+<div align="center"><img src="assets/branding/engram-logo-only.png" width="28" alt="" /></div>
+
 ## Features
 
 ---
@@ -374,33 +399,6 @@ Every change starts with an approved issue. See [Contributing](CONTRIBUTING.md) 
 <p><sub>This project exists because of these people.</sub></p>
 
 </div>
-
-<div align="right"><a href="#top">Back to top</a></div>
-
-<div align="center"><img src="assets/branding/engram-logo-only.png" width="28" alt="" /></div>
-
-## Support the project
-
-Gentle AI, Engram and Gentle Shell are free and open source, for everyone, under the MIT License.
-
-We deliberately don't want to depend on investors. Keeping these projects fully independent
-means no outside agenda deciding the roadmap, no features locked behind paywalls for
-developers, and no pressure to trade the community's trust for growth.
-
-Donations are what make that possible. If these tools save you time or help your team,
-consider sponsoring the project. Donations are made through
-[GitHub Sponsors](https://github.com/sponsors/Gentleman-Programming), monthly or one-time,
-and every contribution, big or small, goes straight into maintenance, new features and
-keeping everything free and ours.
-
-<div align="center">
-
-<a href="https://github.com/sponsors/Gentleman-Programming"><img src="https://img.shields.io/badge/Donate%20on-GitHub%20Sponsors-F095C8?style=for-the-badge&labelColor=1A1218&logo=githubsponsors&logoColor=F095C8" alt="Donate on GitHub Sponsors"></a>
-
-</div>
-
-Not able to donate? A star, a bug report or a pull request helps too.
-Sponsorship never buys rankings, default selections or endorsements; see [TRADEMARKS.md](TRADEMARKS.md).
 
 <div align="right"><a href="#top">Back to top</a></div>
 
