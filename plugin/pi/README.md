@@ -344,6 +344,8 @@ Standalone MCP client -> engram mcp -> SQLite (deliberate, separate setup)
 
 Pi-native compact tools use the same HTTP server path as event capture, including project detection, diagnostics, passive capture, lifecycle review, conflict-judgment tools such as `mem_current_project`, `mem_doctor`, `mem_capture_passive`, `mem_review`, `mem_judge`, and `mem_compare`, cross-project discovery through `mem_list_projects`, and local pin curation through `mem_pin`/`mem_unpin`. MCP tools remain a separate stdio path, so direct MCP usage still needs an Engram binary even when `ENGRAM_URL` points at a remote HTTP server. Engram MCP is not registered by Pi setup. An existing Pi MCP entry remains active until you manually remove it and restart/reload Pi; native-only agent writes are not guaranteed while it remains.
 
+To keep per-turn prompts small, tools the Memory Protocol never names (`mem_search_prompts`, `mem_consolidate`, `mem_session_finalize`, `mem_session_start`, `mem_judge_many`, `mem_compare`, `mem_list_projects`, `mem_pin`, `mem_unpin`) are registered with `exposure: "deferred"`: Pi does not declare them on every turn, and the model reaches them through `tool_search` or codemode scripts. A session without either (Pi turns `tool_search` off by default) gets them back as direct tools before its first request: at the start of each prompt, when the active tools include a `mem_*` tool but neither `codemode` nor `tool_search`, or when Pi does not report its active tools, gentle-engram re-registers them as direct, and they stay direct for the rest of the session. Pi versions without tool exposure ignore the field and keep them direct. When Pi reports the active tools (`systemPromptOptions.selectedTools`) and none of them is a `mem_*` tool, as in a subagent launched with `--tools read,bash`, the Memory Protocol is not injected; prompt capture is unchanged.
+
 ## Runtime contract assets
 
 The package includes `runtime-contract.js` and the adjacent Go-generated
@@ -547,6 +549,8 @@ The agent MUST follow this protocol without waiting for activation.
 Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
 non-obvious root causes, real constraints, and resumption-relevant pending work.
 Group related conclusions deliberately, not every task, response, or event.
+A request with several fixes is saved once, when the request is done, unless one fix
+has a non-obvious root cause worth its own entry. The save may share a turn with other tool calls; it does not need a turn of its own.
 Exclude secrets, private data, speculation, raw dumps, and routine progress.
 
 For selected writes, use mem_search on the bounded topic in the intended project and scope before writing.

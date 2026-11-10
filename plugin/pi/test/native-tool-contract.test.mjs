@@ -4235,6 +4235,129 @@ test("structured system prompt options receive memory instructions and the one-s
   }
 });
 
+// #2347: a session whose active tools hold no mem_* tool cannot follow the protocol, so it is not sent.
+test("memory protocol follows the host's selected tools", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/project/current", body: { project: "pi" } },
+    { method: "POST", path: "/sessions", body: { status: "created" } },
+    { method: "POST", path: "/prompts", status: 201, body: { id: 1 } },
+  ]);
+  globalThis.fetch = fetchStub;
+  const protocol = "## Engram Persistent Memory — Protocol";
+
+  try {
+    await withPluginSandbox("engram-pi-selected-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const beforeAgentStart = eventHandlers.get("before_agent_start");
+      const sessionId = "selected-tools-owner";
+      await eventHandlers.get("session_start")({}, runtimeContext(sessionId));
+
+      const withoutMemory = { appendSystemPrompt: "existing", selectedTools: ["read", "grep", "bash"] };
+      const skipped = await beforeAgentStart(
+        { systemPrompt: "base", systemPromptOptions: withoutMemory, prompt: "a sufficiently long captured prompt" },
+        runtimeContext(sessionId),
+      );
+      assert.equal(skipped, undefined, "no forced systemPrompt fallback without memory tools");
+      assert.equal(withoutMemory.appendSystemPrompt, "existing", "protocol is not appended without memory tools");
+      assert.deepEqual(withoutMemory.selectedTools, ["read", "grep", "bash"], "selected tools are left untouched");
+      assert.ok(calls.some((call) => call.method === "POST" && call.path === "/prompts"), "capture policy is unchanged");
+
+      const emptySelection = { appendSystemPrompt: "", selectedTools: [] };
+      assert.equal(await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: emptySelection }, runtimeContext(sessionId)), undefined);
+      assert.equal(emptySelection.appendSystemPrompt, "", "an empty selection receives no protocol");
+
+      const withMemory = { appendSystemPrompt: "existing", selectedTools: ["read", "mem_save"] };
+      assert.equal(await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: withMemory }, runtimeContext(sessionId)), undefined);
+      assert.match(withMemory.appendSystemPrompt, new RegExp(`^existing\n\n${protocol}`));
+
+      const hostWithoutSelection = { appendSystemPrompt: "existing" };
+      assert.equal(await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: hostWithoutSelection }, runtimeContext(sessionId)), undefined);
+      assert.equal(hostWithoutSelection.appendSystemPrompt, withMemory.appendSystemPrompt, "absent selectedTools keeps today's protocol");
+
+      const legacy = await beforeAgentStart({ systemPrompt: "base" }, runtimeContext(sessionId));
+      assert.match(legacy.systemPrompt, new RegExp(`^base\n\n${protocol}`), "hosts without structured options keep the forced fallback");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+// #2347: tools the injected protocols never name leave the per-turn declarations.
+test("memory tools the protocol never names are registered deferred", async () => {
+  const deferredTools = [
+    "mem_search_prompts", "mem_consolidate", "mem_session_finalize", "mem_session_start",
+    "mem_judge_many", "mem_compare", "mem_list_projects", "mem_pin", "mem_unpin",
+  ];
+  const directTools = [
+    "mem_search", "mem_save", "mem_update", "mem_suggest_topic_key", "mem_save_prompt",
+    "mem_session_summary", "mem_context", "mem_get_observation", "mem_session_end",
+    "mem_current_project", "mem_doctor", "mem_capture_passive", "mem_review", "mem_judge",
+  ];
+  await withPluginSandbox("engram-pi-exposure-", async ({ sandbox }) => {
+    const { registeredTools } = await loadPluginHarness(sandbox);
+    assert.deepEqual([...registeredTools.keys()].sort(), [...deferredTools, ...directTools].sort(), "inventory is unchanged");
+    for (const name of deferredTools) assert.equal(registeredTools.get(name).exposure, "deferred", name);
+    for (const name of directTools) assert.equal(registeredTools.get(name).exposure ?? "direct", "direct", name);
+  });
+});
+
+// #2347: deferred tools are reachable only through codemode or tool_search, so a session without
+// either gets them back as direct tools, exactly as before deferral.
+test("deferred memory tools stay reachable on hosts without codemode or tool_search", async () => {
+  const deferredTools = [
+    "mem_search_prompts", "mem_consolidate", "mem_session_finalize", "mem_session_start",
+    "mem_judge_many", "mem_compare", "mem_list_projects", "mem_pin", "mem_unpin",
+  ];
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  globalThis.fetch = recordingFetch([{ method: "GET", path: "/project/current", body: { project: "pi" } }]).fetchStub;
+  const scenario = async (name, event, check) => {
+    await withPluginSandbox("engram-pi-reach-", async ({ sandbox }) => {
+      const registrations = [];
+      const eventHandlers = new Map();
+      (await importPluginFromSandbox(sandbox))({
+        registerTool(tool) { registrations.push(tool); },
+        on(event, handler) { eventHandlers.set(event, handler); },
+      });
+      const initial = registrations.length;
+      await eventHandlers.get("before_agent_start")({ systemPrompt: "base", ...event }, runtimeContext(`reach-${name}`));
+      await eventHandlers.get("before_agent_start")({ systemPrompt: "base", ...event }, runtimeContext(`reach-${name}`));
+      const latest = new Map(registrations.map((tool) => [tool.name, tool]));
+      assert.equal(latest.size, 23, `${name}: inventory is unchanged`);
+      check(registrations.slice(initial), latest);
+    });
+  };
+  const stayDeferred = (name) => (later, latest) => {
+    assert.deepEqual(later, [], `${name}: no re-registration`);
+    for (const tool of deferredTools) assert.equal(latest.get(tool).exposure, "deferred", `${name}: ${tool}`);
+  };
+  const becomeDirect = (name) => (later, latest) => {
+    assert.deepEqual(later.map((tool) => tool.name).sort(), [...deferredTools].sort(), `${name}: each deferred tool is re-registered once`);
+    for (const tool of deferredTools) {
+      assert.equal(latest.get(tool).exposure ?? "direct", "direct", `${name}: ${tool}`);
+      assert.ok(latest.get(tool).parameters && latest.get(tool).execute, `${name}: ${tool} keeps its schema and executor`);
+    }
+  };
+  try {
+    await scenario("codemode", { systemPromptOptions: { selectedTools: ["read", "codemode", "mem_save"] } }, stayDeferred("codemode"));
+    await scenario("tool_search", { systemPromptOptions: { selectedTools: ["read", "tool_search", "mem_save"] } }, stayDeferred("tool_search"));
+    await scenario("no-memory", { systemPromptOptions: { selectedTools: ["read", "bash"] } }, stayDeferred("no-memory"));
+    await scenario("neither", { systemPromptOptions: { selectedTools: ["read", "bash", "mem_save"] } }, becomeDirect("neither"));
+    await scenario("no-selection", { systemPromptOptions: {} }, becomeDirect("no-selection"));
+    await scenario("legacy", {}, becomeDirect("legacy"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("structured system prompt options suppress the replacement on early-return paths", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
@@ -4522,6 +4645,43 @@ test("automatic prompt capture redacts a private block that straddles the trunca
     assert.equal(prompts.length, 1, "the prompt must still be captured");
     assert.equal(JSON.stringify(prompts[0].body).includes("PIN=42"), false, "private content must never reach the wire");
     assert.match(prompts[0].body.content, /\[REDACTED\]/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+// #2347: the one-way switch belongs to one plugin instance (one Pi session runtime), not to the process.
+test("a new plugin instance starts with deferred memory tools after another instance exposed them", async () => {
+  const deferredTools = [
+    "mem_search_prompts", "mem_consolidate", "mem_session_finalize", "mem_session_start",
+    "mem_judge_many", "mem_compare", "mem_list_projects", "mem_pin", "mem_unpin",
+  ];
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  globalThis.fetch = recordingFetch([{ method: "GET", path: "/project/current", body: { project: "pi" } }]).fetchStub;
+  try {
+    await withPluginSandbox("engram-pi-instance-", async ({ sandbox }) => {
+      const factory = await importPluginFromSandbox(sandbox);
+      const load = () => {
+        const registrations = [];
+        const handlers = new Map();
+        factory({ registerTool(tool) { registrations.push(tool); }, on(event, handler) { handlers.set(event, handler); } });
+        return { registrations, handlers };
+      };
+      const first = load();
+      await first.handlers.get("before_agent_start")({ systemPrompt: "base", systemPromptOptions: { selectedTools: ["read", "mem_save"] } }, runtimeContext("instance-one"));
+      assert.equal(first.registrations.length, 23 + deferredTools.length, "first instance re-registers the deferred tools");
+      const second = load();
+      assert.equal(second.registrations.length, 23, "second instance registers the inventory once");
+      for (const name of deferredTools) assert.equal(second.registrations.find((tool) => tool.name === name).exposure, "deferred", name);
+      await second.handlers.get("before_agent_start")({ systemPrompt: "base", systemPromptOptions: { selectedTools: ["read", "mem_save"] } }, runtimeContext("instance-two"));
+      assert.equal(second.registrations.length, 23 + deferredTools.length, "second instance exposes its own deferred tools; the first instance's switch does not leak");
+      const latest = new Map(second.registrations.map((tool) => [tool.name, tool]));
+      for (const name of deferredTools) assert.equal(latest.get(name).exposure ?? "direct", "direct", name);
+    });
   } finally {
     globalThis.fetch = originalFetch;
     if (originalUrl === undefined) delete process.env.ENGRAM_URL;
