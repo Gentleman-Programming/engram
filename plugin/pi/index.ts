@@ -113,6 +113,21 @@ const ENGRAM_TOOLS = [
 
 const ENGRAM_TOOL_NAMES = new Set<string>(ENGRAM_TOOLS);
 
+// Tools no injected protocol names leave the per-turn declarations while codemode or tool_search
+// can reach them; otherwise they are re-registered direct (#2347). mem_doctor stays direct:
+// failure messages tell the model to run it.
+const ENGRAM_DEFERRED_TOOLS = new Set<string>([
+  "mem_search_prompts",
+  "mem_consolidate",
+  "mem_session_finalize",
+  "mem_session_start",
+  "mem_judge_many",
+  "mem_compare",
+  "mem_list_projects",
+  "mem_pin",
+  "mem_unpin",
+]);
+
 const MEMORY_INSTRUCTIONS = `## Engram Persistent Memory — Protocol
 
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
@@ -133,6 +148,8 @@ A memory is an evolving topic, not a log entry. Follow this workflow for every l
 Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
 non-obvious root causes, real constraints, and resumption-relevant pending work.
 Group related conclusions deliberately, not every task, response, or event.
+A request with several fixes is saved once, when the request is done, unless one fix
+has a non-obvious root cause worth its own entry. The save may share a turn with other tool calls; it does not need a turn of its own.
 Exclude secrets, private data, speculation, raw dumps, and routine progress.
 Never save credentials, private content, or personal data.
 
@@ -338,7 +355,13 @@ interface AgentStartEvent {
   systemPrompt: string;
   prompt?: string;
   // Present on Pi versions that expose structured, per-run cloned prompt options.
-  systemPromptOptions?: { appendSystemPrompt?: string } | null;
+  systemPromptOptions?: { appendSystemPrompt?: string; selectedTools?: unknown } | null;
+}
+
+// A host that lists its active tools without any mem_* tool cannot follow the protocol (#2347).
+function selectionLacksMemoryTools(options: { selectedTools?: unknown } | undefined): boolean {
+  const selected = options?.selectedTools;
+  return Array.isArray(selected) && !selected.some((name) => typeof name === "string" && ENGRAM_TOOL_NAMES.has(name));
 }
 
 function appendPromptSection(options: { appendSystemPrompt?: string }, section: string): void {
@@ -2858,14 +2881,26 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
   }
 }
 
-function registerMemoryTools(pi: ExtensionAPI): void {
-  for (const toolName of ENGRAM_TOOLS) {
+// Registers every memory tool and returns a one-way switch that re-registers the deferred ones as
+// direct. Pi activates a tool whose exposure changes to direct like a newly registered tool,
+// still subject to --tools allowlists and exclusions.
+function registerMemoryTools(pi: ExtensionAPI): () => void {
+  let deferredExposed = false;
+  for (const toolName of ENGRAM_TOOLS) register(toolName, ENGRAM_DEFERRED_TOOLS.has(toolName));
+  return () => {
+    if (deferredExposed) return;
+    deferredExposed = true;
+    for (const toolName of ENGRAM_DEFERRED_TOOLS) register(toolName as (typeof ENGRAM_TOOLS)[number], false);
+  };
+
+  function register(toolName: (typeof ENGRAM_TOOLS)[number], deferred: boolean): void {
     pi.registerTool({
       name: toolName,
       label: `Engram: ${humanToolName(toolName)}`,
       description: `Engram memory tool: ${humanToolName(toolName)}. Compact UI is provided by gentle-engram; persistence is handled by Engram when installed and running.`,
       promptSnippet: `Engram memory: ${humanToolName(toolName)}`,
       parameters: MEMORY_TOOL_SCHEMAS[toolName],
+      ...(deferred ? { exposure: "deferred" as const } : {}),
       renderShell: "self",
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         if (toolName === "mem_doctor") {
@@ -2887,6 +2922,15 @@ function registerMemoryTools(pi: ExtensionAPI): void {
       },
     });
   }
+}
+
+// Deferred tools are reachable only through codemode or tool_search. Without either, or when the
+// host does not report its active tools, they must be declared directly (#2347).
+function sessionCannotReachDeferredTools(options: { selectedTools?: unknown } | undefined): boolean {
+  const selected = options?.selectedTools;
+  if (!Array.isArray(selected)) return true;
+  return !selected.includes("codemode") && !selected.includes("tool_search")
+    && selected.some((name) => typeof name === "string" && ENGRAM_TOOL_NAMES.has(name));
 }
 
 const BRIDGE_CLAIM = "engram:bridge:claim:v1";
@@ -2999,7 +3043,7 @@ export default function registerEngram(pi: ExtensionAPI) {
   // Pi's queued steer/follow-up inputs bypass before_agent_start. Only retain
   // the latest idle input; a FIFO would assign queued provenance to later runs.
   const pendingInput = new WeakMap<object, { sessionId: string; source: InputEvent["source"] }>();
-  registerMemoryTools(pi);
+  const exposeDeferredMemoryTools = registerMemoryTools(pi);
   pi.on("input", (event: InputEvent, ctx: SessionContext) => {
     if (event.streamingBehavior) return { action: "continue" as const };
     const sessionId = observeRuntimeSessionID(ctx);
@@ -3176,7 +3220,8 @@ export default function registerEngram(pi: ExtensionAPI) {
     // A returned systemPrompt becomes a forced prompt that turns skipping this hook never see
     // (pi#5581), so newer Pi receives the text through the per-run structured options instead.
     const options = event.systemPromptOptions && typeof event.systemPromptOptions === "object" ? event.systemPromptOptions : undefined;
-    if (options) appendPromptSection(options, MEMORY_INSTRUCTIONS);
+    if (sessionCannotReachDeferredTools(options)) exposeDeferredMemoryTools();
+    if (options && !selectionLacksMemoryTools(options)) appendPromptSection(options, MEMORY_INSTRUCTIONS);
     const message = pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId
       ? { customType: "engram-compaction-recovery", content: pendingRecoveryNotice.content, display: false }
       : undefined;

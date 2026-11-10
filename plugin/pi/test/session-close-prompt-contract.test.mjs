@@ -36,6 +36,13 @@ test("important learnings still require the canonical topic workflow", () => {
   assert.doesNotMatch(workflow, /Call `mem_save` IMMEDIATELY/);
 });
 
+test("a multi-fix request is saved once and the save may share a turn (#2345)", () => {
+  const workflow = instructions.split("### CANONICAL TOPIC WORKFLOW (mandatory — not optional)\n\n")[1]?.split("\n### NATIVE SESSION ATTRIBUTION")[0];
+  assert.ok(workflow, "mandatory canonical topic workflow must exist");
+  assert.match(workflow, /Group related conclusions deliberately, not every task, response, or event\.\nA request with several fixes is saved once, when the request is done, unless one fix\nhas a non-obvious root cause worth its own entry\./);
+  assert.match(workflow, /The save may share a turn with other tool calls; it does not need a turn of its own\./);
+});
+
 test("selective workflow preserves privacy, topic safety and native passive boundaries", () => {
   assert.doesNotMatch(instructions, /^(<<<<<<<|=======|>>>>>>>)/m);
   for (const safeguard of [/secrets/i, /private (content|data)/i, /speculation/i, /raw (source )?dumps/i, /routine progress/i, /preserve every still-valid fact/i, /superseded facts as history/i, /Ambiguous identity or failed lookup/i, /duplicate save/i, /Never merge across projects or scopes/i]) {
