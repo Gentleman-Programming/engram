@@ -46,7 +46,9 @@ type ProbeResult struct {
 // daemon is gone" from "the daemon is misbehaving".
 func Probe(ctx context.Context, port int, timeout time.Duration) ProbeResult {
 	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
-	client := &http.Client{Timeout: timeout}
+	// Only the selected local endpoint can establish its occupancy/identity.
+	// A redirect must not substitute another port or remote server's health.
+	client := &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return ProbeResult{Status: StatusUnreachable, Port: port, Err: err}

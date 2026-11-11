@@ -82,3 +82,31 @@ func TestUnmanagedListenerDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+func TestRedirectCannotHideOccupiedListener(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Port zero cannot be a bound listening endpoint: bind(0) allocates
+		// another port. Following this redirect must not make this server absent.
+		http.Redirect(w, r, "http://127.0.0.1:0/health", http.StatusFound)
+	}))
+	defer server.Close()
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	t.Setenv("ENGRAM_PORT", strconv.Itoa(port))
+	for _, verb := range []string{"ps", "stop", "run"} {
+		t.Run(verb, func(t *testing.T) {
+			cfg := store.Config{DataDir: t.TempDir()}
+			var err error
+			switch verb {
+			case "ps":
+				err = cmdPs(cfg, nil)
+			case "stop":
+				err = cmdStop(cfg, nil)
+			case "run":
+				err = assertDaemonStartable(cfg.DataDir, port)
+			}
+			if err == nil || !strings.Contains(err.Error(), "unknown listener") {
+				t.Fatalf("redirecting occupied port must remain unknown, got %v", err)
+			}
+		})
+	}
+}

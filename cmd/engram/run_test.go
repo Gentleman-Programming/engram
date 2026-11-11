@@ -384,6 +384,7 @@ func TestRunDetachedPortConflict(t *testing.T) {
 // the failing parent, and only this start's records are cleaned up, so a
 // timed-out start can never leave an orphan that later becomes the daemon.
 func TestRunDetachedTimeoutTerminatesChild(t *testing.T) {
+	swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusNotRunning})
 	if testing.Short() {
 		t.Skip("spawns a child process")
 	}

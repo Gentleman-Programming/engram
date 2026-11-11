@@ -747,15 +747,15 @@ func TestCmdRestartProceedsWhenStopUnconfirmed(t *testing.T) {
 		t.Skip("spawns a child process")
 	}
 	clearRunEnv(t)
-	port := freeRunPort(t)
-	cfg, dataDir := newRunTestConfig(t)
-	swapRunDaemonSeams(t, port)
-	cleanupPidfileDaemon(t, dataDir)
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, `{"service":"other","daemon_token":"foreign"}`)
 	}))
 	defer foreign.Close()
 	foreignPort := foreign.Listener.Addr().(*net.TCPAddr).Port
+	port := freeRunPort(t)
+	cfg, dataDir := newRunTestConfig(t)
+	swapRunDaemonSeams(t, port)
+	cleanupPidfileDaemon(t, dataDir)
 	if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: foreignPort, Token: "stale"}); err != nil {
 		t.Fatalf("write pidfile: %v", err)
 	}

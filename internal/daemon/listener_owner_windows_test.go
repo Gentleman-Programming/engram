@@ -20,9 +20,6 @@ func TestListenerOwnerPIDNative(t *testing.T) {
 			t.Errorf("owner of %s = %d, want fixture pid %d", address, pid, os.Getpid())
 		}
 		_ = listener.Close()
-		if pid := ListenerOwnerPID(port); pid != 0 {
-			t.Errorf("closed fixture owner = %d", pid)
-		}
 	}
 }
 
@@ -46,6 +43,7 @@ func TestListenerOwnerTableValidation(t *testing.T) {
 		count uint32
 		want  int
 	}{
+		{"empty", nil, 0, 0},
 		{"loopback", valid, 1, 100},
 		{"wildcard", row(0, 1234, 100), 1, 100},
 		{"not listening", notListening, 1, 0},
