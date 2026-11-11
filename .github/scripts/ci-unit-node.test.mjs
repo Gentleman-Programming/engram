@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { withoutSuitePriority } from './ci-suite-priority.mjs';
 
 const source = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 
@@ -20,7 +21,7 @@ function raceNode(text) {
   assert.equal(saves.length, 1, 'one explicit cache-save step');
   const guard = "        if: ${{ success() && github.repository == 'Gentleman-Programming/engram' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.race-cache-restore.outputs.cache-hit != 'true' }}\n";
   assert.ok(saves[0].includes(guard), 'only the approved successful trusted-main cache guard');
-  const unconditional = race.replace(saves[0], () => saves[0].replace(guard, ''));
+  const unconditional = withoutSuitePriority(race.replace(saves[0], () => saves[0].replace(guard, '')));
   assert.doesNotMatch(unconditional, /^\s*(?:if|continue-on-error):/m, 'job and execution steps must not bypass tests');
 }
 

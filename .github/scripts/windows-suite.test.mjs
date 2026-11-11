@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { withoutSuitePriority } from './ci-suite-priority.mjs';
 
 const source = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const job = text => text.match(/^  windows-suite:\n[\s\S]*?(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[0] ?? '';
 
 function contract(text) {
-  const body = job(text);
+  const body = withoutSuitePriority(job(text));
   assert.ok(body, 'independent Windows job');
   assert.match(text, /on:\n  pull_request:\n  merge_group:\n    types: \[checks_requested\]\n  push:\n    branches:\n      - main\n/);
   assert.match(text, /run: node --test \.github\/scripts\/windows-suite\.test\.mjs\n/);
