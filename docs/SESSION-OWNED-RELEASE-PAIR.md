@@ -3,9 +3,9 @@
 This is **unreleased preparation**, not release approval or a published compatibility claim.
 It addresses the distribution gap in #1921 without implementing the coordinator in #1349.
 
-The proposed versions below record the earlier session-owned preparation. Current source
-prepares the 0.7.0 Pi release tracked by #2328; see the [Pi quick start](../plugin/pi/README.md#quick-start)
-and [release policy](./RELEASE-POLICY.md) for its current pin and publication requirements.
+The proposed versions below record the earlier session-owned preparation. See the
+[Pi quick start](../plugin/pi/README.md#quick-start) and [release policy](./RELEASE-POLICY.md)
+for the current companion pin and publication requirements.
 
 ## Proposed pair
 
