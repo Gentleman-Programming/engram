@@ -675,6 +675,60 @@ func TestJudgeRelation_OptionalFieldsNullWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestJudgeRelation_PrivateExplanations(t *testing.T) {
+	for _, tc := range []struct{ name, input, want string }{
+		{"empty", "", ""},
+		{"public", "Public explanation", "Public explanation"},
+		{"private only", "<private>secret</private>", "[REDACTED]"},
+		{"mixed multiline", "Public <PRIVATE>secret\nvalue</PRIVATE> and <private>other</private> text", "Public [REDACTED] and [REDACTED] text"},
+		{"json evidence", `{"detail":"<private>secret</private>"}`, `{"detail":"[REDACTED]"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupEnrolledStore(t)
+			_, source := addEnrolledObs(t, s, "Source decision")
+			_, target := addEnrolledObs(t, s, "Target decision")
+			id := newSyncID("rel")
+			if _, err := s.SaveRelation(SaveRelationParams{SyncID: id, SourceID: source, TargetID: target}); err != nil {
+				t.Fatal(err)
+			}
+			input := tc.input
+			result, err := s.JudgeRelation(JudgeRelationParams{
+				JudgmentID: id, Relation: RelationRelated, Reason: &input, Evidence: &input,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := func(label string, got *string) {
+				t.Helper()
+				if got == nil || *got != tc.want {
+					t.Errorf("%s: expected %q, got %v", label, tc.want, got)
+				}
+			}
+			check("response reason", result.Reason)
+			check("response evidence", result.Evidence)
+			var reason, evidence *string
+			if err := s.db.QueryRow(`SELECT reason, evidence FROM memory_relations WHERE sync_id = ?`, id).Scan(&reason, &evidence); err != nil {
+				t.Fatal(err)
+			}
+			check("stored reason", reason)
+			check("stored evidence", evidence)
+			var payload string
+			if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? ORDER BY seq DESC LIMIT 1`, SyncEntityRelation, id).Scan(&payload); err != nil {
+				t.Fatal(err)
+			}
+			var mutation syncRelationPayload
+			if err := decodeSyncPayload([]byte(payload), &mutation); err != nil {
+				t.Fatal(err)
+			}
+			check("sync reason", mutation.Reason)
+			check("sync evidence", mutation.Evidence)
+			if input != tc.input {
+				t.Error("JudgeRelation mutated caller-owned explanation")
+			}
+		})
+	}
+}
+
 // TestJudgeRelation_UnknownID verifies that an unknown judgment_id returns an error.
 func TestJudgeRelation_UnknownID(t *testing.T) {
 	s := setupRelationsStore(t)
