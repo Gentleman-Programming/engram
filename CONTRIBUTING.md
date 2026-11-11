@@ -203,7 +203,7 @@ All required checks must pass before a PR can be merged. Issue API errors fail c
 #### Unsupported runtime rejection
 
 `Unsupported Node Runtime Rejection` runs only the existing
-`TestArtifactCoreUnsupportedNode` under Node22 with Go1.26.10. Node24 remains the
+`TestArtifactCoreUnsupportedNode` under Node22 with Go1.26.11. Node24 remains the
 ordinary supported test runtime. The separate ten-minute lane verifies the
 actual major versions and requires a named executed pass and successful package
 completion via `prerequisite-coverage.mjs unsupported-node EVENTS.json GO_EXIT`.
@@ -225,7 +225,7 @@ App15368, or the queue. Its initial 30-minute outer ceiling is a new bounded
 observation policy, not the #2020 setup/wrapper budgets or a measured SLO;
 do not raise it to hide failures.
 
-The job checks Go 1.26.10, Node 24, PowerShell and Git for Windows Bash with
+The job checks Go 1.26.11, Node 24, PowerShell and Git for Windows Bash with
 jq/curl. It selects actual Git `usr/bin/bash.exe` (not the `bin` launcher),
 validates the absolute `jq.exe` selected from PATH, and exports the existing
 `CODEX_TEST_TRUSTED_BASH` / `CODEX_TEST_TRUSTED_JQ` fixture selectors before tests.
@@ -383,7 +383,7 @@ Hosted experiments require separate authorization.
 ### Native macOS baseline (initially non-required)
 
 The candidate **Native macOS ARM64 Tests** job runs the existing default-tag
-Go suite on `macos-15` ARM64 with Go 1.26.10 and Node 24. It checks native
+Go suite on `macos-15` ARM64 with Go 1.26.11 and Node 24. It checks native
 architecture and mandatory prerequisites (including the fixture's actual
 `/usr/bin/jq` path), uses isolated test state, preserves failure exits and
 reports JSON pass/fail/skip scope. The 20-minute job and 10-minute per-binary
@@ -407,7 +407,7 @@ artifact, Windows or release qualification. See [commands and finite rollout](do
 
 **Native Windows x64 Adapter Tests** adds one independent `windows-2022`
 PowerShell lane for #2150. It requires native Windows/x64 Node 24 and
-Windows/amd64 Go 1.26.10, a full checkout, contract JSON, and locked local
+Windows/amd64 Go 1.26.11, a full checkout, contract JSON, and locked local
 TypeBox 1.3.34 (`npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi`).
 It builds the existing Pi server as `$env:RUNNER_TEMP\pi-test-server.exe`
 and the synthetic PATH runtime fixture as `$env:RUNNER_TEMP\pi-test-path.exe`;
@@ -458,7 +458,7 @@ These inspect workflow contracts; they do not execute the Go race suite.
 merge groups and main pushes. They preserve finding and tooling-failure exits;
 non-required does not mean failures are ignored. Existing required gates remain
 unchanged. See [scanner setup, real-tool tests and result interpretation](docs/ci-scanners.md)
-for pinned Go 1.26.10, govulncheck v1.7.0 and actionlint v1.7.12 commands.
+for pinned Go 1.26.11, govulncheck v1.7.0 and actionlint v1.7.12 commands.
 Mocked wrapper tests are distinct from opt-in real-tool integration tests; neither
 is hosted rollout evidence. Review findings without blanket suppressions or
 unapproved dependency upgrades.

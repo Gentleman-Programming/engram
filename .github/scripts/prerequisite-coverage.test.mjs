@@ -165,7 +165,7 @@ test('unsupported-runtime lane uses Node22 without changing the Node24 unit lane
   const ci = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8');
   const job = ci.match(/^  unsupported-node:\n[\s\S]*?(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
   assert.ok(job, 'dedicated unsupported-runtime lane');
-  for (const token of ['node-version: "22"', 'go-version: "1.26.10"', 'cache: false',
+  for (const token of ['node-version: "22"', 'go-version: "1.26.11"', 'cache: false',
     'persist-credentials: false', 'contents: read', 'timeout-minutes: 10',
     "-run '^TestArtifactCoreUnsupportedNode$'", 'prerequisite-coverage.mjs unsupported-node',
     'git rev-parse HEAD', 'go version', 'node --version']) assert.ok(job.includes(token), token);
