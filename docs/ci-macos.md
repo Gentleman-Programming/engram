@@ -9,7 +9,7 @@ App15368 contexts, queue, security/version/integrity guards or Race cadence.
 Non-required does not mean ignored failures.
 
 The lane verifies actual Darwin ARM64 Go/Node execution, records SHA/image/tool
-versions, and requires Go **1.26.10**, Node **24**, npm, the full source checkout,
+versions, and requires Go **1.26.11**, Node **24**, npm, the full source checkout,
 contract JSON and locked local TypeBox **1.3.34**. It installs only existing Pi
 test dependencies with `npm ci --ignore-scripts --legacy-peer-deps`, prepares
 repository Go modules, and prebuilds both existing Pi fixtures:
@@ -100,7 +100,7 @@ execution, installed-host or distributed-artifact qualification.
 
 ## Toolchain, prerequisites and isolated state
 
-Use repository Go **1.26.10**, `GOTOOLCHAIN=local`, Node **24**, the existing
+Use repository Go **1.26.11**, `GOTOOLCHAIN=local`, Node **24**, the existing
 SHA-pinned setup actions, Bash, Git, jq, curl and ordinary shell utilities.
 The workflow records the checkout SHA, `uname -sm`, `sw_vers`, image identity,
 Go host/target architecture, CGO setting and tool versions. It requires

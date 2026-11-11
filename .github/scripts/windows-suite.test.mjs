@@ -15,7 +15,7 @@ function contract(text) {
     'timeout-minutes: 30', 'contents: read', 'GOTOOLCHAIN: local',
     'ENGRAM_PI_SCHEMA_REQUIRE_REAL: "1"', 'shell: pwsh',
     'ref: ${{ github.sha }}', 'persist-credentials: false',
-    'go-version: "1.26.10"', 'node-version: "24"',
+    'go-version: "1.26.11"', 'node-version: "24"',
     'working-directory: plugin/pi', 'run: npm ci --ignore-scripts --legacy-peer-deps',
     'if: failure()', 'if-no-files-found: warn']) {
     assert.ok(body.split('\n').some(value => value.trim() === line), line);
@@ -27,7 +27,7 @@ function contract(text) {
     'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7',
   ]) assert.ok(body.includes(`uses: ${action}`), action);
   for (const token of ['git rev-parse HEAD', "(go env GOOS) -ne 'windows'",
-    "(go env GOARCH) -ne 'amd64'", "(go env GOVERSION) -ne 'go1.26.10'",
+    "(go env GOARCH) -ne 'amd64'", "(go env GOVERSION) -ne 'go1.26.11'",
     "(node --version) -notmatch '^v24\\.'", "Get-Command powershell.exe",
     "Get-Command git.exe", "'/(cmd|bin|mingw64/bin|usr/bin)$'", "'usr\\bin\\bash.exe'",
     "$bash -notlike '*\\usr\\bin\\bash.exe'", "Get-Command jq.exe -CommandType Application",
@@ -116,7 +116,7 @@ const mutations = [
   ['contents: read', 'contents: write'],
   ['ref: ${{ github.sha }}', 'ref: main'],
   ['persist-credentials: false', 'persist-credentials: true'],
-  ['go-version: "1.26.10"', 'go-version: "1.26.9"'],
+  ['go-version: "1.26.11"', 'go-version: "1.26.9"'],
   ['node-version: "24"', 'node-version: "22"'],
   ['GOTOOLCHAIN: local', 'GOTOOLCHAIN: auto'],
   ["'GOCACHE'", "'LOST_CACHE'"],

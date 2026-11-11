@@ -4,7 +4,7 @@
 
 The candidate **Go Race Tests** job runs
 `go test -race -timeout=20m ./...` independently on `ubuntu-24.04`, with
-Go 1.26.10, `CGO_ENABLED=1` and `CC=gcc`.
+Go 1.26.11, `CGO_ENABLED=1` and `CC=gcc`.
 Pinned Node.js 24 is provisioned before the suite for the owned Core lifecycle tests;
 local reproduction needs the same Node prerequisite, not the runner's ambient version.
 The runner must provide GCC and `/usr/bin/time`; compiler preflight failures
@@ -30,13 +30,15 @@ managed runner; upstream's runner >=2.327.1 guidance is worded for v5.
 Pinned-source inspection is not fresh hosted runner compatibility proof.
 
 Before restore, the job validates nonempty scalar inputs, absolute cache paths,
-Go 1.26.10 linux/amd64 and CGO=1. Its compatibility descriptor binds runner
+Go 1.26.11 linux/amd64 and CGO=1. Its compatibility descriptor binds runner
 OS/architecture, `ImageOS` and `ImageVersion`, exact Go/target, both root
 `go.mod` and `go.sum`, CGO, race mode and the actual `CC` driver: resolved
 executable path, SHA-256, full version, target and full version-text hash.
 The compiler identity is logged. A NUL-delimited descriptor is hashed into a
 bounded compatibility prefix; the tested `github.sha` extends that prefix into
-the primary key. Both actions consume the same validated, precomputed paths
+the primary key. Go patch updates change that descriptor and cannot reuse the
+prior Go version's cache; dated observations below retain their original versions.
+Both actions consume the same validated, precomputed paths
 and primary key. Restore uses only the complete compatible prefix, with no
 legacy-cache migration, broad fallback or cross-OS archive reuse.
 
@@ -76,7 +78,7 @@ and the 20-minute per-binary / 30-minute job budgets remain unchanged.
 
 ## Reproduce on Linux
 
-Use Go 1.26.10, GCC, GNU time and the repository's existing test prerequisites
+Use Go 1.26.11, GCC, GNU time and the repository's existing test prerequisites
 (see [contributor verification](../CONTRIBUTING.md#focused-verification-map)):
 
 ```sh
