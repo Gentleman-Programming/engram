@@ -1,0 +1,37 @@
+{
+  "base": "ca137ecf3f81bf808a99f44d3371ac55b96a746d",
+  "generation": "Unchanged official-tag migration source executes Store.New/Close on an empty synthetic private directory: v3.4.0 then v3.5.2 then v3.6.2. Not an official release binary or reporter store. No hand-edited catalog DDL. Compact JSON differs only in JSON formatting from the emitted catalog.",
+  "toolchain": "go1.26.10 windows/amd64, direct cached binary, GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local -mod=readonly",
+  "historical": [
+    {
+      "tag": "v3.4.0",
+      "commit": "5c4171845958f046968c14d7d57a325eb4a83b7e",
+      "source_hashes": {
+        "internal/store/store.go": "1583c2da30a8bd81c683ddd303ae1df0179bbfe40b3d0af2a063f982e29b06d6",
+        "go.mod": "42560820f8465e22277205145e16f4ebc04e7c5afd28ca1bc2e3017682ddefeb",
+        "go.sum": "12ab41e4e8d3c981c469dbaa96f91bf7ce023dff018e218ff3ff4a829a1de358"
+      }
+    },
+    {
+      "tag": "v3.5.2",
+      "commit": "d85c45701129d19c2a165266d279c5c195283726",
+      "source_hashes": {
+        "internal/store/store.go": "20145d1fce365ff3ce240a2e570677aa35aeab067211bed3efdf2f4d4a2f8b53",
+        "go.mod": "7113b71515734433c6ad6a97a8e4668cf0932301280388f46ba5419b0cff158c",
+        "go.sum": "fc2ec3ba0ec4e8d4d3546a00403456bc9aa5e2eac4ad11df14a6d47398eff444"
+      }
+    },
+    {
+      "tag": "v3.6.2",
+      "commit": "ec2bf0482139360bf61a8eadb76380ffe762de44",
+      "source_hashes": {
+        "internal/store/store.go": "23149617002621637339e74cc09b114feceba3a6e246fe00fe4d8a4a7f67f0bf",
+        "go.mod": "7918717f81d0f8ab50ba1f25d49d230b84123c545b207fe546bda16d7eea7d40",
+        "go.sum": "2d03b0a8fcdcf47c3fcbd84e17540501a51e2697a0c851f1365301c33e94db60"
+      }
+    }
+  ],
+  "catalog_sha256": "f15fea5067e274b010bd7a4b41d4d3ea596160b978698771500867fc5c5b2a04",
+  "objects": 91,
+  "helper_sha256": "f630c51117e020d67109c6569f306d7d3ddd2f9b2cbd1d0e6854ff0f277d17b1"
+}

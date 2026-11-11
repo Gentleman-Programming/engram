@@ -228,9 +228,17 @@ func stripObservationsOrgColumn(t *testing.T, state map[string]string) map[strin
 }
 
 func TestMigrateCopyV360CompleteCatalog(t *testing.T) {
-	for _, wal := range []bool{false, true} {
-		t.Run(fmt.Sprintf("wal=%v", wal), func(t *testing.T) {
-			src, db := copyV360Fixture(t)
+	for _, fixture := range []struct {
+		name string
+		wal  bool
+		open func(*testing.T) (string, *sql.DB)
+	}{
+		{"v360", false, copyV360Fixture}, {"v360-wal", true, copyV360Fixture},
+		{"upgraded", false, copyUpgradedFixture}, {"upgraded-wal", true, copyUpgradedFixture},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			wal := fixture.wal
+			src, db := fixture.open(t)
 			if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 				t.Fatal(err)
 			}
