@@ -418,6 +418,18 @@ func copyValidateDB(db *sql.DB) error {
 	if reflect.DeepEqual(actual, withoutEvidence) {
 		return nil
 	}
+	// A complete pre-org/pre-delete-evidence state can already have the modern
+	// FTS and project indexes. Derive that atomic migration delta from current,
+	// keeping every other object and constraint exact; missing stable indexes
+	// must fail here, before ordinary startup could recreate them.
+	beforeOrg := maps.Clone(withoutEvidence)
+	delete(beforeOrg, "idx_obs_org")
+	observation := beforeOrg["observations"]
+	observation.SQL = strings.Replace(observation.SQL, "org TEXT,", "", 1)
+	beforeOrg["observations"] = observation
+	if reflect.DeepEqual(actual, beforeOrg) {
+		return nil
+	}
 	// The digest pins every normalized object (kind, owner and SQL), not merely
 	// object names or a set of independently optional migration differences.
 	// Its complete migration-produced catalog and provenance live in testdata.
