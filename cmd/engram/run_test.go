@@ -367,8 +367,8 @@ func TestRunDetachedPortConflict(t *testing.T) {
 	swapRunDaemonSeams(t, port)
 
 	err = cmdRun(cfg, []string{"-d", "-p", strconv.Itoa(port)})
-	if err == nil || !strings.Contains(err.Error(), "daemon did not start") {
-		t.Fatalf("port-conflict start error = %v, want a loud daemon-did-not-start failure", err)
+	if err == nil || !strings.Contains(err.Error(), "unknown listener") {
+		t.Fatalf("port-conflict start error = %v, want a listener conflict before spawn", err)
 	}
 	// A failed start must not leave a live daemon behind.
 	if record, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); rerr == nil {
@@ -446,8 +446,8 @@ func TestRunDetachedTimeoutTerminatesChild(t *testing.T) {
 
 // TestAssertDaemonStartableIdentity pins the pid-reuse guard in run
 // admission: a live pidfile pid only blocks a new start when the daemon
-// identity answers; an unconfirmed record is stale and gets cleared so the
-// start proceeds. Legacy token-less live records remain unmanaged until
+// identity answers; an unconfirmed record is stale and gets cleared, but an
+// occupied target port still rejects the start. Legacy live records remain unmanaged until
 // the operator verifies the process manually.
 func TestAssertDaemonStartableIdentity(t *testing.T) {
 	t.Run("matching token reports already running", func(t *testing.T) {
@@ -471,8 +471,8 @@ func TestAssertDaemonStartableIdentity(t *testing.T) {
 		}
 		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7606, Token: "foreign"})
 		out := swapStdoutPrinter(t)
-		if err := assertDaemonStartable(dataDir, 7606); err != nil {
-			t.Fatalf("unconfirmed admission: %v", err)
+		if err := assertDaemonStartable(dataDir, 7606); err == nil || !strings.Contains(err.Error(), "unknown listener") {
+			t.Fatalf("occupied unconfirmed admission: %v, want listener conflict", err)
 		}
 		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); !errors.Is(rerr, daemon.ErrNoPidfile) {
 			t.Fatalf("unconfirmed record survived admission: %v", rerr)

@@ -35,6 +35,8 @@ type ProbeResult struct {
 	Token  string
 	// Version is optional metadata from an Engram health response, not identity.
 	Version string
+	// Service is validated health metadata for diagnostics, never PID authority.
+	Service string
 	Err     error
 }
 
@@ -68,11 +70,12 @@ func Probe(ctx context.Context, port int, timeout time.Duration) ProbeResult {
 	// "identity did not answer".
 	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		var version string
+		var version, service string
 		if decodeErr == nil && health.Service == "engram" {
+			service = health.Service
 			_ = json.Unmarshal(health.Version, &version)
 		}
-		return ProbeResult{Status: StatusRunning, Port: port, Token: health.DaemonToken, Version: version}
+		return ProbeResult{Status: StatusRunning, Port: port, Token: health.DaemonToken, Version: version, Service: service}
 	}
 	return ProbeResult{Status: StatusUnreachable, Port: port}
 }

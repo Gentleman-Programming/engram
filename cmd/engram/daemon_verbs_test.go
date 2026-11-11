@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strconv"
@@ -116,6 +119,7 @@ func cleanupPidfileDaemon(t *testing.T, dataDir string) {
 // live-and-answering, live-but-not-answering, and argument rejection.
 func TestCmdPsStatuses(t *testing.T) {
 	t.Run("no pidfile reports not running", func(t *testing.T) {
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusNotRunning})
 		cfg := store.Config{DataDir: t.TempDir()}
 		out := swapStdoutPrinter(t)
 		err := cmdPs(cfg, nil)
@@ -127,6 +131,7 @@ func TestCmdPsStatuses(t *testing.T) {
 		}
 	})
 	t.Run("stale pidfile reports not running and is removed", func(t *testing.T) {
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusNotRunning})
 		cfg := store.Config{DataDir: t.TempDir()}
 		deadPid := exitedChildPid(t)
 		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: deadPid, Port: 7437}); err != nil {
@@ -191,6 +196,7 @@ func TestCmdPsStatuses(t *testing.T) {
 // missing pidfile is nothing to stop and a stale one is cleaned, not killed.
 func TestCmdStopCases(t *testing.T) {
 	t.Run("no pidfile is nothing to stop", func(t *testing.T) {
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusNotRunning})
 		cfg := store.Config{DataDir: t.TempDir()}
 		out := swapStdoutPrinter(t)
 		err := cmdStop(cfg, nil)
@@ -202,6 +208,7 @@ func TestCmdStopCases(t *testing.T) {
 		}
 	})
 	t.Run("stale pidfile is removed without stopping", func(t *testing.T) {
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusNotRunning})
 		cfg := store.Config{DataDir: t.TempDir()}
 		deadPid := exitedChildPid(t)
 		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: deadPid, Port: 7437}); err != nil {
@@ -641,6 +648,7 @@ func TestDaemonVerbLifecycle(t *testing.T) {
 	}
 	clearRunEnv(t)
 	port := freeRunPort(t)
+	t.Setenv("ENGRAM_PORT", strconv.Itoa(port))
 	cfg, dataDir := newRunTestConfig(t)
 	swapRunDaemonSeams(t, port)
 	cleanupPidfileDaemon(t, dataDir)
@@ -732,7 +740,8 @@ func TestCmdRestartLifecycle(t *testing.T) {
 // TestCmdRestartProceedsWhenStopUnconfirmed pins restart's stale-record
 // behavior: a live pid that is not confirmed as the daemon is never
 // signaled; restart tolerates the unconfirmed stop and starts fresh through
-// runDetached's admission, which clears the unmanaged pidfile.
+// runDetached's admission, which clears the unmanaged pidfile. The requested
+// replacement port is free; the old foreign listener remains untouched.
 func TestCmdRestartProceedsWhenStopUnconfirmed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns a child process")
@@ -742,19 +751,26 @@ func TestCmdRestartProceedsWhenStopUnconfirmed(t *testing.T) {
 	cfg, dataDir := newRunTestConfig(t)
 	swapRunDaemonSeams(t, port)
 	cleanupPidfileDaemon(t, dataDir)
-	if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: port, Token: "stale"}); err != nil {
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"service":"other","daemon_token":"foreign"}`)
+	}))
+	defer foreign.Close()
+	foreignPort := foreign.Listener.Addr().(*net.TCPAddr).Port
+	if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: foreignPort, Token: "stale"}); err != nil {
 		t.Fatalf("write pidfile: %v", err)
 	}
 	signaled := swapStopDaemonProcess(t)
-	swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: port, Token: "foreign"})
 
 	var restartErr error
-	output := captureStdoutPipe(t, func() { restartErr = cmdRestart(cfg, nil) })
+	output := captureStdoutPipe(t, func() { restartErr = cmdRestart(cfg, []string{"-p", strconv.Itoa(port)}) })
 	if restartErr != nil {
 		t.Fatalf("restart over unconfirmed pid: %v", restartErr)
 	}
 	if len(*signaled) != 0 {
 		t.Fatalf("restart signaled the unconfirmed pid: %v", *signaled)
+	}
+	if probe := defaultDaemonStatusProbe(foreignPort); probe.Status != daemon.StatusRunning || probe.Token != "foreign" {
+		t.Fatalf("restart disturbed the unconfirmed listener: %+v", probe)
 	}
 	if !strings.Contains(output, "Started engram daemon") {
 		t.Fatalf("restart output = %q, want Started engram daemon", output)

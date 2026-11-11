@@ -89,6 +89,9 @@ func cmdPs(cfg store.Config, args []string) error {
 	}
 	pidPath := daemon.PidfilePath(cfg.DataDir)
 	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
+		if err := listenerConflict(daemonStatusPort(daemon.PidRecord{})); err != nil {
+			return err
+		}
 		_, _ = stdoutPrinter("not running\n")
 		return fmt.Errorf("daemon is not running")
 	}
@@ -100,16 +103,22 @@ func cmdPs(cfg store.Config, args []string) error {
 	record, err := daemon.ReadPidfile(pidPath)
 	switch {
 	case errors.Is(err, daemon.ErrNoPidfile):
+		if err := listenerConflict(daemonStatusPort(daemon.PidRecord{})); err != nil {
+			return err
+		}
 		_, _ = stdoutPrinter("not running\n")
 		return fmt.Errorf("daemon is not running")
 	case err != nil:
 		return err
 	}
 	if !daemon.ProcessAlive(record.Pid) {
-		_, _ = stdoutPrinter("not running\n")
 		if err := removePidfileIfUnchanged(pidPath, record); err != nil {
 			return err
 		}
+		if err := listenerConflict(daemonStatusPort(record)); err != nil {
+			return err
+		}
+		_, _ = stdoutPrinter("not running\n")
 		return fmt.Errorf("daemon is not running")
 	}
 	if record.Token == "" {
@@ -123,7 +132,7 @@ func cmdPs(cfg store.Config, args []string) error {
 		return nil
 	}
 	_, _ = stdoutPrinter("unreachable (pid %d) on port %d\n", record.Pid, record.Port)
-	return fmt.Errorf("daemon is not answering on port %d", record.Port)
+	return fmt.Errorf("daemon is not answering on port %d: %s", record.Port, listenerObservation(record.Port, probe))
 }
 
 // cmdStop implements `engram stop` (spec S5): stop the pidfile-tracked
@@ -165,6 +174,9 @@ func stopDaemon(cfg store.Config) (int, error) {
 	defer func() { _ = startLock.Release() }()
 	record, err := daemon.ReadPidfile(pidPath)
 	if errors.Is(err, daemon.ErrNoPidfile) {
+		if err := listenerConflict(daemonStatusPort(daemon.PidRecord{})); err != nil {
+			return 0, err
+		}
 		return 0, fmt.Errorf("no daemon pidfile; nothing to stop")
 	}
 	if err != nil {
@@ -174,12 +186,16 @@ func stopDaemon(cfg store.Config) (int, error) {
 		if err := removePidfileIfUnchanged(pidPath, record); err != nil {
 			return record.Pid, err
 		}
+		if err := listenerConflict(daemonStatusPort(record)); err != nil {
+			return record.Pid, err
+		}
 		_, _ = stdoutPrinter("Removed stale pidfile (pid %d was not running)\n", record.Pid)
 		return record.Pid, nil
 	}
-	if !daemonIdentityConfirmed(record, daemonStatusProbe(record.Port)) {
+	probe := daemonStatusProbe(record.Port)
+	if !daemonIdentityConfirmed(record, probe) {
 		// Never signal a pid we cannot confirm as this daemon.
-		return record.Pid, fmt.Errorf("pid %d is alive but not confirmed as the engram daemon on port %d; not signaling; verify the process and stop it manually only if it is the daemon, or remove %s only if the record is stale: %w", record.Pid, record.Port, pidPath, errDaemonUnconfirmed)
+		return record.Pid, fmt.Errorf("pid %d is alive but not confirmed as the engram daemon on port %d; not signaling; verify the process and stop it manually only if it is the daemon, or remove %s only if the record is stale; listener observation: %s: %w", record.Pid, record.Port, pidPath, listenerObservation(record.Port, probe), errDaemonUnconfirmed)
 	}
 	if err := stopDaemonProcessNow(record.Pid); err != nil {
 		// Keep the pidfile: the daemon may still be alive.

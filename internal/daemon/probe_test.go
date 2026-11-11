@@ -59,7 +59,7 @@ func TestProbeReadsDaemonTokenFromHealth(t *testing.T) {
 	defer srv.Close()
 	port := srv.Listener.Addr().(*net.TCPAddr).Port
 	res := Probe(context.Background(), port, time.Second)
-	if res.Status != StatusRunning || res.Token != "tok-123" {
+	if res.Status != StatusRunning || res.Token != "tok-123" || res.Service != "engram" {
 		t.Fatalf("probe = status %q token %q, want running with token tok-123", res.Status, res.Token)
 	}
 }
