@@ -322,6 +322,11 @@ pi-engram init
 
 This source version of Go's `engram setup pi` pins `0.7.1` and migrates the known `0.7.0` and `0.6.0` pins along with older managed pins. Already-published core binaries retain their original installer pins; installing a newer companion does not change them. Use the validated core/companion pair rather than changing installed metadata. Earlier `0.1.16` still registers Engram MCP during `pi-engram init`, so do not use it for native-only setup.
 
+Setup preserves a custom same-name npm entry across `pi install` only when Pi's
+change matches its known source replacement. Unexpected settings changes stop
+setup and retain an `.engram-pi-settings-*` recovery copy at the reported path;
+inspect it before retrying. This does not lock settings against concurrent edits.
+
 Restart Pi after installation, then ask Pi what it remembers about the current project or call `mem_context`.
 
 `gentle-engram` does not need an MCP extension. Pi 0.99.0 and later ship built-in MCP support that reads `mcp.json` in the Pi agent directory and is managed with `/mcp` or `pi mcp add`. An installed `pi-mcp-adapter` replaces that built-in support, so `pi-engram init` does not add it; an existing adapter entry in `settings.json` is left for you to keep or remove.

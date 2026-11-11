@@ -289,12 +289,12 @@ func piAgentDir() string {
 }
 
 func installPi() (*Result, error) {
-	if _, err := runCommand("pi", "install", piGentleEngramPackage); err != nil {
+	agentDir := piAgentDir()
+	settingsPath := filepath.Join(agentDir, "settings.json")
+	if err := installPiPackage(settingsPath); err != nil {
 		return nil, fmt.Errorf("install %s: %w", piGentleEngramPackage, err)
 	}
 
-	agentDir := piAgentDir()
-	settingsPath := filepath.Join(agentDir, "settings.json")
 	files := 0
 
 	// ensurePiNpmCommand must run before ensurePiPackageSettings so that a single
@@ -337,15 +337,17 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		var pkg string
 		if err := json.Unmarshal(raw, &pkg); err == nil {
 			switch pkg {
-			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage, piEarlierGentleEngramPackage, piPriorReleaseGentleEngramPackage, piLastReleaseGentleEngramPackage, "npm:gentle-engram@0.4.0", "npm:gentle-engram@0.4.1", "npm:gentle-engram@0.4.2", "npm:gentle-engram@0.5.0", "npm:gentle-engram@0.5.1", "npm:gentle-engram@0.6.0", "npm:gentle-engram@0.7.0":
-				changed = true
-				continue
 			case piGentleEngramPackage:
 				if hasGentleEngramPackage {
 					changed = true
 					continue
 				}
 				hasGentleEngramPackage = true
+			default:
+				if isPiManagedPackage(pkg) {
+					changed = true
+					continue
+				}
 			}
 		}
 		updatedPackages = append(updatedPackages, raw)
