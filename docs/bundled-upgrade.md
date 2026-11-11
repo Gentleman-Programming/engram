@@ -72,6 +72,13 @@ enumerated by release digest. Its complete historical regression fixture and
 source provenance live in `internal/store/testdata/migrate_copy_upgraded_*`.
 The object count or a matching inventory alone never authorizes migration.
 
+Admission treats only the known `sync_chunks` table-name header emitted by
+SQLite rebuild/rename (`CREATE TABLE "sync_chunks"`, with or without a space
+before `(`) as equivalent to its unquoted header. Column definitions,
+constraints, defaults, literal whitespace, triggers and every other object
+remain subject to the existing complete-catalog comparison. This does not
+establish compatibility for arbitrary quoted identifiers or historical shapes.
+
 Unknown objects, missing required objects, altered columns/constraints/triggers,
 future versions and rollback journals (including cold journals, conservatively)
 are rejected. A shared `user_version` alone is not compatibility. Custom or

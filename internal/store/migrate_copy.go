@@ -504,6 +504,11 @@ func copyNormalizeDDL(ddl string) string {
 	if start < 0 || !strings.HasSuffix(ddl, ")") {
 		return ddl
 	}
+	header := ddl[:start+1]
+	// SQLite quotes this known table name after its rebuild/rename migration.
+	if strings.TrimSpace(ddl[:start]) == `CREATE TABLE "sync_chunks"` {
+		header = "CREATE TABLE sync_chunks ("
+	}
 	body := ddl[start+1 : len(ddl)-1]
 	var parts []string
 	depth := 0
@@ -539,7 +544,7 @@ func copyNormalizeDDL(ddl string) string {
 	}
 	parts = append(parts, strings.TrimSpace(body[last:]))
 	sort.Strings(parts)
-	return ddl[:start+1] + strings.Join(parts, ",") + ",)"
+	return header + strings.Join(parts, ",") + ",)"
 }
 
 // migrateCopyReadOnlyDSN opens the copied database read-only. Like storeDSN,
