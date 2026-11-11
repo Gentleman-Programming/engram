@@ -105,8 +105,9 @@ func cmdRun(cfg store.Config, args []string) error {
 // assertDaemonStartable rejects a second daemon start while a live one holds
 // the pidfile, mirroring docker's refusal to double-start one container. A
 // live pid only blocks the start when the daemon identity answers; a record
-// answered as not-running or as a foreign daemon is stale and cleared
-// instead of blocking. A record whose port is bound but does not answer
+// answered as not-running or as a foreign daemon is stale and cleared;
+// the requested port must still be free before spawning. A recorded port
+// that is bound but does not answer
 // /health (StatusUnreachable) is preserved and the start rejected: the
 // daemon may be alive and merely not answering, and an unreachable probe is
 // not evidence the record is stale.
@@ -114,14 +115,17 @@ func assertDaemonStartable(dataDir string, port int) error {
 	pidPath := daemon.PidfilePath(dataDir)
 	record, err := daemon.ReadPidfile(pidPath)
 	if errors.Is(err, daemon.ErrNoPidfile) {
-		return nil
+		return listenerConflict(port)
 	}
 	if err != nil {
 		return err
 	}
 	if !daemon.ProcessAlive(record.Pid) {
 		// Stale pidfile from a dead daemon: clear it and start fresh.
-		return daemon.RemovePidfile(pidPath)
+		if err := daemon.RemovePidfile(pidPath); err != nil {
+			return err
+		}
+		return listenerConflict(port)
 	}
 	if record.Token == "" {
 		return fmt.Errorf("pid %d has a legacy record without a start token; record kept at %s; verify the process and stop it manually only if it is the daemon, or remove the record only if stale: %w", record.Pid, pidPath, errDaemonUnconfirmed)
@@ -148,9 +152,13 @@ func assertDaemonStartable(dataDir string, port int) error {
 	// the recorded port (not running) or a foreign daemon answered the
 	// identity probe (token mismatch). The record is stale — the same rule
 	// `engram stop` applies before any signal — so clear it and start fresh
-	// rather than reporting a phantom "already running".
+	// rather than reporting a phantom "already running". The requested port
+	// is checked independently after clearing the unconfirmed record.
 	_, _ = stdoutPrinter("Clearing unmanaged pidfile (pid %d not confirmed as the daemon on port %d)\n", record.Pid, probePort)
-	return daemon.RemovePidfile(pidPath)
+	if err := daemon.RemovePidfile(pidPath); err != nil {
+		return err
+	}
+	return listenerConflict(port)
 }
 
 // runDetached spawns the daemon child, waits for its readiness handshake, and

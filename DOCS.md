@@ -2037,7 +2037,7 @@ Engram ships docker-style verbs for the common daemon lifecycle. They manage onl
 | --- | --- | --- |
 | Run in background | `docker run -d` | `engram run -d` — detaches, prints PID and port |
 | Custom port | `docker run -d -p 1234` | `engram run -d -p 1234` — fails loudly if the port is taken |
-| Status | `docker ps` | `engram ps` — running (pid N) on port P / not running / unreachable |
+| Status | `docker ps` | `engram ps` — managed running (pid N) on port P / not running / unreachable / unmanaged or unknown listener |
 | Stop | `docker stop` | `engram stop` — graceful stop, then force if needed |
 | Logs | `docker logs` | `engram logs` — `engram logs -f` follows |
 | Restart | `docker restart` | `engram restart [-p PORT]` — stop, then start detached again |
@@ -2045,6 +2045,7 @@ Engram ships docker-style verbs for the common daemon lifecycle. They manage onl
 - The daemon records `<dataDir>/serve.pid` (JSON `{"pid": N, "port": P, "token": T}` — the token identifies one daemon start) and writes its stdout/stderr to `<dataDir>/serve.log` (default data dir `~/.engram`). Concurrent starts on one data directory are serialized through `<dataDir>/serve.lock`, so two parents can never overwrite each other's records.
 - An identity-confirmed `engram ps` also prints server and installed CLI semantic release versions. A known difference reports `Restart pending`; unknown versions do not. Status never restarts or signals the process, and a version match cannot replace the start-token identity check.
 - A second `engram run -d` against a live daemon reports `already running (pid N)` and exits non-zero.
+- With a missing or dead pidfile, `ps` and `stop` also inspect the recorded port (otherwise `ENGRAM_PORT`, then 7437). A healthy Engram listener is reported as unmanaged; other occupied or unconfirmed listeners are reported as unknown. `run -d` checks its requested port before spawning. These diagnostics exit non-zero and never adopt or signal the listener. Windows reports a unique OS-observed IPv4 loopback/wildcard owning PID when available; other platforms, lookup failures, and ambiguous owners explicitly report PID unavailable. An observed PID is a diagnostic snapshot, never stop authorization.
 - A pidfile pid is only signaled after `/health` returns the same nonempty start token recorded in the pidfile. A live pid with a missing or mismatched identity is never signaled. `run -d` can clear a token-bearing record when the recorded port is not running or answers with a different identity; an unreachable probe preserves the record. A live legacy record without a token remains readable, but `ps` reports it as unmanaged and `run -d`, `stop`, and `restart` preserve it and require manual verification. Verify the process locally and stop it manually only if it is the daemon; remove the pidfile only if the record is stale. A healthy HTTP port alone never establishes ownership of a PID.
 - A port conflict is a startup error with a non-zero exit code, so `KeepAlive`/`Restart` supervisors never hot-loop on a silent exit-0 bind failure.
 - `engram stop` escalates from graceful to forced termination; on Windows, detached children cannot receive console events, so stop terminates the process directly.
