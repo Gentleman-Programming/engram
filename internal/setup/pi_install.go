@@ -98,7 +98,7 @@ func installPiPackage(settingsPath string) error {
 			if readErr == nil {
 				switch {
 				case index >= len(current):
-					readErr = errors.New("Pi package position disappeared during install")
+					readErr = errors.New("pi package position disappeared during install")
 				case samePiJSON(current[index], original):
 					// No mutation (including the normal pre-persistence failure).
 				case samePiJSON(current[index], expected):
@@ -108,7 +108,7 @@ func installPiPackage(settingsPath string) error {
 						readErr = writeJSONConfig(settingsPath, latest)
 					}
 				default:
-					readErr = errors.New("Pi package changed unexpectedly during install")
+					readErr = errors.New("pi package changed unexpectedly during install")
 				}
 			}
 		}
