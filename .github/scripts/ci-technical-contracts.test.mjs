@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { withoutSuitePriority } from './ci-suite-priority.mjs';
 
 const source = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const job = (text, id) => text.match(new RegExp(`^  ${id}:\\n[\\s\\S]*?(?=^  [a-z][\\w-]*:|$(?![\\s\\S]))`, 'm'))?.[0] ?? '';
@@ -15,7 +16,7 @@ function discovery(text) {
 test('independent technical discovery in the existing Policy Helper Tests job', () => discovery(source));
 
 function race(text) {
-  const body = job(text, 'race-tests');
+  const body = withoutSuitePriority(job(text, 'race-tests'));
   for (const line of ['name: Go Race Tests', 'runs-on: ubuntu-24.04', 'timeout-minutes: 30',
     'CGO_ENABLED: "1"', 'CC: gcc', 'GOTOOLCHAIN: local', 'go-version: "1.26.11"',
     'ref: ${{ github.sha }}', 'persist-credentials: false', 'run: git rev-parse HEAD',
@@ -310,7 +311,7 @@ test('verification rejects missing setup and reordered preflight/build stages', 
 });
 
 function macos(text) {
-  const body = job(text, 'macos-native-tests');
+  const body = withoutSuitePriority(job(text, 'macos-native-tests'));
   assert.ok(body, 'native macOS job must exist');
   for (const value of ['name: Native macOS ARM64 Tests', 'runs-on: macos-15', 'timeout-minutes: 20',
     'GOTOOLCHAIN: local', 'go-version: "1.26.11"', 'node-version: "24"',

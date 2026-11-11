@@ -3,7 +3,7 @@
 ## Candidate scope
 
 The candidate **Go Race Tests** job runs
-`go test -race -timeout=20m ./...` independently on `ubuntu-24.04`, with
+`go test -race -timeout=20m ./...` in its own job on `ubuntu-24.04`, with
 Go 1.26.11, `CGO_ENABLED=1` and `CC=gcc`.
 Pinned Node.js 24 is provisioned before the suite for the owned Core lifecycle tests;
 local reproduction needs the same Node prerequisite, not the runner's ambient version.
@@ -14,6 +14,11 @@ the `e2e` tag, Windows-only tests, or tests skipped by their existing prerequisi
 It does not filter or exclude packages or weaken assertions.
 
 The job inherits CI's PR, merge-group and main-push triggers and concurrency.
+It waits for Unit, E2E and Plugin to finish, yielding runner capacity to required
+technical checks. Its `!cancelled()` job guard preserves execution even when
+those prerequisites fail or skip; explicit cancellation still cancels it.
+This orders advisory PR feedback later without treating a prerequisite result
+as race evidence. The 30-minute job budget starts when the job executes.
 Its name is initially **not a required context**; this change does not alter
 repository rulesets. Failure still fails the job: there is no
 `continue-on-error` or successful fallback.

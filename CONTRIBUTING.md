@@ -468,6 +468,15 @@ unapproved dependency upgrades.
 The `main` merge queue is already active. Contributors submit eligible PRs to the
 queue; the six required contexts above also run on each merge group.
 
+Unit, E2E and Plugin run before the full Race, Windows and native macOS Go
+suites to give the required technical checks first access to runners. The latter
+jobs still run after failed or skipped prerequisites unless the run is cancelled;
+their results remain separate checks. This ordering applies to PR, merge-group
+and main events, so advisory feedback on PRs can arrive later. No suite, event,
+required context or job timeout is removed. Other jobs remain independent;
+runner availability can still delay required checks. Queue latency improvements
+must be measured on subsequent hosted executions, not inferred from this order.
+
 The effective queue rule was observed on **2026-10-09** with these settings:
 
 | Setting | Observed value |

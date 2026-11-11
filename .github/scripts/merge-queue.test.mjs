@@ -249,6 +249,39 @@ function assertSingleContext(workflow, context) {
   assert.equal(matches.length, 1, `${context} must have exactly one job`);
 }
 
+function assertSuitePriority(workflow) {
+  for (const id of ['race-tests', 'windows-suite', 'macos-native-tests']) {
+    const body = jobBody(workflow, id).replaceAll('\r\n', '\n');
+    assert.match(body, /^    needs: \[unit-tests, e2e-tests, plugin-tests\]$/m, id);
+    assert.match(body, /^    if: \$\{\{ !cancelled\(\) \}\}$/m,
+      `${id} must still execute after failed or skipped prerequisites`);
+    assert.equal((body.match(/^    (?:needs|if):/gm) ?? []).length, 2, id);
+  }
+  for (const id of ['unit-tests', 'e2e-tests', 'plugin-tests']) {
+    assert.doesNotMatch(jobBody(workflow, id), /^    (needs|if):/m,
+      `${id} must not wait on advisory suites or depend on their outcome`);
+  }
+}
+
+test('long advisory suites yield runners to required technical checks without suppressing failures', () => {
+  assertSuitePriority(ciWorkflow);
+});
+
+test('priority contract rejects missing dependencies, suppression and dependency cycles', () => {
+  for (const id of ['race-tests', 'windows-suite', 'macos-native-tests']) {
+    const body = jobBody(ciWorkflow, id);
+    for (const [before, after] of [
+      ['needs: [unit-tests, e2e-tests, plugin-tests]', 'needs: [unit-tests]'],
+      ['!cancelled()', 'success()'],
+      ['!cancelled()', "github.event_name == 'push'"],
+      ['!cancelled()', 'always()'],
+    ]) assert.throws(() => assertSuitePriority(ciWorkflow.replace(body, () => body.replace(before, after))));
+  }
+  for (const id of ['unit-tests', 'e2e-tests', 'plugin-tests']) {
+    assert.throws(() => assertSuitePriority(ciWorkflow.replace(`  ${id}:`, `  ${id}:\n    needs: race-tests`)));
+  }
+});
+
 function assertEventGatedStep(job, step, events) {
   const condition = events.map((event) => `github\\.event_name == '${event}'`).join(' \\|\\| ');
   assert.match(

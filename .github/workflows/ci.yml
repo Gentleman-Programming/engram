@@ -17,6 +17,8 @@ permissions:
 
 jobs:
   race-tests:
+    needs: [unit-tests, e2e-tests, plugin-tests]
+    if: ${{ !cancelled() }}
     name: Go Race Tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -126,6 +128,8 @@ jobs:
           key: ${{ steps.race-cache.outputs.key }}
 
   macos-native-tests:
+    needs: [unit-tests, e2e-tests, plugin-tests]
+    if: ${{ !cancelled() }}
     name: Native macOS ARM64 Tests
     runs-on: macos-15
     timeout-minutes: 20
@@ -903,6 +907,8 @@ jobs:
         run: go test -tags e2e ./internal/server/...
 
   windows-suite:
+    needs: [unit-tests, e2e-tests, plugin-tests]
+    if: ${{ !cancelled() }}
     name: Windows Full Suite (Observational)
     runs-on: windows-2025
     # New observational ceiling, not an SLO or the selective #2020 budgets.
