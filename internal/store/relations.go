@@ -648,6 +648,16 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 		return nil, fmt.Errorf("JudgeRelation: check existence: %w", err)
 	}
 
+	// Redact explanations before persistence; responses and sync read this row.
+	if p.Reason != nil {
+		reason := stripPrivateTags(*p.Reason)
+		p.Reason = &reason
+	}
+	if p.Evidence != nil {
+		evidence := stripPrivateTags(*p.Evidence)
+		p.Evidence = &evidence
+	}
+
 	// Build nullable model string.
 	var markedByModel *string
 	if p.MarkedByModel != "" {
