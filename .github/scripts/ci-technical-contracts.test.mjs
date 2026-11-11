@@ -17,7 +17,7 @@ test('independent technical discovery in the existing Policy Helper Tests job', 
 function race(text) {
   const body = job(text, 'race-tests');
   for (const line of ['name: Go Race Tests', 'runs-on: ubuntu-24.04', 'timeout-minutes: 30',
-    'CGO_ENABLED: "1"', 'CC: gcc', 'GOTOOLCHAIN: local', 'go-version: "1.26.10"',
+    'CGO_ENABLED: "1"', 'CC: gcc', 'GOTOOLCHAIN: local', 'go-version: "1.26.11"',
     'ref: ${{ github.sha }}', 'persist-credentials: false', 'run: git rev-parse HEAD',
     'run: gcc --version', 'run: /usr/bin/time -p go test -race -timeout=20m ./...']) {
     assert.ok(body.split('\n').some(value => value.trim() === line), line);
@@ -49,7 +49,7 @@ function raceOwner(text) {
   const { steps, restore, save } = cacheSteps(text);
   assert.equal((body.match(/uses: actions\/cache\//g) ?? []).length, 2);
   assert.doesNotMatch(body, /uses: actions\/cache@|enableCrossOsArchive: true|cache-mode:|(?:lookup-only|fail-on-cache-miss): true/);
-  assert.match(steps.find(s => s.includes('uses: actions/setup-go@')) ?? '', /go-version: "1\.26\.10"\n          cache: false\n/);
+  assert.match(steps.find(s => s.includes('uses: actions/setup-go@')) ?? '', /go-version: "1\.26\.11"\n          cache: false\n/);
   for (const step of [restore, save]) {
     assert.match(step, /path: \|\n            \$\{\{ steps\.race-cache\.outputs\.gomodcache \}\}\n            \$\{\{ steps\.race-cache\.outputs\.gocache \}\}/);
     assert.match(step, /key: \$\{\{ steps\.race-cache\.outputs\.key \}\}/);
@@ -183,7 +183,7 @@ function verification(text) {
   const unit = job(withoutHold(text), 'unit-tests');
   assert.match(unit, /name: Unit Tests\n/);
   assert.doesNotMatch(unit, /continue-on-error|environment:|\n\s+if:|\|\| true|: write|secrets\.|-timeout=20m/);
-  const ordered = ['name: Set up Go', 'go-version: "1.26.10"',
+  const ordered = ['name: Set up Go', 'go-version: "1.26.11"',
     'name: Verify module metadata is tidy\n        run: go mod tidy -diff\n',
     'name: Verify generated templ output\n', 'make templ\n',
     "git diff --exit-code -- 'internal/cloud/dashboard/*_templ.go'\n",
@@ -247,7 +247,7 @@ for (const [name, check] of Object.entries({ race, verification, concurrency }))
 
 const mutations = {
   race: [
-    ['ubuntu-24.04', 'ubuntu-latest'], ['go-version: "1.26.10"', 'go-version: "1.26.9"'],
+    ['ubuntu-24.04', 'ubuntu-latest'], ['go-version: "1.26.11"', 'go-version: "1.26.9"'],
     ['CGO_ENABLED: "1"', 'CGO_ENABLED: "0"'], ['CC: gcc', 'CC: clang'],
     ['GOTOOLCHAIN: local', 'GOTOOLCHAIN: auto'], ['run: gcc --version', 'run: true'],
     ['timeout-minutes: 30', 'timeout-minutes: 20'], ['-timeout=20m', '-timeout=10m'],
@@ -298,7 +298,7 @@ for (const [category, cases] of Object.entries(mutations)) {
 }
 
 test('verification rejects missing setup and reordered preflight/build stages', () => {
-  const setup = '      - name: Set up Go\n        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6\n        with:\n          go-version: "1.26.10"\n';
+  const setup = '      - name: Set up Go\n        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6\n        with:\n          go-version: "1.26.11"\n';
   const unit = job(source, 'unit-tests');
   assert.ok(unit.includes(setup));
   assert.throws(() => verification(source.replace(unit, () => unit.replace(setup, ''))));
@@ -313,9 +313,9 @@ function macos(text) {
   const body = job(text, 'macos-native-tests');
   assert.ok(body, 'native macOS job must exist');
   for (const value of ['name: Native macOS ARM64 Tests', 'runs-on: macos-15', 'timeout-minutes: 20',
-    'GOTOOLCHAIN: local', 'go-version: "1.26.10"', 'node-version: "24"',
+    'GOTOOLCHAIN: local', 'go-version: "1.26.11"', 'node-version: "24"',
     'ref: ${{ github.sha }}', 'persist-credentials: false',
-    'test "$(uname -sm)" = "Darwin arm64"', 'test "$(go env GOVERSION)" = go1.26.10',
+    'test "$(uname -sm)" = "Darwin arm64"', 'test "$(go env GOVERSION)" = go1.26.11',
     'test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = darwin/arm64',
     'test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64',
     'test "$(node -p \'process.platform + "/" + process.arch\')" = darwin/arm64',
@@ -338,7 +338,7 @@ test('native macOS rejects scope, prerequisites, budget and failure regressions'
   const original = job(source, 'macos-native-tests');
   for (const [before, after] of [
     ['runs-on: macos-15', 'runs-on: macos-latest'], ['timeout-minutes: 20', 'timeout-minutes: 30'],
-    ['go-version: "1.26.10"', 'go-version: "1.26.9"'], ['node-version: "24"', 'node-version: "22"'],
+    ['go-version: "1.26.11"', 'go-version: "1.26.9"'], ['node-version: "24"', 'node-version: "22"'],
     ['/usr/bin/jq --version', 'jq --version'], ['Darwin arm64', 'Darwin x86_64'],
     ['-timeout=10m', '-timeout=20m'], ['-count=1', '-count=2'],
     ['set -euo pipefail', 'set -eu'], ['HOME=$state/home', 'HOME=/Users/runner'],
@@ -378,7 +378,7 @@ function adapters(text) {
   assert.ok(body, 'independent native adapter job');
   for (const value of ['runs-on: macos-15', 'timeout-minutes: 15', 'GOTOOLCHAIN: local',
     'go-version-file: go.mod', 'node-version: "24"', 'ref: ${{ github.sha }}', 'persist-credentials: false',
-    'test "$(uname -sm)" = "Darwin arm64"', 'test "$(go env GOVERSION)" = go1.26.10',
+    'test "$(uname -sm)" = "Darwin arm64"', 'test "$(go env GOVERSION)" = go1.26.11',
     'test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64',
     'test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = darwin/arm64',
     'test "$(node -p \'process.platform + "/" + process.arch\')" = darwin/arm64',
@@ -409,7 +409,7 @@ test('native adapter contract rejects weakened placement, prerequisites and exit
   const original = job(source, 'macos-adapter-tests');
   for (const before of ['runs-on: macos-15', 'timeout-minutes: 15', 'timeout-minutes: 2', 'timeout-minutes: 5',
     'go-version-file: go.mod', 'node-version: "24"', 'persist-credentials: false', 'set -euo pipefail',
-    'Darwin arm64', 'go1.26.10', 'darwin/arm64', 'state=$(cd "$state" && pwd -P)',
+    'Darwin arm64', 'go1.26.11', 'darwin/arm64', 'state=$(cd "$state" && pwd -P)',
     'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
     'npm ci --ignore-scripts --legacy-peer-deps', 'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
     'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary',
@@ -467,7 +467,7 @@ function windowsAdapters(text) {
   for (const value of ['name: Native Windows x64 Adapter Tests', 'runs-on: windows-2022',
     'timeout-minutes: 20', 'shell: pwsh', 'GOTOOLCHAIN: local', 'go-version-file: go.mod',
     'node-version: "24"', 'architecture: x64', 'ref: ${{ github.sha }}', 'persist-credentials: false',
-    "'windows/amd64'", "'go1.26.10'", "'X64'", 'process.platform !== "win32"', 'process.arch !== "x64"',
+    "'windows/amd64'", "'go1.26.11'", "'X64'", 'process.platform !== "win32"', 'process.arch !== "x64"',
     'process.versions.node.split(".")[0] !== "24"', 'node_modules/typebox/package.json',
     'docs/contracts/agent-contract-v1.json', 'GOMODCACHE', 'GOCACHE', "USERPROFILE = 'home'",
     "APPDATA = 'appdata'", "LOCALAPPDATA = 'localappdata'", "TEMP = 'tmp'", "TMP = 'tmp'",
@@ -490,7 +490,7 @@ test('Windows adapter lane preserves native tools, profile isolation, selection 
 test('Windows adapter lane rejects prerequisite, budget and failure masking regressions', () => {
   const original = job(source, 'windows-adapter-tests');
   for (const before of ['runs-on: windows-2022', 'timeout-minutes: 20', 'timeout-minutes: 2',
-    'timeout-minutes: 5', 'shell: pwsh', 'windows/amd64', 'go1.26.10', 'X64',
+    'timeout-minutes: 5', 'shell: pwsh', 'windows/amd64', 'go1.26.11', 'X64',
     'go-version-file: go.mod', 'node-version: "24"', 'USERPROFILE', 'APPDATA', 'GOCACHE',
     'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
     'npm ci --ignore-scripts --legacy-peer-deps', '--test-concurrency=1', '$LASTEXITCODE',
@@ -531,7 +531,7 @@ test('Windows preflight rejects cross-target Go before creating profile state', 
   const dir = mkdtempSync(join(tmpdir(), 'adapter-preflight-'));
   try {
     for (const arch of ['amd64', 'arm64']) {
-      const metadata = JSON.stringify({ GOVERSION: 'go1.26.10', GOOS: 'windows', GOARCH: arch,
+      const metadata = JSON.stringify({ GOVERSION: 'go1.26.11', GOOS: 'windows', GOARCH: arch,
         GOHOSTOS: 'windows', GOHOSTARCH: 'amd64', GOMODCACHE: 'original modules', GOCACHE: 'original cache' });
       const fakeGo = `function go { '${metadata}'; $global:LASTEXITCODE = 0 };\n`;
       const envFile = join(dir, arch);

@@ -50,7 +50,7 @@ test('PostgreSQL job is isolated and preserves existing CI jobs and triggers', (
   const workflow = fs.readFileSync('.github/workflows/ci.yml', 'utf8').replaceAll('\r\n', '\n');
   const body = workflow.match(/^  postgres-tests:\n[\s\S]*?(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
   assert.ok(body, 'PostgreSQL job missing');
-  for (const value of ['postgres:16-alpine', '--health-cmd "pg_isready', 'CLOUDSTORE_TEST_DSN:', 'go-version: "1.26.10"', 'persist-credentials: false', 'set -euo pipefail', 'go test -json -count=1 -timeout=10m ./internal/cloud/cloudstore ./internal/cloud/cloudserver ./cmd/engram', 'node .github/scripts/postgres-ci-evidence.mjs', 'SELECT version()', 'git rev-parse HEAD']) assert.ok(body.includes(value), value);
+  for (const value of ['postgres:16-alpine', '--health-cmd "pg_isready', 'CLOUDSTORE_TEST_DSN:', 'go-version: "1.26.11"', 'persist-credentials: false', 'set -euo pipefail', 'go test -json -count=1 -timeout=10m ./internal/cloud/cloudstore ./internal/cloud/cloudserver ./cmd/engram', 'node .github/scripts/postgres-ci-evidence.mjs', 'SELECT version()', 'git rev-parse HEAD']) assert.ok(body.includes(value), value);
   assert.match(body, /permissions:\n      contents: read/);
   assert.match(body, /timeout-minutes: 20/);
   assert.doesNotMatch(body, /continue-on-error|needs:|\n    if:|secrets\.|-short|\|\| true/);
