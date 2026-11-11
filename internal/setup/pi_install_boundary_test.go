@@ -107,6 +107,79 @@ func TestPiInstallConflictRetainsRecoveryAndLatestSettings(t *testing.T) {
 	}
 }
 
+func TestPiInstallRecoveryIOFailure(t *testing.T) {
+	for _, operation := range []string{"read", "write"} {
+		for _, installFails := range []bool{false, true} {
+			t.Run(operation+map[bool]string{false: "/install-success", true: "/install-error"}[installFails], func(t *testing.T) {
+				resetSetupSeams(t)
+				dir := t.TempDir()
+				t.Setenv("PI_CODING_AGENT_DIR", dir)
+				path := filepath.Join(dir, "settings.json")
+				const original = `{"packages":["npm:gentle-engram@9.9.9","npm:gentle-engram@0.7.0"],"keep":true}`
+				const latest = `{"packages":["npm:gentle-engram@0.7.1","npm:gentle-engram@0.7.0","./added"],"keep":true,"new":true}`
+				if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+					t.Fatal(err)
+				}
+				ioErr := errors.New("injected recovery " + operation + " failure")
+				installErr := errors.New("injected install failure")
+				runCommand = func(string, ...string) ([]byte, error) {
+					if err := os.WriteFile(path, []byte(latest), 0600); err != nil {
+						t.Fatal(err)
+					}
+					if operation == "read" {
+						readFileFn = func(name string) ([]byte, error) {
+							if name == path {
+								return nil, ioErr
+							}
+							return os.ReadFile(name)
+						}
+					} else {
+						writeFileFn = func(name string, data []byte, mode os.FileMode) error {
+							if name == path {
+								return ioErr
+							}
+							return os.WriteFile(name, data, mode)
+						}
+					}
+					if installFails {
+						return nil, installErr
+					}
+					return nil, nil
+				}
+				_, err := Install("pi")
+				if !errors.Is(err, ioErr) || errors.Is(err, installErr) != installFails {
+					t.Fatalf("recovery lost an error: %v", err)
+				}
+				backups, globErr := filepath.Glob(filepath.Join(dir, ".engram-pi-settings-*"))
+				if globErr != nil || len(backups) != 1 {
+					t.Fatalf("missing recovery: %v %v", backups, globErr)
+				}
+				if !strings.Contains(err.Error(), "recovery settings retained at "+backups[0]) {
+					t.Fatalf("recovery path not reported: %v", err)
+				}
+				got, readErr := os.ReadFile(path)
+				if readErr != nil || string(got) != latest {
+					t.Fatalf("latest settings changed: %s %v", got, readErr)
+				}
+				saved, readErr := os.ReadFile(backups[0])
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				var actual, expected any
+				if err := json.Unmarshal(saved, &actual); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal([]byte(original), &expected); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(actual, expected) {
+					t.Fatal("recovery copy does not preserve original settings")
+				}
+			})
+		}
+	}
+}
+
 func TestPiInstallValidatesSettingsBeforeExternalCommand(t *testing.T) {
 	resetSetupSeams(t)
 	dir := t.TempDir()
