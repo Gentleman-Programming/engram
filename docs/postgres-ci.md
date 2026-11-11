@@ -8,7 +8,7 @@ candidate is published and its job runs successfully.
 
 ## Scope and evidence
 
-The job runs these packages with Go 1.26.10, Node.js 24 and a URL-style
+The job runs these packages with Go 1.26.11, Node.js 24 and a URL-style
 `CLOUDSTORE_TEST_DSN`, without `-short` or extra build tags:
 
 - `internal/cloud/cloudstore`: migrations, identity/token/session persistence,
@@ -52,7 +52,7 @@ means exact server versions must be taken from each run's logs.
 
 ## Local reproduction (POSIX shell)
 
-Requires Docker, `psql`, Go 1.26.10 and Node.js 24. Run from the repository root.
+Requires Docker, `psql`, Go 1.26.11 and Node.js 24. Run from the repository root.
 Use an unused local port and container name. All credentials below are disposable
 local fixture values, not production secrets.
 
