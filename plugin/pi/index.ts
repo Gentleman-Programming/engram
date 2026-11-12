@@ -1233,7 +1233,61 @@ export function detachedServeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return result;
 }
 
-function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void> {
+// `run -d` exits after its daemon reports readiness. Trying it directly is a
+// bounded capability probe: releases before 3.7.0 reject the command, while a
+// source build reporting version "main" needs no special version gate. Any
+// failure retains the legacy detached serve path below.
+const ENGRAM_DAEMON_EXIT_GRACE_MS = 2000;
+
+async function spawnEngramDaemon(deadline: number, expectedID: string): Promise<boolean> {
+  const readiness = new AbortController();
+  let proc: ChildProcess | undefined;
+  try {
+    proc = spawn(ENGRAM_BIN, ["run", "-d"], {
+      env: detachedServeEnv(process.env),
+      windowsHide: true,
+      detached: false,
+      stdio: "ignore",
+    });
+    const child = proc;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const exited = new Promise<void>((resolve) => {
+      child.once("error", () => resolve());
+      child.once("exit", () => resolve());
+    });
+    try {
+      await Promise.race([
+        exited,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, Math.max(1, deadline - Date.now()));
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (child.exitCode === null && child.signalCode === null) {
+      stopAbandonedChild(child);
+      return false;
+    }
+    // A daemon wrapper can exit just before the listener is observable. A
+    // concurrent compatible server also converges through the same health
+    // contract instead of being replaced.
+    await waitForEngramReadiness(readiness.signal, Math.min(deadline, Date.now() + ENGRAM_DAEMON_EXIT_GRACE_MS), expectedID);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    readiness.abort();
+    proc?.unref();
+  }
+}
+
+async function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void> {
+  if (await spawnEngramDaemon(deadline, expectedID)) return;
+  return spawnAndWaitForLegacyEngram(deadline, expectedID);
+}
+
+function spawnAndWaitForLegacyEngram(deadline: number, expectedID = ""): Promise<void> {
   return new Promise((resolvePromise, rejectPromise) => {
     let proc: ChildProcess | undefined;
     let settled = false;
