@@ -369,7 +369,9 @@ for (const mismatch of [false, true]) {
       const result = await plugin.tools.get("mem_save").execute("path-save", { title: "PATH", content: "Synthetic transport", project: "path-project" }, undefined, undefined, plugin.ctx);
       const records = () => readFile(process.env.ENGRAM_PATH_TEST_LOG, "utf8").then(text => text.trim().split("\n").map(JSON.parse));
       const initial = await records();
-      assert.deepEqual(initial.filter(record => record.args).map(record => record.args), [["instance-id"], ["serve"]]);
+      // The synthetic PATH binary has no daemon lifecycle: `run -d` is probed
+      // first and startup falls back to the legacy `serve`.
+      assert.deepEqual(initial.filter(record => record.args).map(record => record.args), [["instance-id"], ["run", "-d"], ["serve"]]);
       assert.ok(initial.some(record => record.path === "/runtime-contract"));
       if (mismatch) {
         assert.equal(result.isError, true);
