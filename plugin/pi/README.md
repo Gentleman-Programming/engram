@@ -19,6 +19,15 @@ Pi is great at doing the work in front of it. The problem is everything around t
 
 Engram is persistent memory for AI coding agents. `gentle-engram` connects Pi to that memory so your agent can save the useful parts of a session and retrieve them later — without stuffing raw tool output back into the prompt.
 
+## Shared daemon lifecycle
+
+Without an explicit `ENGRAM_URL` or session-owned mode, the companion starts the
+local server with `engram run -d`. The standard `engram ps`, `stop`, `logs` and
+`restart` commands can manage that daemon. This is a bounded capability probe,
+not a SemVer assumption: supported releases and source builds reporting `main`
+both use it, while older cores or a failed daemon handoff fall back to detached
+`engram serve`.
+
 ## Opt-in session-owned HTTP transport
 
 Unset `ENGRAM_SERVER_MODE` to retain the existing shared-daemon behavior. To use

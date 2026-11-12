@@ -240,11 +240,11 @@ function freePort() {
   });
 }
 
-// A fake `engram serve` that logs every invocation, then either dies before readiness or
-// starts answering /health after `readyAfterMs` — the slow-health window under test.
+// A fake Engram CLI that logs every invocation. Its shared server either dies before
+// readiness or answers /health after `readyAfterMs`; `daemon` models `run -d` support.
 // `instanceId: "fail"` models a pre-rc.11 binary whose `instance-id` command exits 1, and
 // `cliVersion` gives the `version` probe something to report.
-async function writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs, exitCode, instanceId = "ok", cliVersion }) {
+async function writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs, exitCode, instanceId = "ok", cliVersion, daemon = false }) {
   const binPath = join(dir, "fake-engram.cjs");
   const instanceIdHandler = instanceId === "fail"
     ? `if (command === "instance-id" || command === resolve("instance-id")) { process.stderr.write("Error: unknown command \\"instance-id\\" for \\"engram\\"\\n"); process.exit(1); }`
@@ -253,22 +253,31 @@ async function writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs, exitCode,
     ? ""
     : `if (command === "version" || command === resolve("version")) { process.stdout.write(${JSON.stringify(cliVersion)} + "\\n"); process.exit(0); }`;
   const script = `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
 const { appendFileSync } = require("node:fs");
 const { createServer } = require("node:http");
 const { resolve } = require("node:path");
 
 // A preloaded fake sees the synthetic command in argv[1], not its own script path.
 const invocationArgs = process.argv.slice(process.argv[1] === __filename ? 2 : 1);
-const syntheticCommand = ["instance-id", "version", "serve", "sync"]
+const syntheticCommand = ["instance-id", "version", "run", "serve", "sync"]
   .find((name) => invocationArgs[0] === resolve(name));
 if (syntheticCommand) invocationArgs[0] = syntheticCommand;
 appendFileSync(${JSON.stringify(spawnLog)}, "invoke=" + JSON.stringify(invocationArgs) + "\\n");
 const syntheticServePath = resolve("serve");
-const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; ${instanceIdHandler} ${versionHandler}
+const command = invocationArgs[0]; const isSyntheticServe = command === "serve" || command === syntheticServePath; ${instanceIdHandler} ${versionHandler}
+if (command === "run" && invocationArgs[1] === "-d") {
+  if (!${daemon}) process.exit(1);
+  const child = spawn(process.execPath, [__filename, "serve"], {
+    detached: true, stdio: "ignore", env: { ...process.env, NODE_OPTIONS: "", ENGRAM_FAKE_DAEMON_CHILD: "1" },
+  });
+  child.unref();
+  setTimeout(() => process.exit(0), ${readyAfterMs} + 100);
+}
 if (process.argv.includes("sync") || process.argv.includes("--import")) { appendFileSync(${JSON.stringify(spawnLog)}, "sync --import\\n"); process.exit(0); }
 const isServe = process.argv[2] === "serve" || isSyntheticServe;
 if (isServe) {
-  appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
+  appendFileSync(${JSON.stringify(spawnLog)}, process.env.ENGRAM_FAKE_DAEMON_CHILD === "1" ? "daemon-server\\n" : "serve\\n");
   appendFileSync(${JSON.stringify(spawnLog)}, "autosync=" + (process.env.ENGRAM_CLOUD_AUTOSYNC ?? "<unset>") + "\\n");
   ${exitCode === undefined
       ? `const server = createServer(async (req, res) => {
@@ -360,7 +369,9 @@ for (const mismatch of [false, true]) {
       const result = await plugin.tools.get("mem_save").execute("path-save", { title: "PATH", content: "Synthetic transport", project: "path-project" }, undefined, undefined, plugin.ctx);
       const records = () => readFile(process.env.ENGRAM_PATH_TEST_LOG, "utf8").then(text => text.trim().split("\n").map(JSON.parse));
       const initial = await records();
-      assert.deepEqual(initial.filter(record => record.args).map(record => record.args), [["instance-id"], ["serve"]]);
+      // The synthetic PATH binary has no daemon lifecycle: `run -d` is probed
+      // first and startup falls back to the legacy `serve`.
+      assert.deepEqual(initial.filter(record => record.args).map(record => record.args), [["instance-id"], ["run", "-d"], ["serve"]]);
       assert.ok(initial.some(record => record.path === "/runtime-contract"));
       if (mismatch) {
         assert.equal(result.isError, true);
@@ -509,7 +520,7 @@ async function withFixture(options, run) {
     });
     const fakeEngram = options.missingBin
       ? { engramBin: join(dir, "engram-does-not-exist") }
-      : await writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode, instanceId: options.instanceId, cliVersion: options.cliVersion });
+      : await writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode, instanceId: options.instanceId, cliVersion: options.cliVersion, daemon: options.daemon });
     if (fakeEngram.nodeOptions) {
       process.env.NODE_OPTIONS = [originalNodeOptions, fakeEngram.nodeOptions].filter(Boolean).join(" ");
     }
@@ -789,6 +800,30 @@ test("a plugin-launched server starts with cloud autosync enabled", async () => 
     if (previous === undefined) delete process.env.ENGRAM_CLOUD_AUTOSYNC;
     else process.env.ENGRAM_CLOUD_AUTOSYNC = previous;
   }
+});
+
+for (const cliVersion of ["3.7.0", "main"]) {
+  test(`shared startup uses the daemon lifecycle for CLI version ${cliVersion}`, async () => {
+    await withFixture({ daemon: true, cliVersion }, async ({ hooks, ctx, spawnLog }) => {
+      await hooks.get("session_start")({}, ctx);
+      const log = await readFile(spawnLog, "utf8");
+      const invocations = log.split("\n").filter(line => line.startsWith("invoke="));
+      // The fake daemon's own child serves HTTP; only another top-level serve
+      // would be the plugin's legacy fallback.
+      assert.deepEqual(invocations, ['invoke=["instance-id"]', 'invoke=["run","-d"]', 'invoke=["serve"]']);
+      assert.equal(await countSpawns(spawnLog), 0, "the daemon wrapper must not fall back to serve");
+    });
+  });
+}
+
+test("shared startup falls back to legacy serve when run -d is unavailable", async () => {
+  await withFixture({ daemon: false }, async ({ hooks, ctx, spawnLog }) => {
+    await hooks.get("session_start")({}, ctx);
+    const log = await readFile(spawnLog, "utf8");
+    const invocations = log.split("\n").filter(line => line.startsWith("invoke="));
+    assert.deepEqual(invocations, ['invoke=["instance-id"]', 'invoke=["run","-d"]', 'invoke=["serve"]']);
+    assert.equal(await countSpawns(spawnLog), 1, "only one legacy server is launched");
+  });
 });
 
 test("a child that exits before readiness surfaces a normalized tool error", async () => {
