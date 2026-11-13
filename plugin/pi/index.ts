@@ -128,6 +128,10 @@ const ENGRAM_DEFERRED_TOOLS = new Set<string>([
   "mem_unpin",
 ]);
 
+// Headless/bench runs may suppress the injected protocol text without removing the mem_*
+// tools themselves; only literal "1" defers, so any other value keeps today's injection.
+const ENGRAM_DEFER_MEMORY = process.env.ENGRAM_DEFER_MEMORY === "1";
+
 const MEMORY_INSTRUCTIONS = `## Engram Persistent Memory — Protocol
 
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
@@ -3266,7 +3270,9 @@ export default function registerEngram(pi: ExtensionAPI) {
       prior.awaitingInitialUserMessage = false;
       prior.promptTurn = (prior.promptTurn || 0) + 1;
     }
-    const systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
+    const systemPrompt = ENGRAM_DEFER_MEMORY
+      ? event.systemPrompt
+      : event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
     const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
     if (state) state.awaitingInitialUserMessage = true;
     const epoch = state?.epoch;
@@ -3275,7 +3281,7 @@ export default function registerEngram(pi: ExtensionAPI) {
     // (pi#5581), so newer Pi receives the text through the per-run structured options instead.
     const options = event.systemPromptOptions && typeof event.systemPromptOptions === "object" ? event.systemPromptOptions : undefined;
     if (sessionCannotReachDeferredTools(options)) exposeDeferredMemoryTools();
-    if (options && !selectionLacksMemoryTools(options)) appendPromptSection(options, MEMORY_INSTRUCTIONS);
+    if (options && !selectionLacksMemoryTools(options) && !ENGRAM_DEFER_MEMORY) appendPromptSection(options, MEMORY_INSTRUCTIONS);
     const message = pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId
       ? { customType: "engram-compaction-recovery", content: pendingRecoveryNotice.content, display: false }
       : undefined;

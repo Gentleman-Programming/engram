@@ -4287,6 +4287,87 @@ test("memory protocol follows the host's selected tools", async () => {
   }
 });
 
+// C2: ENGRAM_DEFER_MEMORY=1 defers only the injected protocol text; the mem_* tools stay registered.
+test("ENGRAM_DEFER_MEMORY=1 defers the injected protocol while keeping the mem_* tools", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  const originalDefer = process.env.ENGRAM_DEFER_MEMORY;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  process.env.ENGRAM_DEFER_MEMORY = "1";
+  const { fetchStub } = recordingFetch([
+    { method: "GET", path: "/project/current", body: { project: "pi" } },
+    { method: "POST", path: "/sessions", body: { status: "created" } },
+    { method: "POST", path: "/prompts", status: 201, body: { id: 1 } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-defer-", async ({ sandbox }) => {
+      const { eventHandlers, registeredTools } = await loadPluginHarness(sandbox);
+      assert.ok(registeredTools.has("mem_save"), "mem_* tools stay registered when injection is deferred");
+      assert.ok(registeredTools.has("mem_search"), "mem_* tools stay registered when injection is deferred");
+      const beforeAgentStart = eventHandlers.get("before_agent_start");
+      const sessionId = "defer-owner";
+      await eventHandlers.get("session_start")({}, runtimeContext(sessionId));
+
+      const legacy = await beforeAgentStart({ systemPrompt: "base" }, runtimeContext(sessionId));
+      assert.equal(legacy.systemPrompt, "base", "legacy fallback must not inject the protocol when deferred");
+      assert.doesNotMatch(legacy.systemPrompt, /## Engram Persistent Memory — Protocol/);
+
+      const options = { appendSystemPrompt: "existing", selectedTools: ["read", "mem_save"] };
+      const structured = await beforeAgentStart(
+        { systemPrompt: "base", systemPromptOptions: options, prompt: "a sufficiently long captured prompt" },
+        runtimeContext(sessionId),
+      );
+      assert.equal(structured, undefined, "no forced systemPrompt replacement in structured mode");
+      assert.equal(options.appendSystemPrompt, "existing", "structured options must not receive the protocol when deferred");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+    if (originalDefer === undefined) delete process.env.ENGRAM_DEFER_MEMORY;
+    else process.env.ENGRAM_DEFER_MEMORY = originalDefer;
+  }
+});
+
+// C2: any value other than literal "1" (including absent) keeps today's injection.
+test("a non-\"1\" ENGRAM_DEFER_MEMORY value keeps the injected protocol", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  const originalDefer = process.env.ENGRAM_DEFER_MEMORY;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  process.env.ENGRAM_DEFER_MEMORY = "0";
+  const { fetchStub } = recordingFetch([
+    { method: "GET", path: "/project/current", body: { project: "pi" } },
+    { method: "POST", path: "/sessions", body: { status: "created" } },
+    { method: "POST", path: "/prompts", status: 201, body: { id: 1 } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-defer-off-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const beforeAgentStart = eventHandlers.get("before_agent_start");
+      const sessionId = "defer-off-owner";
+      await eventHandlers.get("session_start")({}, runtimeContext(sessionId));
+
+      const legacy = await beforeAgentStart({ systemPrompt: "base" }, runtimeContext(sessionId));
+      assert.match(legacy.systemPrompt, /^base\n\n## Engram Persistent Memory — Protocol/);
+
+      const options = { appendSystemPrompt: "existing", selectedTools: ["read", "mem_save"] };
+      await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: options }, runtimeContext(sessionId));
+      assert.match(options.appendSystemPrompt, /^existing\n\n## Engram Persistent Memory — Protocol/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+    if (originalDefer === undefined) delete process.env.ENGRAM_DEFER_MEMORY;
+    else process.env.ENGRAM_DEFER_MEMORY = originalDefer;
+  }
+});
+
 // #2347: tools the injected protocols never name leave the per-turn declarations.
 test("memory tools the protocol never names are registered deferred", async () => {
   const deferredTools = [
