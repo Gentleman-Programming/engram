@@ -86,7 +86,7 @@ func TestPiInstallConflictRetainsRecoveryAndLatestSettings(t *testing.T) {
 	}
 	// A changed field is not Pi's recognized source-only replacement, even
 	// when the large integer would round to the same float64 value.
-	latest := `{"packages":[{"source":"npm:gentle-engram@0.7.1","filter":9007199254740993}],"new":true}`
+	latest := `{"packages":[{"source":"` + piGentleEngramPackage + `","filter":9007199254740993}],"new":true}`
 	runCommand = func(string, ...string) ([]byte, error) {
 		return nil, os.WriteFile(path, []byte(latest), 0600)
 	}
@@ -116,7 +116,7 @@ func TestPiInstallRecoveryIOFailure(t *testing.T) {
 				t.Setenv("PI_CODING_AGENT_DIR", dir)
 				path := filepath.Join(dir, "settings.json")
 				const original = `{"packages":["npm:gentle-engram@9.9.9","npm:gentle-engram@0.7.0"],"keep":true}`
-				const latest = `{"packages":["npm:gentle-engram@0.7.1","npm:gentle-engram@0.7.0","./added"],"keep":true,"new":true}`
+				latest := `{"packages":["` + piGentleEngramPackage + `","npm:gentle-engram@0.7.0","./added"],"keep":true,"new":true}`
 				if err := os.WriteFile(path, []byte(original), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -217,7 +217,7 @@ func TestPiInstallManagedFirstAndPrePersistenceFailure(t *testing.T) {
 				if failed {
 					return nil, errors.New("install failed before persistence")
 				}
-				return nil, os.WriteFile(path, []byte(strings.Replace(original, "0.7.0", "0.7.1", 1)), 0600)
+				return nil, os.WriteFile(path, []byte(strings.Replace(original, "0.7.0", "0.8.0", 1)), 0600)
 			}
 			_, err := Install("pi")
 			if (err != nil) != failed {
