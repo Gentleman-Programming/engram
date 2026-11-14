@@ -445,13 +445,17 @@ func readNearestConfigAtOrBelowContext(ctx context.Context, startDir, stopDir st
 }
 
 func readConfigAt(projectDir string) (DetectionResult, bool) {
+	return readConfigAtWithReader(projectDir, os.ReadFile)
+}
+
+func readConfigAtWithReader(projectDir string, readFile func(string) ([]byte, error)) (DetectionResult, bool) {
 	configPath := filepath.Join(projectDir, ".engram", "config.json")
-	data, err := os.ReadFile(configPath)
+	data, err := readFile(configPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return DetectionResult{}, false
 		}
-		return invalidConfigResult(projectDir, fmt.Errorf("read %s: %w", configPath, err)), true
+		return DetectionResult{Source: SourceConfig, Path: projectDir, Error: &configReadError{cause: err}}, true
 	}
 
 	var cfg configFile
@@ -464,6 +468,19 @@ func readConfigAt(projectDir string) (DetectionResult, bool) {
 	}
 	return DetectionResult{Project: projectName, Source: SourceConfig, Path: projectDir, Org: strings.TrimSpace(cfg.Org)}, true
 }
+
+// configReadError distinguishes unreadable configuration from invalid content
+// while retaining the write-lock identity consumed by existing callers.
+type configReadError struct {
+	cause error
+}
+
+func (e *configReadError) Error() string {
+	return "cannot read .engram/config.json: " + e.cause.Error()
+}
+
+func (e *configReadError) Is(target error) bool { return target == ErrInvalidConfig }
+func (e *configReadError) Unwrap() error        { return e.cause }
 
 func invalidConfigResult(path string, err error) DetectionResult {
 	return DetectionResult{
