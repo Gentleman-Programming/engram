@@ -70,11 +70,11 @@ For a separately authorized release:
    Missing versions, transport/HTTP/JSON failures and mismatched required `startupPolicy` or
    declared `sessionOwned` metadata stop core publication. There are no retries, redirects,
    private npm config reads or configurable registry endpoints. Startup-only source contracts
-   remain supported when `sessionOwned` is absent. Current source and installer pin prepare 0.7.1
+   remain supported when `sessionOwned` is absent. Current source and installer pin prepare 0.8.0
    and require owned metadata; public 0.4.2 lacks that contract and is not a compatible substitute.
-   The managed 0.7.0 pin joins the older predecessor cleanup while custom/local/object entries
+   The managed 0.7.1 pin joins the older predecessor cleanup while custom/local/object entries
    and unrelated settings remain intact.
-   Source preparation does not establish public availability of 0.7.1 or change an already
+   Source preparation does not establish public availability of 0.8.0 or change an already
    published core's installer pin.
    This is rejection-only availability evidence, **not** protocol, source-byte identity,
    published-content integrity or permission approval.

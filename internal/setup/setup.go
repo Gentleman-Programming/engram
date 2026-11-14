@@ -97,7 +97,7 @@ const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
 const (
-	piGentleEngramPackage             = "npm:gentle-engram@0.7.1"
+	piGentleEngramPackage             = "npm:gentle-engram@0.8.0"
 	piLegacyGentleEngramPackage       = "npm:gentle-engram@0.1.8"
 	piPreviousGentleEngramPackage     = "npm:gentle-engram@0.1.11"
 	piPriorGentleEngramPackage        = "npm:gentle-engram@0.1.12"

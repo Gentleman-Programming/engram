@@ -21,6 +21,7 @@ const LEGACY_PACKAGE_NAMES = new Set([
   "npm:gentle-engram@0.5.1",
   "npm:gentle-engram@0.6.0",
   "npm:gentle-engram@0.7.0",
+  "npm:gentle-engram@0.7.1",
 ]);
 const HELP = `pi-engram
 
