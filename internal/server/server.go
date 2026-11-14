@@ -924,7 +924,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]any{"result": summary, "results": store.CompactSearchProjection(previews, relations)})
 		return
 	}
-	results, err := s.store.Search(query, opts)
+	results, err := s.store.SearchContext(r.Context(), query, opts)
 	if err != nil {
 		if errors.Is(err, store.ErrFTSQueryTooLarge) {
 			jsonError(w, http.StatusBadRequest, err.Error())
