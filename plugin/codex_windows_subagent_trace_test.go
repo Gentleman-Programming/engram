@@ -34,7 +34,7 @@ func newTracedCodexSubagentCopy(t *testing.T, source []byte, expectCapture bool)
 		}
 		stages := []string{"entry", "stdin-consumed", "finalization", "completed"}
 		if expectCapture {
-			stages = []string{"entry", "stdin-consumed", "project-request", "project-response", "capture-request", "capture-response", "finalization", "completed"}
+			stages = []string{"entry", "stdin-consumed", "json-parse-start", "json-parse-end", "payload-inspection", "port-read", "port-validated", "project-call", "project-function-entry", "uri-encode-start", "uri-encode-end", "project-request", "project-response", "capture-request", "capture-response", "finalization", "completed"}
 		}
 		previous := -1
 		for _, stage := range stages {
@@ -59,6 +59,15 @@ func newTracedCodexSubagentCopy(t *testing.T, source []byte, expectCapture bool)
 		before        bool
 	}{
 		{"$rawInput = [Console]::In.ReadToEnd()", "stdin-consumed", false},
+		{"$payload = $rawInput | ConvertFrom-Json -ErrorAction Stop", "json-parse-start", true},
+		{"$payload = $rawInput | ConvertFrom-Json -ErrorAction Stop", "json-parse-end", false},
+		{"$output = [string]$payload.last_assistant_message", "payload-inspection", true},
+		{"$portText = [Environment]::GetEnvironmentVariable('ENGRAM_PORT')", "port-read", true},
+		{`$engramUrl = "http://127.0.0.1:$port"`, "port-validated", true},
+		{"$project = Resolve-EngramProject", "project-call", true},
+		{"if ([string]::IsNullOrWhiteSpace($Cwd))", "project-function-entry", true},
+		{"$encodedCwd = [System.Uri]::EscapeDataString($Cwd)", "uri-encode-start", true},
+		{"$encodedCwd = [System.Uri]::EscapeDataString($Cwd)", "uri-encode-end", false},
 		{"$resolution = Invoke-RestMethod", "project-request", true},
 		{"$projectProperty =", "project-response", true},
 		{`Invoke-WebRequest -Uri "$engramUrl/observations/passive"`, "capture-request", true},

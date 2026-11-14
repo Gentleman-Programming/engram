@@ -97,3 +97,53 @@ func TestCodexWindowsSubagentTraceOnCancellation(t *testing.T) {
 	}
 	t.Logf("retained partial trace after Fatal:\n%s", output)
 }
+
+// Prove that the added bootstrap phases distinguish a process that read stdin
+// from one blocked between parse markers. The delay affects only this owned copy.
+func TestCodexWindowsSubagentParseTraceOnCancellation(t *testing.T) {
+	const modeKey = "ENGRAM_TEST_SUBAGENT_PARSE_DEADLINE"
+	if os.Getenv(modeKey) == "1" {
+		source, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "subagent-stop.ps1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, adapterPath := newTracedCodexSubagentCopy(t, source, false)
+		instrumented, err := os.ReadFile(adapterPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const marker = "Write-EngramTestSubagentStage 'json-parse-start'"
+		if strings.Count(string(instrumented), marker) != 1 {
+			t.Fatal("negative control requires exactly one parse-start marker")
+		}
+		instrumented = []byte(strings.Replace(string(instrumented), marker, marker+"\n[Threading.Thread]::Sleep(20000)", 1))
+		if err := os.WriteFile(adapterPath, instrumented, 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, code := runCodexWindowsPowerShell(t, adapterPath, `{"last_assistant_message":"owned-control"}`, nil, 5*time.Second)
+		t.Fatalf("deadline helper returned ordinary exit=%d", code)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, self, "-test.run=^TestCodexWindowsSubagentParseTraceOnCancellation$", "-test.v")
+	child.Env = append(os.Environ(), modeKey+"=1")
+	output, err := child.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("negative-control subprocess canceled: %v", ctx.Err())
+	}
+	for _, required := range []string{"run PowerShell adapter canceled: context deadline exceeded", "test-owned SubagentStop phases:", " stdin-consumed elapsed_ms=", " json-parse-start elapsed_ms="} {
+		if err == nil || !strings.Contains(string(output), required) {
+			t.Fatalf("error=%v output=%s, missing %q", err, output, required)
+		}
+	}
+	for _, absent := range []string{" json-parse-end elapsed_ms=", " project-request elapsed_ms=", " capture-request elapsed_ms="} {
+		if strings.Contains(string(output), absent) {
+			t.Fatalf("blocked parse unexpectedly reached %q: %s", absent, output)
+		}
+	}
+	t.Logf("retained parse-boundary evidence after cancellation:\n%s", output)
+}
