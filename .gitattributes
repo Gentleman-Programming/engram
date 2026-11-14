@@ -8,5 +8,7 @@ scripts/deadcode-ratchet.sh text eol=lf
 .deadcode-baseline.txt text eol=lf
 internal/store/testdata/migrate_copy_v3.6.0_catalog.json text eol=lf
 internal/store/testdata/migrate_copy_v3.4.0_catalog.json text eol=lf
+internal/store/testdata/migrate_copy_v3.1.0_catalog.json text eol=lf
+internal/store/testdata/migrate_copy_v3.1.0_generate.go text eol=lf
 internal/store/testdata/migrate_copy_upgraded_catalog.json text eol=lf
 internal/store/testdata/migrate_copy_upgraded_provenance.json text eol=lf
