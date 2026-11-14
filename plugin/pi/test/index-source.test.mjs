@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { stripTypeScriptTypes } from "node:module";
-import { runtimeContractIdentity, runtimeContractID } from "../runtime-contract.js";
+import { runtimeContractIdentity, runtimeContractID, RuntimeContractMismatchError } from "../runtime-contract.js";
 import { fixtureContract } from "./support/runtime-contract-fixture.mjs";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
@@ -1745,8 +1745,8 @@ test("a typed reachability failure still schedules self-heal", async () => {
 // Adapter-level execution of production bodies, not SDK/child-process integration.
 // Only the owned startup acknowledgement is simulated; real recovery does not qualify
 // metadata itself, so it must not recursively await the current qualification flight.
-async function controlledOwnedQualification() {
-  const factory = new Function("runtimeContractIdentity", "runtimeContractID", "contract", stripTypeScriptTypes(`function build() {
+async function controlledOwnedQualification(incompatible = false) {
+  const factory = new Function("runtimeContractIdentity", "runtimeContractID", "RuntimeContractMismatchError", "contract", "incompatible", stripTypeScriptTypes(`function build() {
     let ENGRAM_URL = "http://retired.invalid", ownedToken = "synthetic-old";
     const SESSION_OWNED = true, SERVER_MODE = "session-owned", CONFIGURED_HTTP_TOKEN = "", CONFIGURED_ENGRAM_URL = undefined;
     let localEngramInstanceID = contract.instance_id;
@@ -1780,14 +1780,22 @@ async function controlledOwnedQualification() {
     async function ensureRuntimeQualification(signal, startupDeadline) { ${extractFunctionBody("ensureRuntimeQualification", "{\n  throwIfAborted")} }
     return async () => {
       await ensureRuntimeQualification();
-      refuse = true;
+      if (incompatible) contract.operations = {};
+      else refuse = true;
       let result = "qualified";
       try { await ensureRuntimeQualification(); } catch (error) { result = error.message; }
       return { requests, result, recoveries };
     };
   }`) + "\nreturn build();");
-  return factory(runtimeContractIdentity, runtimeContractID, fixtureContract())();
+  return factory(runtimeContractIdentity, runtimeContractID, RuntimeContractMismatchError, fixtureContract(), incompatible)();
 }
+
+test("controlled owned qualification preserves the production mismatch diagnostic", async () => {
+  const observed = await controlledOwnedQualification(true);
+  assert.match(observed.result, /readable but incompatible contract/);
+  assert.match(observed.result, /missing operations:/);
+  assert.equal(observed.recoveries, 0);
+});
 
 test("controlled owned qualification retries a coherent current transport after refusal", async () => {
   const observed = await controlledOwnedQualification();
