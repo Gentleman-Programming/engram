@@ -48,7 +48,7 @@ func TestHookUsagePreservesMergedCommands(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, want empty", stdout.String())
 	}
-	want := "usage: engram hook claude-pre-tool-use|claude-bind-session|codex-pre-tool-use|codex-user-prompt-submit|resolve-hook-project\n"
+	want := "usage: engram hook claude-pre-tool-use|claude-bind-session|claude-session-context|codex-pre-tool-use|codex-user-prompt-submit|resolve-hook-project\n"
 	if stderr.String() != want {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}
