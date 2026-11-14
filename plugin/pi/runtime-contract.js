@@ -15,11 +15,35 @@ function sameProjection(actual, wanted) {
 
 // Only this bounded, generated shape is accepted. No arbitrary JSON re-encoding,
 // hash recomputation, model-supplied digest, schema inference, or SemVer fallback.
+export class RuntimeContractMismatchError extends Error {
+  constructor(projection) {
+    // Report only names from the bundled Go projection, never response values or
+    // unknown keys. Contract metadata is untrusted and may contain private text.
+    const differences = Object.keys(expected)
+      .filter(key => key !== 'operations' && !sameProjection(projection[key], expected[key]))
+      .map(key => `${key} differs`);
+    const operations = projection.operations;
+    if (operations && typeof operations === 'object' && !Array.isArray(operations)) {
+      const names = Object.keys(expected.operations);
+      const missing = names.filter(name => !Object.hasOwn(operations, name));
+      const changed = names.filter(name => Object.hasOwn(operations, name)
+        && !sameProjection(operations[name], expected.operations[name]));
+      for (const [label, list] of [['missing', missing], ['changed', changed]]) {
+        if (list.length) differences.push(`${label} operations: ${list.slice(0, 4).join(', ')}${list.length > 4 ? ' (more omitted)' : ''}`);
+      }
+      if (Object.keys(operations).some(name => !Object.hasOwn(expected.operations, name))) differences.push('unexpected operations');
+    } else differences.push('operations differs');
+    if (Object.keys(projection).some(key => !Object.hasOwn(expected, key))) differences.push('unexpected contract fields');
+    super(`runtime contract does not match the generated Go projection: readable but incompatible contract (${differences.join('; ')})`);
+    this.name = 'RuntimeContractMismatchError';
+  }
+}
+
 export function runtimeContractIdentity(response) {
   if (!response || typeof response !== 'object' || Array.isArray(response)) throw new Error('malformed runtime contract');
   const { instance_id: instanceID, ...projection } = response;
   if (typeof instanceID !== 'string' || !instanceID.trim() || instanceID.length > 128) throw new Error('missing or malformed server instance identity');
-  if (!sameProjection(projection, expected)) throw new Error('runtime contract does not match the generated Go projection');
+  if (!sameProjection(projection, expected)) throw new RuntimeContractMismatchError(projection);
   return instanceID;
 }
 

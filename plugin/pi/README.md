@@ -366,6 +366,13 @@ To keep per-turn prompts small, tools the Memory Protocol never names (`mem_sear
 
 ## Runtime contract assets
 
+A readable but incompatible contract reports differing expected fields and up to
+four missing or changed expected operation names per category (for example,
+`missing operations: mem_search_prompts`). Server-provided values and unknown names
+are omitted. Malformed JSON and unreadable or invalid responses have separate
+diagnostics. Every mismatch still blocks memory dispatch; this diagnostic does
+not upgrade the server or repair a launcher's bundled core/companion versions.
+
 The package includes `runtime-contract.js` and the adjacent Go-generated
 `runtime-contract.json`. The standalone comparison helper accepts only the complete
 expected projection and returns its dynamic server instance identity; it does not

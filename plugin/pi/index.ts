@@ -16,7 +16,7 @@ import { Type } from "typebox";
 import { ArchiveOutcome, buildRecoveryNotice, extractCompactedSummary } from "./compaction-recovery.js";
 import { compactResultStatus, humanToolName, renderCallText, renderResultText } from "./memory-tool-chrome.js";
 import { redactPrivateTags, redactUrlPath, redactValue } from "./private-redaction.js";
-import { runtimeContractIdentity, runtimeContractID } from "./runtime-contract.js";
+import { runtimeContractIdentity, runtimeContractID, RuntimeContractMismatchError } from "./runtime-contract.js";
 
 function optionalEnvironmentValue(value: string | undefined): string | undefined {
   return value?.trim() ? value : undefined;
@@ -854,11 +854,12 @@ async function ensureRuntimeQualification(signal?: AbortSignal, startupDeadline?
         await Promise.race([probe, stopped]);
       } catch (error) {
         if (error instanceof RuntimeContractError) throw error;
+        if (error instanceof RuntimeContractMismatchError) throw runtimeContractFailure(error.message);
         if (error instanceof EngramUnavailableError || isConnectionRefusedError(error)) {
           throw new EngramUnavailableError("gentle-engram could not reach the Engram HTTP server. Run mem_doctor or restart Engram.");
         }
         // Never echo fetch errors, raw metadata, URL credentials or private bindings.
-        throw runtimeContractFailure(error instanceof SyntaxError ? "malformed JSON contract" : "unreadable or incompatible contract");
+        throw runtimeContractFailure(error instanceof SyntaxError ? "malformed JSON contract" : "unreadable or invalid contract");
       } finally {
         clearTimeout(timer!);
         controller.abort();
