@@ -3662,7 +3662,10 @@ func respondWithProject(res projectpkg.DetectionResult, text string, extra map[s
 // writeProjectErrorResult formats and returns a structured error result when project
 // resolution fails. It handles ambiguous project errors and invalid configs.
 func writeProjectErrorResult(activity *SessionActivity, sessionID string, res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
-	code := "ambiguous_project"
+	code := "project_resolution_failed"
+	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		code = "ambiguous_project"
+	}
 	if errors.Is(err, projectpkg.ErrExplicitProjectRequired) {
 		return errorWithMeta("explicit_project_required", err.Error(), nil)
 	}
