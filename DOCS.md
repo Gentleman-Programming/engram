@@ -1308,6 +1308,12 @@ The Git binding is private to each clone and shared by that clone's linked workt
 
 Use `engram init [project_name] [--force]` to write `.engram/config.json` in the current directory. When `project_name` is omitted, Engram uses the current directory basename. `--force` replaces an existing config; without it, init stops and tells you that the config already exists.
 
+If the resolving process cannot read `.engram/config.json`, the diagnostic starts
+with `cannot read .engram/config.json` and includes the filesystem error. Invalid
+JSON or project names retain `invalid .engram/config.json`. Both failures stop
+config-based resolution; a missing file continues through the existing detection
+fallbacks. A read error alone does not identify a macOS privacy restriction.
+
 This is the explicit resolution path for a non-Git aggregator workspace that contains multiple child repositories. Run `engram init aggregator-name` at the aggregator root so its config resolves the workspace identity before child-repository scanning reports ambiguity.
 
 ### Response envelope
