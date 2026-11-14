@@ -80,8 +80,12 @@ func cmdHook(args []string) {
 		cmdClaudeBindSession()
 		return
 	}
+	if len(args) == 1 && args[0] == "claude-session-context" {
+		cmdClaudeSessionContext()
+		return
+	}
 	if len(args) != 1 || (args[0] != "claude-pre-tool-use" && args[0] != "codex-pre-tool-use") {
-		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|claude-bind-session|codex-pre-tool-use|codex-user-prompt-submit|resolve-hook-project")
+		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|claude-bind-session|claude-session-context|codex-pre-tool-use|codex-user-prompt-submit|resolve-hook-project")
 		exitFunc(1)
 		return
 	}
@@ -184,11 +188,15 @@ func confirmHookSession(id, cwd string, projectOwned bool) (effective string, co
 
 // Keep the platform seam private; production always supplies runtime.GOOS.
 func confirmHookSessionForPlatform(id, cwd string, projectOwned bool, platform string) (effective string, confirmationErr error) {
+	return confirmHookSessionWithin(id, cwd, projectOwned, platform, hookSessionConfirmationBudget())
+}
+
+func confirmHookSessionWithin(id, cwd string, projectOwned bool, platform string, budget time.Duration) (effective string, confirmationErr error) {
 	base, client := hookEndpointClient("")
 	if base == "" {
 		return "", errHookSessionUnconfirmed
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationBudget())
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer func() {
 		// Preserve timeout information even when a transport/JSON helper returns
 		// only a failed confirmation. Other failures keep the existing denial.

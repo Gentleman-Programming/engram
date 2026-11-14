@@ -21,6 +21,10 @@ PROJECT=$(resolve_project "$CWD") || PROJECT=""
 # PreToolUse gate. Registers exactly like session-start.sh.
 PROJECT=$(engram_register_claude_session "$SESSION_ID" "$PROJECT" "$CWD")
 
+# Refresh the effective binding after registration, including resumed roots.
+# This context is independent of slim/full protocol verbosity and history.
+printf '%s' "$INPUT" | ENGRAM_URL="$ENGRAM_EXTERNAL_URL" ENGRAM_PORT="$ENGRAM_PORT" ENGRAM_SOCKET="$ENGRAM_SOCKET" engram hook claude-session-context 2>/dev/null || true
+
 # Fetch context from previous sessions
 CONTEXT=""
 if [ -n "$PROJECT" ]; then
