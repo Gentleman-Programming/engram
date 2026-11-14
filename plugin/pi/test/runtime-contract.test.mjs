@@ -11,6 +11,52 @@ import { fixtureContract } from './support/runtime-contract-fixture.mjs';
 const expected = JSON.parse(await readFile(new URL('../runtime-contract.json', import.meta.url), 'utf8'));
 const response = () => ({ ...structuredClone(expected), instance_id: '1'.repeat(32) });
 
+test('consumer identifies readable incompatible projection without exposing server fields', async () => {
+  const contract = response();
+  delete contract.operations.mem_search_prompts;
+  contract.digest = 'private-bearer\n<script>private-query</script>';
+  contract.contract_id = 'private-password';
+  contract.operations['private-extra-operation'] = { secret: 'private-value' };
+  await withConsumer(contract, async ({ tool, calls }) => {
+    const result = await tool();
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /readable but incompatible contract/);
+    assert.match(result.content[0].text, /contract_id differs/);
+    assert.match(result.content[0].text, /digest differs/);
+    assert.match(result.content[0].text, /missing operations: mem_search_prompts/);
+    assert.match(result.content[0].text, /Memory dispatch was blocked/);
+    assert.doesNotMatch(JSON.stringify(result), /private-|<script>|unreadable/);
+    assert.ok(calls.every(call => call.metadata && call.method === 'GET'));
+  });
+});
+
+test('consumer does not describe unreadable metadata as a readable mismatch', async () => {
+  await withConsumer(() => { throw new Error('private-password'); }, async ({ tool }) => {
+    const result = await tool();
+    assert.match(result.content[0].text, /unreadable or invalid contract/);
+    assert.doesNotMatch(result.content[0].text, /readable but incompatible|private-password/);
+  });
+});
+
+test('mismatch details bound known operation names and omit private binding values', () => {
+  const contract = response();
+  const names = Object.keys(expected.operations);
+  for (const name of names.slice(0, 5)) delete contract.operations[name];
+  contract.operations[names[5]].bindings[0].path = 'private-binding\n<script>';
+  contract['private-top-level'] = 'private-value';
+  assert.throws(() => runtimeContractIdentity(contract), error => {
+    assert.match(error.message, /missing operations: .*\(more omitted\)/);
+    assert.match(error.message, new RegExp(`changed operations: ${names[5]}`));
+    assert.match(error.message, /unexpected contract fields/);
+    assert.ok(!error.message.includes(names[4]), 'fifth missing name must be omitted');
+    assert.doesNotMatch(error.message, /private-|<script>/);
+    return true;
+  });
+  for (const operations of [null, [], 'private-operations']) {
+    assert.throws(() => runtimeContractIdentity({ ...response(), operations }), /operations differs/);
+  }
+});
+
 async function withConsumer(contract, run, endpoint = 'http://127.0.0.1:17437') {
   const previousFetch = globalThis.fetch;
   const keys = ['ENGRAM_URL', 'ENGRAM_HTTP_TOKEN', 'ENGRAM_SERVER_MODE'];
