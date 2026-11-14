@@ -1,0 +1,26 @@
+{
+  "base": "c6ba9e3c0e98ffa0d5591481d8670a575e7b70b0",
+  "historical_tag": "v3.1.0",
+  "historical_commit": "e5c2277f856a5ee8739f297a006cabf6432ba77d",
+  "historical_tag_verified_against": "https://github.com/Gentleman-Programming/engram.git refs/tags/v3.1.0",
+  "source_hash_format": "SHA256 of raw files in unchanged Windows Git worktree; checkout line endings may differ from Git blobs",
+  "store_go_sha256": "1964aec23aac478896e7621acb925ef939025b8cc8d690116767b5bdff271b75",
+  "go_mod_sha256": "7ac194ec9dd670cfd89fd8875d9dc42e630d11032082edeb50b78de25f86a076",
+  "go_sum_sha256": "6f68993d78272ef99644aa58921fefd4bf1e64be990dd2e8beaa6d716b0f3df1",
+  "toolchain": "go1.26.4 windows/amd64",
+  "sqlite_module": "modernc.org/sqlite v1.46.2",
+  "sqlite_runtime": "3.51.3",
+  "original_helper_sha256": "65ae212c11956c8e4ce92bc7aea0065b88b66784dc90c1e480f884fcd10a26e0",
+  "gofmt_generator_sha256": "6e2b70841f42c2fa05823f4e48991a987127328035c082c7d430aa20a9a17c58",
+  "raw_catalog_sha256": "74aa776165ebf3be2de09a0449b9171a45b8524aa05fccad33b11771b621f33f",
+  "normalized_full_catalog_sha256": "a87cdab7fc92a46ba15f45cf985d09afc45e0f93e34fc39bf01bacd63803e811",
+  "objects": {"table": 26, "index": 44, "trigger": 8},
+  "generation": "Detached official-tag worktree with unchanged source and dependency files; standalone helper calls historical Store.New(FallbackConfig) on an exclusively created absolute synthetic directory and precreated empty database. It reads every sqlite_schema object, including autoindexes and FTS shadow tables, records metadata and integrity, closes the store, and serializes name -> Kind/Table/SQL as indented JSON plus newline. No existing store or catalog DDL was edited. The included generator is the original helper after gofmt only. Counts match issue #2369; complete reporter DDL equality remains unproven. This is historical source execution, not an official old binary or a user-data migration.",
+  "reproduction": [
+    "Create a separate worktree at e5c2277f856a5ee8739f297a006cabf6432ba77d; retain its original go.mod and go.sum.",
+    "Copy migrate_copy_v3.1.0_generate.go into that historical worktree as cmd/issue2369probe/main.go. It must run inside that historical module to use historical Store.New.",
+    "With Go 1.26.4 and the original dependency graph: go run -mod=readonly ./cmd/issue2369probe <new-absolute-synthetic-directory> <new-absolute-catalog-json>.",
+    "Require the 78-object (26/44/8) result, user_version 1, integrity ok, and raw SHA256 above. The synthetic directory must not already exist. Never supply a user store.",
+    "The current tests reconstruct every catalog object with SQLite, require exact full-map equality, then pin the normalized full-catalog digest before migration tests."
+  ]
+}
