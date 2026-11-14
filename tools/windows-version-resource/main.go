@@ -192,7 +192,7 @@ func verify(v version, arch, path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only file; read errors are returned below
 	stat, err := f.Stat()
 	if err != nil {
 		return err
@@ -215,7 +215,7 @@ func verify(v version, arch, path string) error {
 	if err != nil {
 		return fmt.Errorf("read PE: %w", err)
 	}
-	defer image.Close()
+	// NewFile wraps a bytes.Reader; there is no underlying file to close.
 	if image.Machine != m || image.Characteristics&pe.IMAGE_FILE_EXECUTABLE_IMAGE == 0 {
 		return fmt.Errorf("wrong machine or not an executable image")
 	}

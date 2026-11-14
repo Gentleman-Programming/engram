@@ -162,7 +162,11 @@ func TestLinkedFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer image.Close()
+	t.Cleanup(func() {
+		if err := image.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	if image.Machine != elf.EM_X86_64 || image.Section(".rsrc") != nil {
 		t.Fatal("Windows resource leaked into Linux build")
 	}
