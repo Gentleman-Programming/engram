@@ -562,7 +562,7 @@ function hasPositiveObservationID(data: unknown, status: "saved" | "committed"):
   return status === "saved" ? (receipt.status === undefined || receipt.status === "saved") : receipt.status === "committed";
 }
 
-function isObservationSaveResultMiss(response: Response, data: unknown): boolean {
+function isObservationSaveResultMiss(response: Pick<Response, "status">, data: unknown): boolean {
   return response.status === 404
     && !!data && typeof data === "object"
     && (data as Record<string, unknown>).code === "observation_save_result_not_found"
@@ -593,7 +593,7 @@ async function postObservationWithReplayRecovery<TResponse>(body: Record<string,
     transportFailure: { operation: "write", outcome: "unknown", timeoutMs: ENGRAM_OBSERVATION_RECOVERY_TIMEOUT_MS, operationID },
   });
 
-  type Attempt = { response?: Response; data?: unknown };
+  type Attempt = { response?: Pick<Response, "ok" | "status">; data?: unknown };
   async function attempt(method: "POST" | "GET"): Promise<Attempt> {
     throwIfAborted(signal);
     const remaining = deadline - performance.now();
@@ -602,6 +602,7 @@ async function postObservationWithReplayRecovery<TResponse>(body: Record<string,
       remaining,
       method === "GET" ? ENGRAM_RECOVERY_LOOKUP_TIMEOUT_MS : ENGRAM_WRITE_TIMEOUT_MS,
     );
+    let receivedFailure: Attempt["response"];
     const controller = new AbortController();
     let rejectStop: (reason: unknown) => void = () => {};
     const stopped = new Promise<never>((_resolve, reject) => { rejectStop = reject; });
@@ -628,18 +629,21 @@ async function postObservationWithReplayRecovery<TResponse>(body: Record<string,
           body: method === "POST" ? serialized : undefined,
           signal: controller.signal,
         });
+        // Failure headers remain definitive even if reading the body times out.
+        // Retain only status metadata; never reread an aborted response stream.
+        if (!response.ok) receivedFailure = { ok: response.ok, status: response.status };
         if (response.status === 204) return { response, data: null };
         try {
           return { response, data: await response.json() };
         } catch (error) {
           if (signal?.aborted) throw error;
-          return { response };
+          return { response, data: null };
         }
       })();
       return await Promise.race([exchange, stopped]);
     } catch (error) {
       if (signal?.aborted) throw error;
-      return {};
+      return receivedFailure ? { response: receivedFailure, data: null } : {};
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onCallerAbort);
