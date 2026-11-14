@@ -201,6 +201,10 @@ plugin/claude-code/
 
 **Auto mode:** necessary session-binding rewrites can differ from the input Claude Code's server reviewed and be denied. The [documented exact-retry path](https://code.claude.com/docs/en/hooks#pretooluse-updatedinput-in-auto-mode) drops subsequent hook rewrites, so an earlier binding must not be assumed current after the authoritative session changes. Engram never automatically retries or grants permission from its Claude hook.
 
+Startup/resume and compaction hooks now provide a **Confirmed Engram session ID (JSON)** in both slim and full context when confirmation succeeds. The model should send that exact decoded value in `session_id`, or `id` for `mem_session_start` and `mem_session_end`; `mem_review` takes neither field. The Go helper confirms the effective identity, including a live continuation of an ended host root, using the same ownership rules as PreToolUse. Optional context confirmation has a fixed 500 ms shared HTTP budget and omits the hint on failure; it runs before optional history retrieval. This bounds the added confirmation work, not the total duration of the existing lifecycle hook. The project result and memory context remain independent.
+
+PreToolUse still confirms every mutation. A stale or missing hint can require a rewrite or denial, and the model may omit the supplied ID. This mitigation does not guarantee every interactive auto-mode call will pass and grants no permissions.
+
 To explicitly authorize the bounded memory tools during setup, including unattended installs:
 
 ```sh

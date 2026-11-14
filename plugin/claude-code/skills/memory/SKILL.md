@@ -99,6 +99,14 @@ Claude Code's authoritative session identity before the tool runs. Do not invent
 reuse, or try to override this value. Read-only tools are unchanged. Generic or direct
 MCP clients still require their existing explicit-session contract.
 
+Startup/resume and compaction context may include a **Confirmed Engram session ID
+(JSON)**. Use that exact decoded string as `session_id` for tools that accept it,
+or `id` for `mem_session_start` and `mem_session_end`. Do not add a session field
+to `mem_review`. If no confirmed ID was provided, do not guess one. The guard
+still confirms every mutation and corrects or denies a stale binding. This hint
+does not grant permission or authorize retries; necessary rewrites can still be
+denied in auto mode.
+
 **Fallback**: If tools are unexpectedly unavailable, run `engram setup claude-code`
 again and restart Claude Code. Setup repairs a regular durable MCP config and
 the permissions allowlist for both current (`mcp__engram__...`) and older
