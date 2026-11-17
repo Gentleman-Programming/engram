@@ -365,7 +365,7 @@ For parameters and the complete, current tool reference, see [the full documenta
 | Where to go | What you'll find |
 | :--- | :--- |
 | **[Intended Usage](docs/intended-usage.md)** | The human mental model for using Engram |
-| **[Installation](docs/INSTALLATION.md)** · **[Release Policy](docs/RELEASE-POLICY.md)** | Platform support, all installation methods, and stable, RC, security-support, upgrade, and rollback guidance |
+| **[Installation](docs/INSTALLATION.md)** · **[Release Policy](docs/RELEASE-POLICY.md)** · **[SignPath TEST pilot](docs/signpath-test.md)** | Platform support, release guidance, and the nonpublishing test-signing pilot |
 | **[Agent Setup](docs/AGENT-SETUP.md)** · **[Plugins](docs/PLUGINS.md)** | Per-agent configuration, compaction resilience, and OpenCode and Claude Code plugin details |
 | **[Architecture](docs/ARCHITECTURE.md)** · **[Codebase Guide](docs/CODEBASE-GUIDE.md)** | Memory model, tool behavior, project structure, flows, and implementation landmarks |
 | **[Engram Cloud](docs/engram-cloud/README.md)** · **[Team Usage](docs/TEAM-USAGE.md)** | Cloud quickstart, deployment, technical links, and shared-memory conventions |
