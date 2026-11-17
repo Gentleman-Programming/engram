@@ -197,18 +197,23 @@ func TestSignPathPreservesReleaseStaging(t *testing.T) {
 
 func TestSignPathVerifierIsFailClosed(t *testing.T) {
 	v := signPathRead(t, "scripts/verify-signpath-test.ps1")
-	for _, want := range []string{"Get-AuthenticodeSignature", "SignerCertificate", "SHA256", "RawData", "CurrentUser", "Root", "Valid", "finally", "0x8664", "0xAA64", "ReparsePoint", "SignatureType", "HashMismatch"} {
+	for _, want := range []string{"Get-AuthenticodeSignature", "SignerCertificate", "SHA256", "RawData", "NotTrusted", "CustomRootTrust", "CustomTrustStore", "NoCheck", "finally", "0x8664", "0xAA64", "ReparsePoint", "SignatureType", "HashMismatch", "SIGNPATH-STAGE"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("verifier missing %q", want)
 		}
 	}
-	if strings.Contains(v, "LocalMachine") {
-		t.Error("machine trust changed")
+	for _, banned := range []string{"LocalMachine", "X509Store", "certutil", "Cert:\\", ".Remove("} {
+		if strings.Contains(v, banned) {
+			t.Errorf("verifier must not use %q", banned)
+		}
 	}
 	fixture := signPathRead(t, "scripts/verify-signpath-test.tests.ps1")
-	for _, want := range []string{"tampered", "wrong signer", "unsigned", "missing", "extra", "architecture", "intact", "preexisting anchor", "NonExportable", "stdout", "stderr", "LASTEXITCODE"} {
+	for _, want := range []string{"tampered", "wrong signer", "unsigned", "missing", "extra", "architecture", "intact", "NonExportable", "WaitForExit", "Kill($true)", "timed out", "SIGNPATH-STAGE", "Verifier leaked trust anchor"} {
 		if !strings.Contains(fixture, want) {
 			t.Errorf("fixture missing %q", want)
 		}
+	}
+	if strings.Contains(fixture, "$store.Add(") || strings.Contains(fixture, "preexisting anchor") {
+		t.Error("fixtures must not add trust anchors")
 	}
 }
