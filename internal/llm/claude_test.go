@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -153,5 +154,42 @@ func TestClaudeRunner_MissingBinary(t *testing.T) {
 	_, err := r.Compare(context.Background(), "compare")
 	if !errors.Is(err, ErrCLINotInstalled) {
 		t.Errorf("expected ErrCLINotInstalled; got %v", err)
+	}
+}
+
+// TestGenerate_ReturnsRawText verifies both runners return the model's raw
+// reply (fences stripped for Claude), run Claude without tools, reject Claude
+// error envelopes, and concatenate OpenCode text parts.
+func TestGenerate_ReturnsRawText(t *testing.T) {
+	var gotArgs []string
+	claude := &ClaudeRunner{generateCLI: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"type":"result","subtype":"success","result":"` + "```json\\n{\\\"merge\\\":false}\\n```" + `"}`), nil
+	}}
+	if got, err := claude.Generate(context.Background(), "p"); err != nil || got != `{"merge":false}` {
+		t.Errorf("claude Generate = %q, %v", got, err)
+	}
+	if joined := strings.Join(gotArgs, "|"); !strings.Contains(joined, "--tools||--strict-mcp-config") {
+		t.Errorf("claude Generate must disable tools; args = %q", gotArgs)
+	}
+
+	for _, env := range []string{
+		`{"type":"result","subtype":"error_max_turns","is_error":true,"result":"{\"merge\":true}"}`,
+		`{"type":"result","subtype":"error_during_execution","result":"{\"merge\":true}"}`,
+	} {
+		r := &ClaudeRunner{generateCLI: fakeCLI([]byte(env), nil)}
+		if got, err := r.Generate(context.Background(), "p"); err == nil {
+			t.Errorf("error envelope %s returned %q without error", env, got)
+		}
+	}
+
+	ndjson := "{\"type\":\"text\",\"part\":{\"text\":\"{\\\"merge\\\":\"}}\nnot json\n{\"type\":\"text\",\"part\":{\"text\":\"true}\"}}\n"
+	opencode := &OpenCodeRunner{generateCLI: fakeCLI([]byte(ndjson), nil)}
+	if got, err := opencode.Generate(context.Background(), "p"); err != nil || got != `{"merge":true}` {
+		t.Errorf("opencode Generate = %q, %v", got, err)
+	}
+	tooLong := []byte(strings.Repeat("x", 5*1024*1024))
+	if _, err := (&OpenCodeRunner{generateCLI: fakeCLI(tooLong, nil)}).Generate(context.Background(), "p"); err == nil || !strings.Contains(err.Error(), "read NDJSON stream") {
+		t.Errorf("opencode Generate must surface scanner errors; got %v", err)
 	}
 }

@@ -867,6 +867,8 @@ func main() {
 		cmdTimeline(cfg)
 	case "conflicts":
 		cmdConflicts(cfg)
+	case "dream":
+		cmdDream(cfg)
 	case "doctor":
 		cmdDoctor(cfg)
 	case "context":
@@ -4059,6 +4061,11 @@ Commands:
                                 [--dry-run]  [--apply]  [--max-insert N]  [--semantic]  [--concurrency N]  [--timeout-per-call SECONDS]
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
+  dream [--project P] [--focus TEXT] [--apply] [--max-clusters N] [--json]
+                     Consolidate groups of related observations via ENGRAM_AGENT_CLI
+                       (dry run by default; --apply merges each previewed group)
+                       --focus         Consider every observation matching TEXT (no relation needed)
+                       --max-clusters  Max distillation calls (default 10)
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
                        repair --project P --check CODE (--plan|--dry-run|--apply)
                        repair mutates state: only --apply writes.
@@ -4149,7 +4156,7 @@ Environment:
                      too, leaving time for process startup and verdict output.
                      Does not change Codex prompt capture or bypass session confirmation.
                      Mitigates slow confirmation; does not fix autosync latency.
-  ENGRAM_AGENT_CLI   LLM runner for conflicts scan --semantic (claude or opencode)
+  ENGRAM_AGENT_CLI   LLM runner for conflicts scan --semantic and dream (claude or opencode)
   ENGRAM_CLOUD_AUTOSYNC
                      Set to 1 to enable background autosync; also requires
                      ENGRAM_CLOUD_TOKEN and ENGRAM_CLOUD_SERVER

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -21,12 +22,14 @@ type ClaudeRunner struct {
 	// runCLI is the shell-out function. Defaults to defaultRunCLI.
 	// Tests inject a fake implementation to avoid spawning real processes.
 	runCLI func(ctx context.Context, name string, args []string, stdin string) ([]byte, error)
+	// generateCLI runs Generate calls. Nil uses neutralDirRunCLI; tests inject a fake.
+	generateCLI func(ctx context.Context, name string, args []string, stdin string) ([]byte, error)
 }
 
 // NewClaudeRunner constructs a ClaudeRunner with the real exec.CommandContext
 // implementation. Tests should inject a fake via the struct field directly.
 func NewClaudeRunner() *ClaudeRunner {
-	return &ClaudeRunner{runCLI: defaultRunCLI}
+	return &ClaudeRunner{runCLI: defaultRunCLI, generateCLI: neutralDirRunCLI}
 }
 
 // Compare sends prompt to the Claude CLI and returns a structured Verdict.
@@ -56,6 +59,35 @@ func (r *ClaudeRunner) Compare(ctx context.Context, prompt string) (Verdict, err
 	return parseClaudeEnvelope(raw)
 }
 
+// Generate sends prompt to the Claude CLI and returns the model's raw reply
+// (the envelope's result, fences stripped) without verdict parsing. Used by
+// `engram dream` to draft consolidated observations. The prompt embeds
+// third-party memory content, so the CLI runs with no built-in tools
+// (--tools ""), no MCP servers (--strict-mcp-config) and a throwaway cwd.
+func (r *ClaudeRunner) Generate(ctx context.Context, prompt string) (string, error) {
+	args := []string{"-p", "--output-format", "json", "--model", "haiku", "--max-turns", "1", "--tools", "", "--strict-mcp-config"}
+	run := r.generateCLI
+	if run == nil {
+		run = neutralDirRunCLI
+	}
+	raw, err := run(ctx, "claude", args, prompt)
+	if err != nil {
+		return "", err
+	}
+	var env claudeEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", fmt.Errorf("%w: outer envelope: %v", ErrInvalidJSON, err)
+	}
+	if env.IsError || (env.Subtype != "" && env.Subtype != "success") {
+		return "", fmt.Errorf("claude CLI reported an error (subtype %q): %.200s", env.Subtype, env.Result)
+	}
+	inner := strings.TrimSpace(env.Result)
+	if m := fenceRE.FindStringSubmatch(inner); len(m) == 2 {
+		inner = strings.TrimSpace(m[1])
+	}
+	return inner, nil
+}
+
 // ─── Compile-time interface satisfaction ──────────────────────────────────────
 
 var _ AgentRunner = (*ClaudeRunner)(nil)
@@ -67,6 +99,8 @@ type claudeEnvelope struct {
 	Type       string                     `json:"type"`
 	Result     string                     `json:"result"`
 	DurationMS int64                      `json:"duration_ms"`
+	IsError    bool                       `json:"is_error"`
+	Subtype    string                     `json:"subtype"`
 	ModelUsage map[string]json.RawMessage `json:"modelUsage"`
 }
 
@@ -139,7 +173,24 @@ func parseClaudeEnvelope(raw []byte) (Verdict, error) {
 // standard input, and returns the combined stdout+stderr output.
 // It translates exec.ErrNotFound into ErrCLINotInstalled.
 func defaultRunCLI(ctx context.Context, name string, args []string, stdin string) ([]byte, error) {
+	return runCLIIn(ctx, "", name, args, stdin)
+}
+
+// neutralDirRunCLI runs the CLI from a fresh empty temp directory so it never
+// picks up the caller's project files or project-level settings.
+func neutralDirRunCLI(ctx context.Context, name string, args []string, stdin string) ([]byte, error) {
+	dir, err := os.MkdirTemp("", "engram-llm-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	return runCLIIn(ctx, dir, name, args, stdin)
+}
+
+// runCLIIn is defaultRunCLI with an explicit working directory ("" inherits).
+func runCLIIn(ctx context.Context, dir, name string, args []string, stdin string) ([]byte, error) {
 	cmd := command.NewContext(ctx, name, args...)
+	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.Output()
 	if err != nil {
