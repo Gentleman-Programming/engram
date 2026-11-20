@@ -49,6 +49,18 @@ func (a llmRunnerAdapter) Compare(ctx context.Context, prompt string) (store.Sem
 	}, nil
 }
 
+// Generate forwards free-form generation (used by `engram dream`) when the
+// wrapped runner supports it; both shipped runners do.
+func (a llmRunnerAdapter) Generate(ctx context.Context, prompt string) (string, error) {
+	g, ok := a.inner.(interface {
+		Generate(context.Context, string) (string, error)
+	})
+	if !ok {
+		return "", errors.New("agent runner does not support free-form generation")
+	}
+	return g.Generate(ctx, prompt)
+}
+
 // ─── llmBuildPrompt ───────────────────────────────────────────────────────────
 
 // llmBuildPrompt adapts store.ObservationSnippet to llm.ObservationSnippet and

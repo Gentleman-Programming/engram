@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -18,12 +19,14 @@ type OpenCodeRunner struct {
 	// runCLI is the shell-out function. Defaults to defaultRunCLI.
 	// Tests inject a fake implementation to avoid spawning real processes.
 	runCLI func(ctx context.Context, name string, args []string, stdin string) ([]byte, error)
+	// generateCLI runs Generate calls. Nil uses neutralDirRunCLI; tests inject a fake.
+	generateCLI func(ctx context.Context, name string, args []string, stdin string) ([]byte, error)
 }
 
 // NewOpenCodeRunner constructs an OpenCodeRunner with the real exec.CommandContext
 // implementation. Tests should inject a fake via the struct field directly.
 func NewOpenCodeRunner() *OpenCodeRunner {
-	return &OpenCodeRunner{runCLI: defaultRunCLI}
+	return &OpenCodeRunner{runCLI: defaultRunCLI, generateCLI: neutralDirRunCLI}
 }
 
 // Compare sends prompt to the OpenCode CLI and returns a structured Verdict.
@@ -41,6 +44,37 @@ func (r *OpenCodeRunner) Compare(ctx context.Context, prompt string) (Verdict, e
 	}
 
 	return parseOpenCodeNDJSON(raw)
+}
+
+// Generate sends prompt to the OpenCode CLI and returns the concatenated text
+// parts without verdict parsing. Used by `engram dream`. It runs from a
+// throwaway cwd; `opencode run` has no flag to disable tools, so tool access
+// follows the user's opencode permission config.
+func (r *OpenCodeRunner) Generate(ctx context.Context, prompt string) (string, error) {
+	run := r.generateCLI
+	if run == nil {
+		run = neutralDirRunCLI
+	}
+	raw, err := run(ctx, "opencode", []string{"run", "--format", "json", "--pure"}, prompt)
+	if err != nil {
+		return "", err
+	}
+	var text strings.Builder
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var ev openCodeEvent
+		if json.Unmarshal(bytes.TrimSpace(scanner.Bytes()), &ev) == nil && ev.Type == "text" && ev.Part != nil {
+			text.WriteString(ev.Part.Text)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("opencode: read NDJSON stream: %w", err)
+	}
+	if text.Len() == 0 {
+		return "", fmt.Errorf("opencode: no text event found in NDJSON stream")
+	}
+	return text.String(), nil
 }
 
 // ─── Compile-time interface satisfaction ──────────────────────────────────────
