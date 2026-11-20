@@ -86,3 +86,22 @@ func TestPublishPreservesWinnerAndErrors(t *testing.T) {
 		t.Fatalf("missing source = %v", err)
 	}
 }
+
+// Publication leaves the winner complete and the caller's cleanup of the
+// temporary path safe whether the platform consumed it (rename) or kept it (link).
+func TestPublishSuccessAllowsCallerCleanup(t *testing.T) {
+	dir := t.TempDir()
+	source, destination := filepath.Join(dir, "temporary"), filepath.Join(dir, "identity")
+	if err := os.WriteFile(source, []byte("complete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Publish(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(source); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if data, err := os.ReadFile(destination); err != nil || string(data) != "complete" {
+		t.Fatalf("destination = %q, %v", data, err)
+	}
+}
