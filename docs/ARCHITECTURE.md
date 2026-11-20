@@ -218,7 +218,7 @@ engram/
 │   ├── sync/sync.go                # Git sync: manifest + compressed chunks
 │   └── tui/                        # Bubbletea terminal UI
 │       ├── model.go                # Screen constants, Model, Init()
-│       ├── styles.go               # Lipgloss styles (Catppuccin Mocha)
+│       ├── styles.go               # Lipgloss styles with the Engram Elephant palette
 │       ├── update.go               # Input handling, per-screen handlers
 │       └── view.go                 # Rendering, per-screen views
 ├── plugin/
