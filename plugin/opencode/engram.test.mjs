@@ -639,7 +639,8 @@ for (const adapterPath of ["./engram.ts", "../../internal/setup/plugins/opencode
       args: ["custom-engram", "instance-id"],
       options: { encoding: "utf8", windowsHide: true },
     }])
-    assert.deepEqual(runtime.spawns.map(({ args, options }) => ({ args, options })), [
+    assert.equal(runtime.spawns[0].options.env.ENGRAM_NO_UPDATE_CHECK, "1")
+    assert.deepEqual(runtime.spawns.map(({ args, options: { env, ...options } }) => ({ args, options })), [
       { args: ["custom-engram", "run", "-d"], options: { stdio: ["ignore", "ignore", "pipe"], windowsHide: true } },
       { args: ["custom-engram", "sync", "--import"], options: { cwd: "C:\\work\\engram", detached: true, stdio: "ignore", windowsHide: true } },
     ])
@@ -779,6 +780,7 @@ test("an older core's unknown run command permits legacy detached serve", async 
     daemonStderr: "unknown command: run\r\n\r\nUsage: engram",
   })
   assert.deepEqual(runtime.spawns.map(({ args }) => args.slice(1)), [["run", "-d"], ["serve"]])
+  assert.equal(runtime.spawns[0].options.env.ENGRAM_NO_UPDATE_CHECK, "1")
   assert.deepEqual(runtime.spawns[1].options, { detached: true, stdio: "ignore", windowsHide: true })
 })
 

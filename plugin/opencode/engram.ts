@@ -299,6 +299,8 @@ function startManagedDaemon(): Promise<"started" | "unsupported" | "failed"> {
     // The CLI owns readiness, concurrent-start admission, and failed-start
     // cleanup. Wait for it to finish instead of launching another child.
     const launcher = spawn(ENGRAM_BIN, ["run", "-d"], {
+      // Older cores can print an update diagnostic before rejecting run.
+      env: { ...process.env, ENGRAM_NO_UPDATE_CHECK: "1" },
       stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true,
     })
