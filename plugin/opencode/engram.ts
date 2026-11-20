@@ -294,6 +294,27 @@ return { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, l
   get localReady() { return localReady }, set localReady(value: boolean) { localReady = value } }
 }
 
+function startManagedDaemon(): Promise<"started" | "unsupported" | "failed"> {
+  return new Promise((resolve) => {
+    // The CLI owns readiness, concurrent-start admission, and failed-start
+    // cleanup. Wait for it to finish instead of launching another child.
+    const launcher = spawn(ENGRAM_BIN, ["run", "-d"], {
+      stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: true,
+    })
+    let stderrPrefix = ""
+    launcher.stderr?.on("data", (chunk) => {
+      stderrPrefix += String(chunk).slice(0, 256 - stderrPrefix.length)
+    })
+    launcher.once("error", () => resolve("failed"))
+    launcher.once("close", (code) => {
+      if (code === 0) resolve("started")
+      else if (code === 1 && /^unknown command: run\r?\n/.test(stderrPrefix)) resolve("unsupported")
+      else resolve("failed")
+    })
+  })
+}
+
 function truncate(str: string, max: number): string {
   if (!str) return ""
   return str.length > max ? str.slice(0, max) + "..." : str
@@ -762,16 +783,22 @@ export const Engram: Plugin = async (ctx) => {
 		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
 		client.localReady = await isEngramRunning(expectedID)
 		if (!client.localReady && !CONFIGURED_ENGRAM_URL) {
-      const serverChild = spawn(ENGRAM_BIN, ["serve"], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      })
-      serverChild.on("error", () => warn("startup"))
-      serverChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("startup") })
-      serverChild.unref()
-			await new Promise((r) => setTimeout(r, 500))
+      const startup = await startManagedDaemon()
 			client.localReady = await isEngramRunning(expectedID)
+      if (!client.localReady && startup === "unsupported") {
+        const serverChild = spawn(ENGRAM_BIN, ["serve"], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        })
+        serverChild.on("error", () => warn("startup"))
+        serverChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("startup") })
+        serverChild.unref()
+        await new Promise((r) => setTimeout(r, 500))
+        client.localReady = await isEngramRunning(expectedID)
+      } else if (!client.localReady && startup === "failed") {
+        warn("startup")
+      }
 		}
     if (!client.localReady) warn("readiness")
 	} catch { warn("startup") }
