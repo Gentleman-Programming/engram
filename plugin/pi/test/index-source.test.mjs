@@ -168,7 +168,7 @@ function buildEngramFetchForTest({
     function isTimeoutError(error) {
       ${extractFunctionBody("isTimeoutError", "{\n  return error instanceof Error")}
     }
-    ${["ENGRAM_WRITE_TIMEOUT_MS", "ENGRAM_READ_TIMEOUT_MS", "ENGRAM_DOCTOR_TIMEOUT_MS", "ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS", "ENGRAM_READ_MAX_ATTEMPTS", "ENGRAM_SESSION_REGISTRATION_MAX_ATTEMPTS"].map((name) => {
+    ${["ENGRAM_WRITE_TIMEOUT_MS", "ENGRAM_READ_TIMEOUT_MS", "ENGRAM_DOCTOR_TIMEOUT_MS", "ENGRAM_FULL_DOCTOR_TIMEOUT_MS", "ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS", "ENGRAM_READ_MAX_ATTEMPTS", "ENGRAM_SESSION_REGISTRATION_MAX_ATTEMPTS"].map((name) => {
       const declaration = source.match(new RegExp(`^const ${name} = \\d+;`, "m"));
       assert.ok(declaration, `${name} production policy missing`);
       return declaration[0];
@@ -179,9 +179,6 @@ function buildEngramFetchForTest({
     }
     function isIdempotentSessionRegistration(path, method) {
       ${extractFunctionBody("isIdempotentSessionRegistration", "{\n  // Core uses")}
-    }
-    function isSafeToReplay(path, method) {
-      ${extractFunctionBody("isSafeToReplay", "{\n  return")}
     }
     function engramFetchPolicy(path, method) {
       ${extractFunctionBody("engramFetchPolicy", "{\n  if (isIdempotentSessionRegistration")}
@@ -1836,6 +1833,71 @@ test("transport policies bound read, doctor and registration retries independent
   assert.match(source, /return \{ operation: "write", timeoutMs: ENGRAM_WRITE_TIMEOUT_MS, maxAttempts: 1, replaySafe: false \};/);
 });
 
+test("full doctor returns a report that takes longer than the filtered deadline", async () => {
+  const originalFetch = globalThis.fetch;
+  const deadlines = [];
+  const waits = [];
+  const report = { status: "blocked", checks: [{ key: "storage", status: "error" }] };
+  globalThis.fetch = async (_url, init) => {
+    deadlines.push(init.signal);
+    return { status: 200, ok: true, async json() {
+      if (init.signal <= 33000) throw new DOMException("deadline", "TimeoutError");
+      return report;
+    } };
+  };
+
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest({
+      wait: async (ms) => { waits.push(ms); },
+      abortSignal: { timeout: (ms) => ms },
+    });
+    assert.deepEqual(await engramFetchResult("/doctor?project=fixture"), { data: report });
+    assert.deepEqual(deadlines, [45000]);
+    assert.deepEqual(waits, []);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("full doctor stops after one bounded GET when the server stalls", async () => {
+  const originalFetch = globalThis.fetch;
+  const deadlines = [];
+  const waits = [];
+  globalThis.fetch = async (_url, init) => {
+    deadlines.push(init.signal);
+    throw new DOMException("deadline", "TimeoutError");
+  };
+
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest({
+      wait: async (ms) => { waits.push(ms); },
+      abortSignal: { timeout: (ms) => ms },
+    });
+    assert.deepEqual(await engramFetchResult("/doctor?project=fixture&check=%20"), {
+      data: null, transportFailure: { operation: "doctor", outcome: "timed_out", timeoutMs: 45000 },
+    });
+    assert.deepEqual(deadlines, [45000]);
+    assert.deepEqual(waits, []);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("full doctor does not redispatch after connection refusal and recovery", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  let recoveries = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls === 1) throw new Error("connection refused");
+    return Response.json({ status: "ok" });
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest({
+      recover: async () => { recoveries++; return true; },
+    });
+    await assert.rejects(() => engramFetchResult("/doctor"), /could not reach the Engram HTTP server/);
+    assert.equal(calls, 1);
+    assert.equal(recoveries, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("doctor body timeout retries within policy and preserves a successful second response", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
@@ -1849,7 +1911,7 @@ test("doctor body timeout retries within policy and preserves a successful secon
   };
   try {
     const { engramFetchResult } = buildEngramFetchForTest({ wait: async (ms) => waits.push(ms) });
-    assert.deepEqual(await engramFetchResult("/doctor/read"), { data: { status: "healthy" } });
+    assert.deepEqual(await engramFetchResult("/doctor?project=fixture&check=storage"), { data: { status: "healthy" } });
     assert.equal(calls, 2);
     assert.deepEqual(waits, [150]);
   } finally { globalThis.fetch = originalFetch; }
@@ -1886,7 +1948,7 @@ test("read body timeout exhausts exactly three attempts; registration body timeo
   };
   try {
     const { engramFetchResult } = buildEngramFetchForTest({ wait: async () => {} });
-    assert.deepEqual(await engramFetchResult("/doctor/read"), { data: null, transportFailure: { operation: "doctor", outcome: "timed_out", timeoutMs: 15000 } });
+    assert.deepEqual(await engramFetchResult("/doctor?project=fixture&check=storage"), { data: null, transportFailure: { operation: "doctor", outcome: "timed_out", timeoutMs: 15000 } });
     assert.equal(calls, 3);
     assert.deepEqual(await engramFetchResult("/sessions", { method: "POST" }), { data: null, transportFailure: { operation: "session-registration", outcome: "unknown", timeoutMs: 5000 } });
     assert.equal(calls, 5);
@@ -1904,7 +1966,7 @@ test("non-success response retains known HTTP status when its body times out", a
   };
   try {
     const { engramFetchResult } = buildEngramFetchForTest();
-    await assert.rejects(() => engramFetchResult("/doctor/read"), (error) => error.name === "EngramHttpError" && error.status === 503);
+    await assert.rejects(() => engramFetchResult("/doctor?project=fixture&check=storage"), (error) => error.name === "EngramHttpError" && error.status === 503);
     await assert.rejects(() => engramFetchResult("/observations", { method: "POST" }), (error) => error.name === "EngramHttpError" && error.status === 503);
     assert.equal(calls, 2, "known HTTP errors must not be retried or called unknown");
   } finally { globalThis.fetch = originalFetch; }
@@ -1979,7 +2041,7 @@ test("safe reads and doctor retry timeouts, while socket failures leave writes u
   };
   try {
     const { engramFetchResult } = buildEngramFetchForTest();
-    for (const [path, operation] of [["/observations", "read"], ["/doctor", "doctor"]]) {
+    for (const [path, operation] of [["/observations", "read"], ["/doctor?project=fixture&check=storage", "doctor"]]) {
       calls = 0;
       assert.deepEqual(await engramFetchResult(path), { data: null, transportFailure: { operation, outcome: "timed_out", timeoutMs: operation === "doctor" ? 15000 : 10000 } });
       assert.equal(calls, 3);

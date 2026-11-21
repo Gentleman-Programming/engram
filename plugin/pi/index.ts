@@ -72,6 +72,7 @@ const ENGRAM_READ_TIMEOUT_MS = 10000;
 const ENGRAM_OBSERVATION_RECOVERY_TIMEOUT_MS = 7500;
 const ENGRAM_RECOVERY_LOOKUP_TIMEOUT_MS = 1000;
 const ENGRAM_DOCTOR_TIMEOUT_MS = 15000;
+const ENGRAM_FULL_DOCTOR_TIMEOUT_MS = 45000;
 const ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS = 5000;
 const ENGRAM_READ_MAX_ATTEMPTS = 3;
 const ENGRAM_SESSION_REGISTRATION_MAX_ATTEMPTS = 2;
@@ -266,15 +267,15 @@ function isIdempotentSessionRegistration(path: string, method: string): boolean 
   return method === "POST" && path === "/sessions";
 }
 
-function isSafeToReplay(path: string, method: string): boolean {
-  return method === "GET" || isIdempotentSessionRegistration(path, method);
-}
-
 function engramFetchPolicy(path: string, method: string): EngramFetchPolicy {
   if (isIdempotentSessionRegistration(path, method)) {
     return { operation: "session-registration", timeoutMs: ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS, maxAttempts: ENGRAM_SESSION_REGISTRATION_MAX_ATTEMPTS, replaySafe: true };
   }
   if (method === "GET" && path.startsWith("/doctor")) {
+    const [route, query] = path.split("?", 2);
+    if (route === "/doctor" && !new URLSearchParams(query).get("check")?.trim()) {
+      return { operation: "doctor", timeoutMs: ENGRAM_FULL_DOCTOR_TIMEOUT_MS, maxAttempts: 1, replaySafe: false };
+    }
     return { operation: "doctor", timeoutMs: ENGRAM_DOCTOR_TIMEOUT_MS, maxAttempts: ENGRAM_READ_MAX_ATTEMPTS, replaySafe: true };
   }
   if (method === "GET") {
@@ -533,7 +534,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
     return { data: null, transportFailure: { operation: policy.operation, outcome: "unknown", timeoutMs: policy.timeoutMs } };
   }
   if (timedOut) return { data: null, transportFailure: { operation: policy.operation, outcome: "timed_out", timeoutMs: policy.timeoutMs } };
-  if (refused && (!opts.beforeDispatch || allowGuardedRecovery) && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
+  if (refused && (!opts.beforeDispatch || allowGuardedRecovery) && await recoverImplicitEngramServer() && policy.replaySafe) {
     return engramFetchResult<TResponse>(path, opts, false);
   }
   throw new EngramUnavailableError();
