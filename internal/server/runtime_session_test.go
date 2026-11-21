@@ -6,10 +6,118 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
+
+func TestRuntimeSessionEndRequiresExpectedEffectiveIDWhenProvided(t *testing.T) {
+	db := newServerTestStore(t)
+	srv := New(db, 0)
+	writes := 0
+	srv.SetOnWrite(func() { writes++ })
+	handler := srv.Handler()
+	directory := t.TempDir()
+	const root = "claude-host"
+	const project = "project"
+	const mode = store.SessionOwnershipProjectOwned
+	if err := db.EnrollProject(project); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateSessionWithOwnershipMode(root, project, directory, mode); err != nil {
+		t.Fatal(err)
+	}
+
+	call := func(route, owner, expected string, status int) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{
+			"id": root, "project": owner, "directory": directory,
+			"ownership_mode": mode, "summary": "confirmed end",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = append(body[:len(body)-1], expected...)
+		body = append(body, '}')
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, route, bytes.NewReader(body)))
+		if w.Code != status {
+			t.Fatalf("%s with %s = %d: %s, want %d", route, expected, w.Code, w.Body, status)
+		}
+		return w
+	}
+	session := func(id string) *store.Session {
+		t.Helper()
+		got, err := db.GetSession(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	pending := func() []store.SyncMutation {
+		t.Helper()
+		rows, err := db.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	end := "/runtime-sessions/end"
+	expectedRoot := `,"expected_effective_id":"claude-host"`
+	beforeRoot, beforePending := session(root), pending()
+	for _, invalid := range []string{
+		`,"expected_effective_id":null`, `,"expected_effective_id":false`,
+		`,"expected_effective_id":""`, `,"expected_effective_id":" \t"`,
+		expectedRoot + expectedRoot, expectedRoot + `,"EXPECTED_EFFECTIVE_ID":"other"`,
+	} {
+		call(end, project, invalid, http.StatusBadRequest)
+	}
+	call("/runtime-sessions/resolve", project, expectedRoot, http.StatusBadRequest)
+	call(end, "foreign", expectedRoot, http.StatusConflict)
+	call(end, project, `,"expected_effective_id":"other"`, http.StatusConflict)
+	if !reflect.DeepEqual(beforeRoot, session(root)) || !reflect.DeepEqual(beforePending, pending()) || writes != 0 {
+		t.Fatal("rejected end changed the root, sync queue, or write notifications")
+	}
+
+	w := call(end, project, expectedRoot, http.StatusOK)
+	var ack map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil || ack["id"] != root || ack["status"] != "ended" {
+		t.Fatalf("end ack = %s, %v", w.Body, err)
+	}
+	afterRoot, afterPending := session(root), pending()
+	if afterRoot.EndedAt == nil || afterRoot.Summary == nil || *afterRoot.Summary != "confirmed end" ||
+		reflect.DeepEqual(beforePending, afterPending) || writes != 1 {
+		t.Fatalf("valid end = %+v, notifications = %d, sync changed = %t", afterRoot, writes, !reflect.DeepEqual(beforePending, afterPending))
+	}
+	call(end, project, expectedRoot, http.StatusNotFound)
+	if !reflect.DeepEqual(afterRoot, session(root)) || !reflect.DeepEqual(afterPending, pending()) || writes != 1 {
+		t.Fatal("repeated end changed the root, sync queue, or write notifications")
+	}
+
+	effective, err := db.ResumeSessionWithOwnershipMode(root, project, directory, mode)
+	if err != nil || effective == root {
+		t.Fatalf("resume = %q, %v", effective, err)
+	}
+	beforeContinuation, beforePending := session(effective), pending()
+	call(end, project, expectedRoot, http.StatusConflict)
+	if !reflect.DeepEqual(afterRoot, session(root)) || !reflect.DeepEqual(beforeContinuation, session(effective)) ||
+		!reflect.DeepEqual(beforePending, pending()) || writes != 1 {
+		t.Fatal("delayed end changed the continuation, root, sync queue, or write notifications")
+	}
+	expectedContinuation, err := json.Marshal(effective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = call(end, project, `,"expected_effective_id":`+string(expectedContinuation), http.StatusOK)
+	ack = nil
+	if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil || ack["id"] != effective || ack["resumed_from"] != root || ack["status"] != "ended" {
+		t.Fatalf("continuation end ack = %s, %v", w.Body, err)
+	}
+	if session(effective).EndedAt == nil || writes != 2 {
+		t.Fatal("valid continuation end did not finalize the continuation")
+	}
+}
 
 func TestRuntimeSessionResolveAndEndNeverCreate(t *testing.T) {
 	root := t.TempDir()

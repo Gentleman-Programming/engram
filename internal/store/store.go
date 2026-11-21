@@ -3897,6 +3897,9 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 // ErrRuntimeSessionScopeConflict refuses runtime-root reuse outside its binding.
 var ErrRuntimeSessionScopeConflict = errors.New("runtime session scope conflict")
 
+// ErrRuntimeSessionEffectiveIDMismatch means the live session differs from the caller's expectation.
+var ErrRuntimeSessionEffectiveIDMismatch = errors.New("runtime session effective ID mismatch")
+
 func runtimeSessionTx(tx *sql.Tx, root, project, directory, mode string) (string, error) {
 	if err := validateSessionID(root); err != nil {
 		return "", err
@@ -3952,13 +3955,28 @@ func (s *Store) ResolveRuntimeSessionWithOwnershipMode(root, project, directory,
 // EndRuntimeSession resolves and ends within one writer reservation. Generic
 // EndSession retains its exact-ID behavior for all existing callers.
 func (s *Store) EndRuntimeSession(root, project, directory, mode, summary string) (string, error) {
+	return s.endRuntimeSession(root, project, directory, mode, summary, "")
+}
+
+// EndRuntimeSessionIfCurrent ends the authorized live session only if it matches expectedID.
+func (s *Store) EndRuntimeSessionIfCurrent(root, project, directory, mode, summary, expectedID string) (string, error) {
+	if err := validateSessionID(expectedID); err != nil {
+		return "", err
+	}
+	return s.endRuntimeSession(root, project, directory, mode, summary, expectedID)
+}
+
+func (s *Store) endRuntimeSession(root, project, directory, mode, summary, expectedID string) (string, error) {
 	var id string
 	err := s.withTx(func(tx *sql.Tx) error {
-		var err error
-		id, err = runtimeSessionTx(tx, root, project, directory, mode)
+		currentID, err := runtimeSessionTx(tx, root, project, directory, mode)
 		if err != nil {
 			return err
 		}
+		if expectedID != "" && currentID != expectedID {
+			return ErrRuntimeSessionEffectiveIDMismatch
+		}
+		id = currentID
 		return s.endSessionOperation(id, summary)(tx)
 	})
 	return id, err

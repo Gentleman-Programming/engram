@@ -446,6 +446,9 @@ func TestHealthReportsVersion(t *testing.T) {
 			if !response.Capabilities["root_session_resume"] {
 				t.Fatal("/health must advertise root_session_resume")
 			}
+			if !response.Capabilities["runtime_session_conditional_end"] {
+				t.Fatal("/health must advertise runtime_session_conditional_end")
+			}
 			if response.Version != tt.version {
 				t.Fatalf("/health version = %q, want %q", response.Version, tt.version)
 			}
