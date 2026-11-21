@@ -70,7 +70,7 @@ engram setup opencode
 # Or manually: cp plugin/opencode/engram.ts ~/.config/opencode/plugins/
 ```
 
-The plugin auto-starts the HTTP server if it's not already running — no manual `engram serve` needed.
+For the default local connection, the plugin reuses a healthy server with the expected local identity or starts a managed daemon with `engram run -d`. The plugin waits up to 40 seconds for the launcher, then checks the server again. Later hooks can reuse it when it becomes ready. You can inspect or control that daemon with `engram ps`, `engram stop`, and `engram restart`. Older binaries that do not implement `run` retain the detached `engram serve` startup path. An explicit `ENGRAM_URL` leaves server startup to the endpoint owner.
 
 The same `engram.ts` supports OpenCode 1.x (1.18.29+) and 2.x. Its default export provides a V1 `server` entry and a V2 `setup` entry; the V2 entry maps session, context, compaction, and tool hooks onto the same handlers, so both majors share one behavior. On V2, user prompts are captured from the durable `session.inbox.enqueued` event (user items only) and sent with the item's `inboxID` as `source_inbox_id`, so a replayed admission never creates a second prompt, distinct items with identical text stay distinct, and a deleted prompt is not resurrected (the server answers `409`, which the plugin drops). This idempotency requires a server with prompt inbox identity support (#1464); older servers ignore the field and store every admission. OpenCode 2.x still accepts the MCP entry written by `engram setup opencode`, so the same command covers both majors.
 
