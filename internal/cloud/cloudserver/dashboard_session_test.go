@@ -335,7 +335,9 @@ func TestDashboardPrincipalHTTPRequestsUseScopedStoresAndFailClosed(t *testing.T
 		WithPrincipalStateStore(store),
 		WithPrincipalProjectAuthorizer(authorizer),
 	)
-	srv.dashboardScope = func(projects []string) (dashboard.DashboardStore, error) { return store.scoped(projects), nil }
+	srv.dashboardScope = func(_ context.Context, projects []string) (dashboard.DashboardStore, error) {
+		return store.scoped(projects), nil
+	}
 	alice := managedDashboardLogin(t, srv, "token-a", false)
 	bob := managedDashboardLogin(t, srv, "token-b", false)
 

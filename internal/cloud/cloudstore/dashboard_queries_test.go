@@ -1,6 +1,7 @@
 package cloudstore
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -43,7 +44,7 @@ func TestGetContributorDetailReturnsScopedData(t *testing.T) {
 	}
 
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	contributor, sessions, observations, prompts, err := cs.GetContributorDetail("alice")
@@ -112,7 +113,7 @@ func TestListDistinctTypesScansReadModel(t *testing.T) {
 	}
 
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	types, err := cs.ListDistinctTypes()
@@ -272,7 +273,7 @@ func TestCloudstoreSystemHealthAggregates(t *testing.T) {
 
 	// Inject model into a CloudStore via the override hook.
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	health, err := cs.SystemHealth()
@@ -455,7 +456,7 @@ func TestGetSessionDetailReturnsItsObservations(t *testing.T) {
 	}
 
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	sess, obs, _, err := cs.GetSessionDetail("proj-sess", "sess-detail-a")
@@ -504,7 +505,7 @@ func TestDashboardPaginationSortStability(t *testing.T) {
 	}
 
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	// Page 3 of size 5 (offset 10, 5 sessions).
@@ -555,7 +556,7 @@ func TestObservationDetailDistinguishesMultipleObsPerChunk(t *testing.T) {
 		t.Fatalf("buildDashboardReadModel: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	// Look up alpha by syncID.
@@ -605,7 +606,7 @@ func TestPromptDetailDistinguishesMultiplePromptsPerChunk(t *testing.T) {
 		t.Fatalf("buildDashboardReadModel: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	// Look up alpha.
@@ -1167,7 +1168,7 @@ func TestStandaloneCloudMutationObservationVisibleInPaginatedList(t *testing.T) 
 		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
 	}
 
-	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil }}
+	cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil }}
 	rows, total, err := cs.ListRecentObservationsPaginated("engram", "decisión arquitectónica", "", 20, 0)
 	if err != nil {
 		t.Fatalf("ListRecentObservationsPaginated: %v", err)
@@ -1217,7 +1218,7 @@ func TestStandaloneCloudMutationDeleteWinsBySeq(t *testing.T) {
 		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
 	}
 
-	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil }}
+	cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil }}
 	rows, total, err := cs.ListRecentObservationsPaginated("engram", "", "", 20, 0)
 	if err != nil {
 		t.Fatalf("ListRecentObservationsPaginated: %v", err)
@@ -1515,7 +1516,7 @@ func TestSessionDetailNotFoundReturnsSessionNotFoundError(t *testing.T) {
 		t.Fatalf("buildDashboardReadModel: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 	_, _, _, err = cs.GetSessionDetail("proj-valid", "sess-missing")
 	if err == nil {
@@ -1548,7 +1549,7 @@ func TestObservationDetailNotFoundReturnsObservationNotFoundError(t *testing.T) 
 		t.Fatalf("buildDashboardReadModel: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 	_, _, _, err = cs.GetObservationDetail("proj-valid", "sess-exists", "obs-missing")
 	if err == nil {
@@ -1581,7 +1582,7 @@ func TestPromptDetailNotFoundReturnsPromptNotFoundError(t *testing.T) {
 		t.Fatalf("buildDashboardReadModel: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 	_, _, _, err = cs.GetPromptDetail("proj-valid", "sess-exists", "prompt-missing")
 	if err == nil {
@@ -1656,7 +1657,7 @@ func TestDashboardCountsPiSavedPromptUnderItsProject(t *testing.T) {
 		t.Fatalf("buildDashboardReadModel: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	// The symptom in #706: the project row kept reporting 0 prompts.
@@ -1775,7 +1776,7 @@ func TestMutationOnlyChunkUpsertsMaterializeDashboardEntities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
 	}
-	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil }}
+	cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil }}
 
 	detail, err := cs.ProjectDetail(project)
 	if err != nil {
@@ -1828,7 +1829,7 @@ func TestDeletedPromptDisappearsFromDashboard(t *testing.T) {
 		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	prompts, err := cs.ListRecentPrompts(project, "", 10)
@@ -1888,7 +1889,7 @@ func TestHardDeletedObservationDisappearsFromDashboard(t *testing.T) {
 		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	observations, err := cs.ListRecentObservations(project, "", 10)
@@ -1938,7 +1939,7 @@ func TestSoftDeletedObservationDisappearsFromDashboard(t *testing.T) {
 		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 
 	observations, err := cs.ListRecentObservations(project, "", 10)

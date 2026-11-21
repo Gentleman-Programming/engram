@@ -1,6 +1,7 @@
 package cloudstore
 
 import (
+	"context"
 	"sort"
 	"strings"
 
@@ -72,31 +73,31 @@ func dashboardChunkIsProjectLocal(chunk dashboardChunkRow) bool {
 	return true
 }
 
-func (cs *CloudStore) refreshDashboardProjects(base dashboardReadModel, projects []string) (dashboardReadModel, error) {
+func (cs *CloudStore) refreshDashboardProjects(ctx context.Context, base dashboardReadModel, projects []string) (dashboardReadModel, error) {
 	if !base.projectPartitionSafe || len(projects) == 0 {
-		return cs.buildDashboardReadModel()
+		return cs.buildDashboardReadModel(ctx)
 	}
 	sort.Strings(projects)
 	replacements := make(map[string]DashboardProjectDetail, len(projects))
-	controls, err := cs.ListProjectSyncControls()
+	controls, err := cs.listProjectSyncControls(ctx)
 	if err != nil {
 		return dashboardReadModel{}, err
 	}
 	for _, project := range projects {
 		if project == "" || strings.TrimSpace(project) != project {
-			return cs.buildDashboardReadModel()
+			return cs.buildDashboardReadModel(ctx)
 		}
 		fold := newDashboardReadModelFold()
-		if err := cs.streamDashboardChunkRowsForProject(project, fold.applyChunk); err != nil {
+		if err := cs.streamDashboardChunkRowsForProject(ctx, project, fold.applyChunk); err != nil {
 			return dashboardReadModel{}, err
 		}
-		if err := cs.streamDashboardMutationRowsForProject(project, fold.applyMutation); err != nil {
+		if err := cs.streamDashboardMutationRowsForProject(ctx, project, fold.applyMutation); err != nil {
 			return dashboardReadModel{}, err
 		}
 		// A new mixed-project payload invalidates the partition certificate. Rebuild
 		// globally before returning, since its effects can cross the dirty boundary.
 		if !fold.projectPartitionSafe {
-			return cs.buildDashboardReadModel()
+			return cs.buildDashboardReadModel(ctx)
 		}
 		part := fold.finish()
 		for _, control := range controls {

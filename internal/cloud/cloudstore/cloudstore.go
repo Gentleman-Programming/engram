@@ -27,7 +27,7 @@ type CloudStore struct {
 	dashboardReadModel      dashboardReadModel
 	dashboardReadModelOK    bool
 	dashboardReadModelDirty map[string]struct{}
-	dashboardReadModelLoad  func() (dashboardReadModel, error)
+	dashboardReadModelLoad  func(context.Context) (dashboardReadModel, error)
 	// dashboardReadModelGen is bumped by every invalidation; a build only
 	// publishes its result when the generation it started under is current.
 	dashboardReadModelGen   uint64
