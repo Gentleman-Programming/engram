@@ -72,6 +72,14 @@ persistence or decide which session an omitted ID should select.
 | Codex | Genuine startup/resume/clear registers with `resume: true`. Go validates HTTP 201, `status: "created"`, and an exact root ID or numeric continuation with matching `resumed_from`. | PreToolUse, prompt capture and post-compaction resolve the existing effective identity through `/runtime-sessions/resolve`, without registration. Failed confirmation blocks attributed writes and withholds the active protocol. Host closing uses `/runtime-sessions/end`; model `mem_session_end` is rewritten to the resolved effective ID for unchanged exact-ID MCP ending. No private identity map or raw-ID fallback is used. |
 | OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. The core selects a live continuation when the root has ended. | Before session-attributed tool writes it registers the root with `resume: true`, rechecks host ownership, and injects the acknowledged effective `id` as `session_id`. Injection requires an HTTP-success response with `status: "created"` and an `id` equal to the root or prefixed by `<root>:resume:`; missing or foreign acknowledgements block injection. |
 
+Clients that have confirmed an effective session ID can send it as
+`expected_effective_id` to `POST /runtime-sessions/end` when `GET /health`
+advertises `runtime_session_conditional_end`. The server checks the current
+effective ID within the existing runtime scope transaction. A mismatch returns
+HTTP 409, and an absent live session returns HTTP 404. A supplied expectation
+must be a single nonblank string. Omitting it uses the existing runtime-end
+behavior.
+
 Claude and Codex PreToolUse confirmation use a four-second total HTTP budget
 by default for the session lookup followed by Claude's owner-bound registration
 or Codex's health preflight, cwd project resolution and runtime resolution.
