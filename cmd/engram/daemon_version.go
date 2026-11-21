@@ -7,13 +7,14 @@ import (
 	"golang.org/x/mod/semver"
 )
 
+func normalizeDaemonRelease(value string) string {
+	return strings.TrimPrefix(semver.Canonical("v"+strings.TrimPrefix(strings.TrimSpace(value), "v")), "v")
+}
+
 // daemonVersionStatus reports release skew, never process identity or restart
 // authority. Build metadata is not part of a semantic release comparison.
 func daemonVersionStatus(server, installed string) string {
-	normalize := func(value string) string {
-		return strings.TrimPrefix(semver.Canonical("v"+strings.TrimPrefix(strings.TrimSpace(value), "v")), "v")
-	}
-	server, installed = normalize(server), normalize(installed)
+	server, installed = normalizeDaemonRelease(server), normalizeDaemonRelease(installed)
 	known := server != "" && installed != ""
 	if server == "" {
 		server = "unknown"

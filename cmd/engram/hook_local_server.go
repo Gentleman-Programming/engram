@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -82,8 +83,10 @@ func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base str
 		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
 	}
 	defer func() { _ = response.Body.Close() }()
-	if !hookLocalHealthMatches(response, expected) {
-		return &hookDenialError{message: "managed local server identity unconfirmed: expected current data directory instance"}
+	health := readHookLocalHealth(response)
+	if !health.matches(expected) {
+		const denial = "managed local server identity unconfirmed: expected current data directory instance"
+		return &hookDenialError{message: denial + health.releaseSkewGuidance(version)}
 	}
 	return nil
 }
@@ -135,7 +138,7 @@ func hookLocalServerReady(ctx context.Context, client *http.Client, base, expect
 			// never permission to launch again or accept an unknown identity.
 			_ = response.Body.Close()
 		} else if err == nil {
-			matches := hookLocalHealthMatches(response, expected)
+			matches := readHookLocalHealth(response).matches(expected)
 			_ = response.Body.Close()
 			if !matches {
 				return errors.New("managed local server identity unconfirmed")
@@ -152,20 +155,42 @@ func hookLocalServerReady(ctx context.Context, client *http.Client, base, expect
 	}
 }
 
-// Validate the complete bounded response, not just a valid JSON prefix. Both
-// initial admission and managed recovery enforce the same identity contract.
-func hookLocalHealthMatches(response *http.Response, expected string) bool {
-	if response.StatusCode != http.StatusOK || expected == "" {
-		return false
+type hookLocalHealth struct {
+	Status     string          `json:"status"`
+	Service    string          `json:"service"`
+	InstanceID string          `json:"instance_id"`
+	Version    json.RawMessage `json:"version"`
+}
+
+// Initial admission and managed recovery share the same bounded health reader.
+func readHookLocalHealth(response *http.Response) hookLocalHealth {
+	if response.StatusCode != http.StatusOK {
+		return hookLocalHealth{}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, hookDenialBodyLimit+1))
 	if err != nil || len(body) > hookDenialBodyLimit {
-		return false
+		return hookLocalHealth{}
 	}
-	var health struct {
-		Status     string `json:"status"`
-		Service    string `json:"service"`
-		InstanceID string `json:"instance_id"`
+	var health hookLocalHealth
+	if json.Unmarshal(body, &health) != nil || health.Status != "ok" || health.Service != "engram" {
+		return hookLocalHealth{}
 	}
-	return json.Unmarshal(body, &health) == nil && health.Status == "ok" && health.Service == "engram" && health.InstanceID == expected
+	return health
+}
+
+func (health hookLocalHealth) matches(expected string) bool {
+	return expected != "" && health.InstanceID == expected
+}
+
+func (health hookLocalHealth) releaseSkewGuidance(installed string) string {
+	var reported string
+	// Keep untrusted version metadata short before including it in the denial.
+	if json.Unmarshal(health.Version, &reported) != nil || len(reported) > 64 {
+		return ""
+	}
+	reported, installed = normalizeDaemonRelease(reported), normalizeDaemonRelease(installed)
+	if reported == "" || installed == "" || reported == installed {
+		return ""
+	}
+	return fmt.Sprintf(". Listener reports server %s (installed CLI %s). Verify the listener and its data directory, then restart the intended server through its existing supervisor or launch method.", reported, installed)
 }
