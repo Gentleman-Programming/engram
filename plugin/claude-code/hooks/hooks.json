@@ -7,7 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "engram hook claude-pre-tool-use",
+            "command": "engram",
+            "args": ["hook", "claude-pre-tool-use"],
             "onFailure": "block",
             "timeout": 5
           }
