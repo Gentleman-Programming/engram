@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -111,7 +112,8 @@ func TestClaudePreToolUseManifestUsesPortableCoreHook(t *testing.T) {
 		Hooks map[string][]struct {
 			Matcher string `json:"matcher"`
 			Hooks   []struct {
-				Command string `json:"command"`
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
 			} `json:"hooks"`
 		} `json:"hooks"`
 	}
@@ -121,7 +123,7 @@ func TestClaudePreToolUseManifestUsesPortableCoreHook(t *testing.T) {
 
 	for _, group := range manifest.Hooks["PreToolUse"] {
 		for _, hook := range group.Hooks {
-			if hook.Command != "engram hook claude-pre-tool-use" {
+			if hook.Command != "engram" || !slices.Equal(hook.Args, []string{"hook", "claude-pre-tool-use"}) {
 				continue
 			}
 			// This matcher uses only anchors, groups and literal alternatives: Go's
@@ -156,13 +158,10 @@ func TestClaudePreToolUseManifestUsesPortableCoreHook(t *testing.T) {
 					t.Errorf("PreToolUse matcher %q accepts unrelated name %q", group.Matcher, name)
 				}
 			}
-			if strings.Contains(strings.ToLower(hook.Command), "bash") || strings.Contains(hook.Command, ".sh") {
-				t.Fatalf("PreToolUse command %q is not portable to Windows", hook.Command)
-			}
 			return
 		}
 	}
-	t.Fatal("no portable PreToolUse hook delegates to engram hook claude-pre-tool-use")
+	t.Fatal("no exec-form PreToolUse hook invokes engram with hook and claude-pre-tool-use arguments")
 }
 
 // Configuration contract only: Claude Code >= 2.1.295 owns enforcement of
@@ -175,9 +174,10 @@ func TestClaudePreToolUseMutatingHooksBlockOnFailure(t *testing.T) {
 	var manifest struct {
 		Hooks map[string][]struct {
 			Hooks []struct {
-				Command   string `json:"command"`
-				OnFailure string `json:"onFailure"`
-				Timeout   int    `json:"timeout"`
+				Command   string   `json:"command"`
+				Args      []string `json:"args"`
+				OnFailure string   `json:"onFailure"`
+				Timeout   int      `json:"timeout"`
 			} `json:"hooks"`
 		} `json:"hooks"`
 	}
@@ -187,7 +187,7 @@ func TestClaudePreToolUseMutatingHooksBlockOnFailure(t *testing.T) {
 	found := 0
 	for groupIndex, group := range manifest.Hooks["PreToolUse"] {
 		for hookIndex, hook := range group.Hooks {
-			if hook.Command != "engram hook claude-pre-tool-use" {
+			if hook.Command != "engram" || !slices.Equal(hook.Args, []string{"hook", "claude-pre-tool-use"}) {
 				continue
 			}
 			found++
