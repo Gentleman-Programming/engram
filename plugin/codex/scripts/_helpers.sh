@@ -37,7 +37,7 @@ engram_native_hook() {
 
 # Transport the server-confirmed runtime identity; never choose a session here.
 engram_session_handoff() {
-  local input="$1" project="$2" dir="$3" action="$4" effective identity=""
+  local input="$1" project="$2" dir="$3" action="$4" effective="" identity=""
   if [ -n "$project" ]; then
     effective=$(printf '%s' "$input" | engram_native_hook "$action" 2>/dev/null) || effective=""
     identity=$(printf '%s' "$effective" | jq -esc '
@@ -58,6 +58,16 @@ Retain this binding across compaction and include it in the compacted handoff. T
 IDENTITY
   else
     printf '%s\n' 'No authoritative registered runtime identity is available from this hook. Agent-attributed memory writes must stop until the host hook re-registers the same runtime ID on startup or resume. Do not retry MCP writes without session_id or use another session. An explicit independent CLI/manual save is separate and not a substitute for session attribution.'
+    if [ "${ENGRAM_HOOK_CODEX_COMPACTION:-}" = 1 ] && [ -n "$effective" ]; then
+      case "$(printf '%s' "$effective" | jq -ers 'if length == 1 then .[0].error_code // empty else empty end' 2>/dev/null)" in
+        runtime_resolve_deadline)
+          printf '%s\n' 'Runtime session confirmation timed out after compaction.'
+          ;;
+        runtime_session_not_registered)
+          printf '%s\n' 'No registered runtime session was found after compaction.'
+          ;;
+      esac
+    fi
   fi
   printf '%s\n\n' 'Never invent, derive, or select a session ID. Do not call mem_session_start: runtime registration belongs to this hook, not the model.'
   return "$confirmed"

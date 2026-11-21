@@ -569,11 +569,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := map[string]any{
-		"status":       "ok",
-		"service":      "engram",
-		"version":      s.version,
-		"instance_id":  s.instanceID,
-		"capabilities": map[string]bool{"isolated_session_registration": true, "root_session_resume": true, "runtime_session_resolution": true},
+		"status":      "ok",
+		"service":     "engram",
+		"version":     s.version,
+		"instance_id": s.instanceID,
+		"capabilities": map[string]bool{
+			"isolated_session_registration":   true,
+			"root_session_resume":             true,
+			"runtime_session_resolution":      true,
+			"runtime_session_conditional_end": true,
+		},
 	}
 	if s.daemonToken != "" {
 		body["daemon_token"] = s.daemonToken

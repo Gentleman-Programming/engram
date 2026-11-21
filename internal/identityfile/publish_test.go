@@ -30,7 +30,7 @@ func TestPublishConcurrentCompleteWinner(t *testing.T) {
 			<-start
 			err := Publish(source, destination)
 			if err == nil || errors.Is(err, fs.ErrExist) {
-				data, readErr := os.ReadFile(destination)
+				data, readErr := ReadFile(destination)
 				if readErr != nil {
 					results <- readErr
 					return

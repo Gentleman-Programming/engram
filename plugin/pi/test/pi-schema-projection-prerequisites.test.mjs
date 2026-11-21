@@ -14,48 +14,56 @@ for (const scenario of [
   { name: "failed Go command is not absence", go: "failed", artifact: "file", code: 1 },
   { name: "artifact read error is not absence", go: "available", artifact: "directory", code: 1 },
 ]) {
-  test(`projection prerequisite: ${scenario.name}`, async () => {
+  test(`projection prerequisite: ${scenario.name}`, async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "engram-pi-prerequisite-"));
-    try {
-      const tests = join(dir, "plugin/pi/test");
-      const bin = join(dir, "bin");
-      await mkdir(join(dir, "plugin"));
-      const sandbox = await createPluginSandbox(join(dir, "plugin"));
-      await rename(sandbox, join(dir, "plugin/pi"));
-      await mkdir(tests, { recursive: true });
-      await mkdir(bin);
-      for (const name of ["pi-schema-projections.test.mjs", "plugin-sandbox.mjs"]) {
-        await copyFile(new URL(name, import.meta.url), join(tests, name));
+    t.after(async () => {
+      try {
+        // Windows can still hold the copied executable after its process exits.
+        await rm(dir, {
+          recursive: true, force: true, maxRetries: process.platform === "win32" ? 3 : 0, retryDelay: 50,
+        });
+      } catch (error) {
+        // Node reports the scenario assertion first when both phases fail.
+        t.diagnostic(`Projection prerequisite fixture cleanup failed: ${error.message}`);
+        throw error;
       }
-      const artifact = join(dir, "docs/contracts/agent-contract-v1.json");
-      if (scenario.artifact !== "missing") {
-        await mkdir(join(dir, "docs/contracts"), { recursive: true });
-        if (scenario.artifact === "directory") await mkdir(artifact);
-        else await writeFile(artifact, "{}\n");
-      }
-      if (scenario.go !== "missing") {
-        const go = join(bin, process.platform === "win32" ? "go.exe" : "go");
-        await copyFile(process.execPath, go);
-        await chmod(go, 0o700);
-        await writeFile(join(dir, "version"), `process.exit(${scenario.go === "failed" ? 1 : 0});\n`);
-      }
-      const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "PATH" && name !== "NODE_TEST_CONTEXT"));
-      env.PATH = bin;
-      env.GOPROXY = "off";
-      env.GOSUMDB = "off";
-      const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", join(tests, "pi-schema-projections.test.mjs")], {
-        cwd: dir, env, encoding: "utf8", timeout: 20_000,
-      });
-      assert.ifError(result.error);
-      assert.equal(result.status, scenario.code, result.stdout + result.stderr);
-      assert.equal(result.stderr, "");
-      if (scenario.skip) assert.ok(result.stdout.includes(`# SKIP ${scenario.skip}`), result.stdout);
-      else assert.ok(!result.stdout.includes("# SKIP"), result.stdout);
-      if (scenario.artifact === "file") assert.equal(await readFile(artifact, "utf8"), "{}\n");
-      const expected = ["bin", "plugin", ...(scenario.artifact === "missing" ? [] : ["docs"]), ...(scenario.go === "missing" ? [] : ["version"])];
-      assert.deepEqual((await readdir(dir)).sort(), expected.sort(), "no build or store writes");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
+    });
+    const tests = join(dir, "plugin/pi/test");
+    const bin = join(dir, "bin");
+    await mkdir(join(dir, "plugin"));
+    const sandbox = await createPluginSandbox(join(dir, "plugin"));
+    await rename(sandbox, join(dir, "plugin/pi"));
+    await mkdir(tests, { recursive: true });
+    await mkdir(bin);
+    for (const name of ["pi-schema-projections.test.mjs", "plugin-sandbox.mjs"]) {
+      await copyFile(new URL(name, import.meta.url), join(tests, name));
     }
+    const artifact = join(dir, "docs/contracts/agent-contract-v1.json");
+    if (scenario.artifact !== "missing") {
+      await mkdir(join(dir, "docs/contracts"), { recursive: true });
+      if (scenario.artifact === "directory") await mkdir(artifact);
+      else await writeFile(artifact, "{}\n");
+    }
+    if (scenario.go !== "missing") {
+      const go = join(bin, process.platform === "win32" ? "go.exe" : "go");
+      await copyFile(process.execPath, go);
+      await chmod(go, 0o700);
+      await writeFile(join(dir, "version"), `process.exit(${scenario.go === "failed" ? 1 : 0});\n`);
+    }
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "PATH" && name !== "NODE_TEST_CONTEXT"));
+    env.PATH = bin;
+    env.GOPROXY = "off";
+    env.GOSUMDB = "off";
+    const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", join(tests, "pi-schema-projections.test.mjs")], {
+      cwd: dir, env, encoding: "utf8", timeout: 20_000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, scenario.code, result.stdout + result.stderr);
+    assert.equal(result.stderr, "");
+    if (scenario.skip) assert.ok(result.stdout.includes(`# SKIP ${scenario.skip}`), result.stdout);
+    else assert.ok(!result.stdout.includes("# SKIP"), result.stdout);
+    if (scenario.artifact === "file") assert.equal(await readFile(artifact, "utf8"), "{}\n");
+    const expected = ["bin", "plugin", ...(scenario.artifact === "missing" ? [] : ["docs"]), ...(scenario.go === "missing" ? [] : ["version"])];
+    assert.deepEqual((await readdir(dir)).sort(), expected.sort(), "no build or store writes");
   });
 }

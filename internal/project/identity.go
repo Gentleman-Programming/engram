@@ -99,7 +99,7 @@ func loadOrCreateRepositoryBinding(commonDir, legacyProject string) (repositoryB
 }
 
 func readRepositoryBinding(commonDir string) (repositoryBinding, error) {
-	data, err := os.ReadFile(repositoryBindingPath(commonDir))
+	data, err := identityfile.ReadFile(repositoryBindingPath(commonDir))
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return repositoryBinding{}, fmt.Errorf("%w: cannot read the binding; check Git metadata permissions or configure project_name explicitly", ErrRepositoryBinding)
