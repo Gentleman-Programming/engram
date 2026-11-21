@@ -48,7 +48,7 @@ func publishCaptureCheckout(path, repositoryID string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(file.Name())
+	defer func() { _ = os.Remove(file.Name()) }()
 	_, writeErr := file.WriteString(repositoryID)
 	if err := errors.Join(writeErr, file.Close()); err != nil {
 		return err
