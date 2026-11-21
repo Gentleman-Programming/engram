@@ -119,3 +119,90 @@ func TestHookLocalIdentityMatchesServeHomeFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestHookLocalIdentityReleaseGuidance(t *testing.T) {
+	previousVersion := version
+	version = "3.7.2"
+	t.Cleanup(func() { version = previousVersion })
+	previousLaunch := hookLocalServerLaunch
+	hookLocalServerLaunch = func(context.Context, string, string, []string) error {
+		t.Error("a received health response must never trigger a launch")
+		return errors.New("unexpected launch")
+	}
+	t.Cleanup(func() { hookLocalServerLaunch = previousLaunch })
+	t.Setenv("ENGRAM_URL", "")
+	t.Setenv("ENGRAM_SOCKET", "")
+	dir := t.TempDir()
+	t.Setenv("ENGRAM_DATA_DIR", dir)
+	expected, err := store.EnsureInstanceID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, service, identity string
+		reported                any
+		httpStatus              int
+		wantGuidance, confirmed bool
+	}{
+		{name: "legacy listener", service: "engram", reported: "0.1.0", httpStatus: http.StatusOK, wantGuidance: true},
+		{name: "foreign instance", service: "engram", identity: "other-instance", reported: "v0.1.0+build", httpStatus: http.StatusOK, wantGuidance: true},
+		{name: "same release", service: "engram", reported: "v3.7.2+different", httpStatus: http.StatusOK},
+		{name: "invalid release", service: "engram", reported: "private\nserver release", httpStatus: http.StatusOK},
+		{name: "missing release", service: "engram", httpStatus: http.StatusOK},
+		{name: "overlong release", service: "engram", reported: "0.1.0-" + strings.Repeat("a", 64), httpStatus: http.StatusOK},
+		{name: "unrelated listener", service: "other", reported: "0.1.0", httpStatus: http.StatusOK},
+		{name: "unhealthy listener", service: "engram", reported: "0.1.0", httpStatus: http.StatusInternalServerError},
+		{name: "matching with different release", service: "engram", identity: expected, reported: "0.1.0", httpStatus: http.StatusOK, confirmed: true},
+		{name: "matching with nonstring release", service: "engram", identity: expected, reported: 1, httpStatus: http.StatusOK, confirmed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var paths []string
+			listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				switch r.URL.Path {
+				case "/health":
+					w.WriteHeader(tc.httpStatus)
+					body := map[string]any{"status": "ok", "service": tc.service, "version": tc.reported}
+					if tc.identity != "" {
+						body["instance_id"] = tc.identity
+					}
+					_ = json.NewEncoder(w).Encode(body)
+				case "/sessions/private-session":
+					_, _ = w.Write([]byte(`{"id":"private-session","project":"owner"}`))
+				case "/sessions":
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte(`{"id":"private-session","status":"created"}`))
+				default:
+					t.Errorf("unexpected request %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Setenv("ENGRAM_PORT", strings.TrimPrefix(listener.URL, "http://127.0.0.1:"))
+			id, err := confirmHookSessionForPlatform("private-session", "private-cwd", true, "windows")
+			listener.Close()
+			if tc.confirmed {
+				if err != nil || id != "private-session" {
+					t.Fatalf("matching instance = %q, %v", id, err)
+				}
+				return
+			}
+			const generic = "managed local server identity unconfirmed: expected current data directory instance"
+			if id != "" || err == nil || !strings.HasPrefix(err.Error(), generic) {
+				t.Fatalf("identity denial = %q, %v", id, err)
+			}
+			if got := strings.Join(paths, ","); got != "/health" {
+				t.Fatalf("requests before denial = %s, want only health", got)
+			}
+			if tc.wantGuidance {
+				for _, detail := range []string{"server 0.1.0", "installed CLI 3.7.2", "restart", "existing supervisor"} {
+					if !strings.Contains(err.Error(), detail) {
+						t.Errorf("missing %q in denial: %v", detail, err)
+					}
+				}
+			} else if err.Error() != generic {
+				t.Errorf("expected generic denial, got %v", err)
+			}
+		})
+	}
+}
