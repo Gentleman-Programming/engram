@@ -4379,7 +4379,8 @@ func TestClaudePreToolUseHookUsesWindowsPortableCommand(t *testing.T) {
 		Hooks map[string][]struct {
 			Matcher string `json:"matcher"`
 			Hooks   []struct {
-				Command string `json:"command"`
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
 			} `json:"hooks"`
 		} `json:"hooks"`
 	}
@@ -4389,11 +4390,8 @@ func TestClaudePreToolUseHookUsesWindowsPortableCommand(t *testing.T) {
 
 	for _, entry := range cfg.Hooks["PreToolUse"] {
 		for _, hook := range entry.Hooks {
-			if hook.Command != "engram hook claude-pre-tool-use" {
+			if hook.Command != "engram" || !slices.Equal(hook.Args, []string{"hook", "claude-pre-tool-use"}) {
 				continue
-			}
-			if strings.ContainsAny(hook.Command, `/$`) || strings.Contains(strings.ToLower(hook.Command), "bash") {
-				t.Fatalf("PreToolUse command %q is not portable to Windows", hook.Command)
 			}
 			// Current manifest uses only JS-compatible literal alternatives and groups.
 			if !strings.HasPrefix(entry.Matcher, "^") || !strings.HasSuffix(entry.Matcher, "$") {
@@ -4419,7 +4417,7 @@ func TestClaudePreToolUseHookUsesWindowsPortableCommand(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("Claude PreToolUse manifest is missing the portable core hook command")
+	t.Fatal("Claude PreToolUse manifest is missing the exec-form core hook command")
 }
 
 func TestClaudeCodeUserPromptSubmitHookTimeout(t *testing.T) {
