@@ -413,6 +413,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	invalidProjects := make(map[string]bool)
 	blocking := make([]Finding, 0)
 	terminal := make([]Finding, 0)
+	locallyAcknowledged := 0
 	for _, observation := range sourceObservations {
 		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
@@ -426,11 +427,14 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	for _, mutation := range mutations {
-		// A quarantined row is an explicit, already-taken disposition: it no
-		// longer reaches transport, so it must not keep doctor blocked. It stays
-		// reported as non-blocking evidence of what was dropped from sync.
 		switch strings.TrimSpace(mutation.Disposition) {
+		case "acked_local_no_pipeline":
+			// Legacy local acknowledgements have no cloud ack timestamp,
+			// but the row is no longer awaiting delivery.
+			locallyAcknowledged++
+			continue
 		case store.SyncMutationDispositionQuarantined:
+			// Keep quarantined rows as non-blocking audit evidence.
 			terminal = append(terminal, c.quarantinedFinding(mutation))
 			continue
 		case store.SyncMutationDispositionSuperseded:
@@ -470,9 +474,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			RequiresConfirmation: true,
 		})
 	}
-	// Quarantined rows are already-taken dispositions, so they never count as
-	// work still pending delivery.
-	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(terminal), "corrupt_source_observations": len(sourceObservations)}
+	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(terminal) - locallyAcknowledged, "corrupt_source_observations": len(sourceObservations)}
 	if len(terminal) > 0 {
 		evidence["terminal_mutations"] = len(terminal)
 	}

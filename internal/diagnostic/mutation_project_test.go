@@ -3,11 +3,60 @@ package diagnostic
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
+
+func TestRequiredFieldsIgnoresLocallyAcknowledgedMutation(t *testing.T) {
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
+	if err := s.EnrollProject("demo"); err != nil {
+		t.Fatal(err)
+	}
+	const payload = `{"id":"manual-save","project":"","directory":"/synthetic","started_at":"2026-01-01 00:00:00"}`
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "", store.SyncEntitySession, "manual-save", store.SyncOpUpsert, payload)
+	if _, err := s.DB().Exec(`UPDATE sync_mutations
+		SET disposition = 'acked_local_no_pipeline', disposition_reason = 'local writes preserved',
+		    disposition_at = '2026-01-02 00:00:00' WHERE entity_key = 'manual-save'`); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(t *testing.T) Report {
+		t.Helper()
+		before, err := s.ListPendingProjectMutations("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckSyncMutationRequiredFields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := s.ListPendingProjectMutations("")
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("diagnostic changed the journal: before=%+v after=%+v err=%v", before, after, err)
+		}
+		return report
+	}
+	t.Run("locally acknowledged only", func(t *testing.T) {
+		report := check(t)
+		if report.Status != StatusOK || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 0 {
+			t.Fatalf("locally acknowledged mutation must not block doctor: %+v", report)
+		}
+		if !strings.Contains(string(report.Checks[0].Evidence), `"pending_mutations_evaluated":0`) {
+			t.Fatalf("locally acknowledged mutation was counted as pending: %s", report.Checks[0].Evidence)
+		}
+	})
+	t.Run("same defect on a pending row", func(t *testing.T) {
+		seedDiagnosticPendingMutation(t, cfg.DataDir, "", store.SyncEntitySession, "manual-save", store.SyncOpUpsert, payload)
+		report := check(t)
+		if report.Status != StatusBlocked || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 ||
+			report.Checks[0].ReasonCode != "sync_mutation_project_invalid" {
+			t.Fatalf("only the pending mutation should block doctor: %+v", report)
+		}
+	})
+}
 
 func TestCompleteMutationInvalidProject(t *testing.T) {
 	for _, tc := range []struct {
