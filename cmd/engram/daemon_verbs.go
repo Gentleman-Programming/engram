@@ -89,7 +89,7 @@ func cmdPs(cfg store.Config, args []string) error {
 	}
 	pidPath := daemon.PidfilePath(cfg.DataDir)
 	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
-		if err := listenerConflict(daemonStatusPort(daemon.PidRecord{})); err != nil {
+		if err := psListenerConflict(daemonStatusPort(daemon.PidRecord{})); err != nil {
 			return err
 		}
 		_, _ = stdoutPrinter("not running\n")
@@ -103,7 +103,7 @@ func cmdPs(cfg store.Config, args []string) error {
 	record, err := daemon.ReadPidfile(pidPath)
 	switch {
 	case errors.Is(err, daemon.ErrNoPidfile):
-		if err := listenerConflict(daemonStatusPort(daemon.PidRecord{})); err != nil {
+		if err := psListenerConflict(daemonStatusPort(daemon.PidRecord{})); err != nil {
 			return err
 		}
 		_, _ = stdoutPrinter("not running\n")
@@ -115,7 +115,7 @@ func cmdPs(cfg store.Config, args []string) error {
 		if err := removePidfileIfUnchanged(pidPath, record); err != nil {
 			return err
 		}
-		if err := listenerConflict(daemonStatusPort(record)); err != nil {
+		if err := psListenerConflict(daemonStatusPort(record)); err != nil {
 			return err
 		}
 		_, _ = stdoutPrinter("not running\n")
@@ -132,7 +132,23 @@ func cmdPs(cfg store.Config, args []string) error {
 		return nil
 	}
 	_, _ = stdoutPrinter("unreachable (pid %d) on port %d\n", record.Pid, record.Port)
-	return fmt.Errorf("daemon is not answering on port %d: %s", record.Port, listenerObservation(record.Port, probe))
+	err = fmt.Errorf("daemon is not answering on port %d: %s", record.Port, listenerObservation(record.Port, probe))
+	return withPsListenerVersions(err, probe)
+}
+
+func psListenerConflict(port int) error {
+	probe := daemonStatusProbe(port)
+	return withPsListenerVersions(listenerConflictForProbe(port, probe), probe)
+}
+
+// Version metadata annotates the existing status error. It has no role in
+// process identity checks or the decisions made by other daemon verbs.
+func withPsListenerVersions(err error, probe daemon.ProbeResult) error {
+	if err == nil || probe.Status != daemon.StatusRunning || probe.Service != "engram" ||
+		len(probe.Version) > 64 || normalizeDaemonRelease(probe.Version) == "" {
+		return err
+	}
+	return fmt.Errorf("%w\n%s", err, strings.TrimSuffix(daemonVersionStatus(probe.Version, version), "\n"))
 }
 
 // cmdStop implements `engram stop` (spec S5): stop the pidfile-tracked

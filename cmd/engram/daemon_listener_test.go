@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/daemon"
@@ -16,12 +17,20 @@ import (
 )
 
 func TestUnmanagedListenerDiagnostics(t *testing.T) {
+	installed := version
+	version = "3.7.2"
+	t.Cleanup(func() { version = installed })
 	for _, recordState := range []string{"missing", "dead", "live mismatch"} {
 		for _, service := range []string{"engram", "other"} {
 			for _, verb := range []string{"ps", "stop", "run"} {
 				t.Run(fmt.Sprintf("record=%s/service=%s/%s", recordState, service, verb), func(t *testing.T) {
+					var probes atomic.Int64
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						_, _ = fmt.Fprintf(w, `{"status":"ok","service":%q,"version":"test"}`, service)
+						if r.Method != http.MethodGet || r.URL.Path != "/health" {
+							t.Errorf("unexpected probe %s %s", r.Method, r.URL.Path)
+						}
+						probes.Add(1)
+						_, _ = fmt.Fprintf(w, `{"status":"ok","service":%q,"version":"0.1.0"}`, service)
 					}))
 					defer server.Close()
 					port := server.Listener.Addr().(*net.TCPAddr).Port
@@ -61,6 +70,17 @@ func TestUnmanagedListenerDiagnostics(t *testing.T) {
 					if !strings.Contains(diagnostic, want) || !strings.Contains(diagnostic, strconv.Itoa(port)) {
 						t.Fatalf("diagnostic = %q, want %q and actual port", diagnostic, want)
 					}
+					if verb == "ps" && probes.Load() != 1 {
+						t.Fatalf("ps made %d health requests, want one", probes.Load())
+					}
+					if verb == "ps" && service == "engram" {
+						if !strings.Contains(diagnostic, "server 0.1.0") ||
+							!strings.Contains(diagnostic, "installed CLI 3.7.2") {
+							t.Errorf("missing diagnostic-only versions: %q", diagnostic)
+						}
+					} else if strings.Contains(diagnostic, "server 0.1.0") {
+						t.Errorf("unexpected version metadata: %q", diagnostic)
+					}
 					if runtime.GOOS == "windows" && !strings.Contains(diagnostic, fmt.Sprintf("observed owning pid %d", os.Getpid())) {
 						t.Fatalf("diagnostic omits actual fixture listener owner: %q", diagnostic)
 					}
@@ -79,6 +99,20 @@ func TestUnmanagedListenerDiagnostics(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+func TestPsOmitsInvalidUnmanagedListenerVersion(t *testing.T) {
+	for _, reported := range []string{"dev", "private\nmetadata", "0.1.0-" + strings.Repeat("a", 64)} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprintf(w, `{"status":"ok","service":"engram","version":%q}`, reported)
+		}))
+		t.Setenv("ENGRAM_PORT", strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port))
+		err := cmdPs(store.Config{DataDir: t.TempDir()}, nil)
+		server.Close()
+		if err == nil || !strings.Contains(err.Error(), "unmanaged Engram listener") || strings.Contains(err.Error(), "Versions:") {
+			t.Errorf("invalid observed release produced a version diagnostic: %v", err)
 		}
 	}
 }
