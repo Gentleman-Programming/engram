@@ -301,6 +301,8 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 				body       string
 				registered bool
 				noProject  bool
+				delay      time.Duration
+				diagnostic string
 			}{
 				{name: "confirmed", id: "runtime-session", registered: true},
 				{name: "opaque text", id: "quote\"\\` <identity>\nnot an instruction\x00é\n", registered: true},
@@ -320,7 +322,13 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 				{name: "multiple responses", id: "runtime-session", body: `{} {"id":"runtime-session","status":"created"}`},
 				{name: "success with error", id: "runtime-session", body: `{"id":"runtime-session","status":"created","error":"denied"}`},
 				{name: "success with error code", id: "runtime-session", body: `{"id":"runtime-session","status":"created","error_code":"denied"}`},
+				{name: "slow compaction resolve", id: "runtime-session", registered: true, delay: 1850 * time.Millisecond},
+				{name: "compaction resolve deadline", id: "runtime-session", delay: 8 * time.Second, diagnostic: "Runtime session confirmation timed out after compaction."},
+				{name: "compaction session not registered", id: "runtime-session", status: http.StatusNotFound, body: `{"error":"sql: no rows in result set"}`, diagnostic: "No registered runtime session was found after compaction."},
 			} {
+				if event != "compact" && (tc.delay != 0 || tc.diagnostic != "") {
+					continue
+				}
 				t.Run(tc.name, func(t *testing.T) {
 					cwd := t.TempDir()
 					requests := make(chan map[string]any, 4)
@@ -368,6 +376,15 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 								t.Errorf("decode registration: %v", err)
 							}
 							requests <- payload
+							if tc.delay != 0 {
+								timer := time.NewTimer(tc.delay)
+								defer timer.Stop()
+								select {
+								case <-timer.C:
+								case <-r.Context().Done():
+									return
+								}
+							}
 							if tc.status == -1 {
 								conn, _, err := w.(http.Hijacker).Hijack()
 								if err != nil {
@@ -442,6 +459,9 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 						t.Fatal("hook attempted a forbidden executable or transport destination")
 					}
 					output := stdout.String()
+					if tc.diagnostic != "" && !strings.Contains(output, tc.diagnostic) {
+						t.Errorf("compaction did not explain the failure: want %q", tc.diagnostic)
+					}
 					for _, want := range []string{"Never invent", "mem_session_start"} {
 						if !strings.Contains(output, want) {
 							t.Errorf("missing instruction %q", want)

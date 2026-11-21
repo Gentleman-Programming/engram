@@ -40,6 +40,14 @@ Pi sends `resume: true` for runtime-root registration and adopts only a valid ac
 
 When resuming an ended, directory-bound host, new numeric continuations inherit its persisted project, directory, and ownership mode after registration ownership checks. After a received `409 runtime session scope conflict`, Codex looks up the ended root and makes at most one resolve/end request with its persisted directory and mode while retaining the caller's requested project: `shared` hosts still allow cross-project use, but `project_owned` hosts reject foreign projects. This rebinding is limited to that confirmed rejection; normal paths, unrelated errors, and uncertain transport failures do not trigger it. Fresh and live-host paths keep their existing registration and resolution behavior.
 
+### Codex post-compaction handoff
+
+Post-compaction allows up to three seconds for native session resolution within
+the ten-second host hook. Prompt submission keeps its short budget. If the core
+reports a resolution timeout or missing registration, the hook explains that
+failure while retaining prior context and withholding agent-attributed writes
+until the session can be confirmed.
+
 ### Codex Bash passive capture
 
 The synchronous `SubagentStop` hook resolves the supplied host through native
