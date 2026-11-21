@@ -112,11 +112,15 @@ func (cs *CloudStore) GetProjectSyncControl(project string) (*ProjectSyncControl
 // ListProjectSyncControls returns all project controls UNION DISTINCT projects
 // known from cloud_chunks (projects with no explicit control row default to enabled).
 func (cs *CloudStore) ListProjectSyncControls() ([]ProjectSyncControl, error) {
+	return cs.listProjectSyncControls(context.Background())
+}
+
+func (cs *CloudStore) listProjectSyncControls(ctx context.Context) ([]ProjectSyncControl, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
 	// UNION ensures projects that have synced chunks appear even without a control row.
-	rows, err := cs.db.QueryContext(context.Background(), `
+	rows, err := cs.db.QueryContext(ctx, `
 		SELECT
 		    p.project,
 		    COALESCE(c.sync_enabled, TRUE)   AS sync_enabled,

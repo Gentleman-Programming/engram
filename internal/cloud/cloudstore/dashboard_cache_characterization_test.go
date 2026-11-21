@@ -1,6 +1,7 @@
 package cloudstore
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"sync/atomic"
@@ -42,7 +43,7 @@ func characterizationRead(cs *CloudStore, results chan<- characterizationResult)
 func TestDashboardCacheCharacterizationWarmPublicSurfaces(t *testing.T) {
 	model := dashboardPrincipalReadModel()
 	calls := 0
-	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { calls++; return model, nil }}
+	cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { calls++; return model, nil }}
 	rows, err := cs.ListProjects("")
 	characterizationEqual(t, rows, model.projects, err)
 	contributors, err := cs.ListContributors("alice")
@@ -74,7 +75,7 @@ func TestDashboardCacheCharacterizationConcurrentColdCallers(t *testing.T) {
 	release := make(chan struct{}, 2)
 	defer close(release)
 	var calls atomic.Int32
-	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) {
+	cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) {
 		calls.Add(1)
 		entered <- struct{}{}
 		select {
@@ -115,7 +116,7 @@ func TestDashboardCacheCharacterizationInvalidationDuringLoad(t *testing.T) {
 	release := make(chan struct{}, 1)
 	defer close(release)
 	var calls atomic.Int32
-	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) {
+	cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) {
 		if calls.Add(1) == 1 {
 			entered <- struct{}{}
 			select {
@@ -155,7 +156,7 @@ func TestDashboardCacheCharacterizationBuilderErrorNotCached(t *testing.T) {
 	model := dashboardPrincipalReadModel()
 	failure := errors.New("controlled build failure")
 	calls := 0
-	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) {
+	cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) {
 		calls++
 		if calls == 1 {
 			return dashboardReadModel{}, failure
@@ -178,7 +179,7 @@ func TestDashboardCacheCharacterizationBuilderErrorNotCached(t *testing.T) {
 func TestDashboardCacheCharacterizationLegacyManagedNeutralReuse(t *testing.T) {
 	model := dashboardPrincipalReadModel()
 	calls := 0
-	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { calls++; return model, nil }}
+	cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { calls++; return model, nil }}
 	cs.SetDashboardAllowedProjects([]string{"project-a"})
 	managed, err := cs.DashboardStoreForProjects([]string{"project-b"})
 	if err != nil {

@@ -247,7 +247,7 @@ func TestDashboardReadModelPostgresStreamingMatchesSortedRows(t *testing.T) {
 		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
 	}
 	want = want.withRegisteredProjects(nil)
-	got, err := cs.buildDashboardReadModel()
+	got, err := cs.buildDashboardReadModel(context.Background())
 	if err != nil {
 		t.Fatalf("buildDashboardReadModel: %v", err)
 	}

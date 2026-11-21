@@ -1,6 +1,7 @@
 package cloudstore
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -88,7 +89,7 @@ func promptListedOnDashboard(t *testing.T, transport *captureTransport, project,
 		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 	prompts, err := cs.ListRecentPrompts(project, "", 50)
 	if err != nil {
@@ -250,7 +251,7 @@ func TestHardDeletedObservationPropagatesFromLocalStoreToDashboard(t *testing.T)
 		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
 	}
 	cs := &CloudStore{
-		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+		dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) { return model, nil },
 	}
 	observations, err := cs.ListRecentObservations(project, "", 50)
 	if err != nil {

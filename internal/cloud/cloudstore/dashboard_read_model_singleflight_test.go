@@ -1,22 +1,26 @@
 package cloudstore
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 // blockingDashboardLoader returns a loader hook that reports each entry and
 // blocks until released, so tests can hold a build in flight deterministically.
-func blockingDashboardLoader(calls *atomic.Int32, entered chan<- int32, release <-chan struct{}, result func(call int32) (dashboardReadModel, error)) func() (dashboardReadModel, error) {
-	return func() (dashboardReadModel, error) {
+func blockingDashboardLoader(calls *atomic.Int32, entered chan<- int32, release <-chan struct{}, result func(call int32) (dashboardReadModel, error)) func(context.Context) (dashboardReadModel, error) {
+	return func(ctx context.Context) (dashboardReadModel, error) {
 		call := calls.Add(1)
 		entered <- call
 		select {
 		case <-release:
 			return result(call)
+		case <-ctx.Done():
+			return dashboardReadModel{}, ctx.Err()
 		case <-time.After(5 * time.Second):
 			return dashboardReadModel{}, errors.New("loader barrier timeout")
 		}
@@ -139,7 +143,7 @@ func TestDashboardReadModelInvalidationDuringSoleBuildForcesRebuild(t *testing.T
 	result := characterizationWait(t, results)
 	characterizationEqual(t, result.rows, old.projects, result.err)
 
-	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+	cs.dashboardReadModelLoad = func(context.Context) (dashboardReadModel, error) {
 		calls.Add(1)
 		return next, nil
 	}
@@ -189,7 +193,7 @@ func TestDashboardReadModelPanickingBuildReleasesWaiters(t *testing.T) {
 	var calls atomic.Int32
 	entered := make(chan int32, 2)
 	release := make(chan struct{})
-	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) {
+	cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) {
 		call := calls.Add(1)
 		if call == 1 {
 			entered <- call
@@ -218,4 +222,140 @@ func TestDashboardReadModelPanickingBuildReleasesWaiters(t *testing.T) {
 	}
 	rows, err := cs.ListProjects("")
 	characterizationEqual(t, rows, model.projects, err)
+}
+
+func TestDashboardReadModelCanceledReaderLeavesSharedBuildRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		startCanceledReaderFirst bool
+	}{
+		{name: "leader", startCanceledReaderFirst: true},
+		{name: "follower"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var calls atomic.Int32
+				entered := make(chan int32, 2)
+				release := make(chan struct{})
+				model := dashboardPrincipalReadModel()
+				cs := &CloudStore{dashboardReadModelLoad: blockingDashboardLoader(&calls, entered, release, func(int32) (dashboardReadModel, error) {
+					return model, nil
+				})}
+
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				canceled := make(chan characterizationResult, 1)
+				survivor := make(chan characterizationResult, 1)
+				read := func(ctx context.Context, project string, result chan<- characterizationResult) {
+					view, err := cs.DashboardStoreForProjectsContext(ctx, []string{project})
+					if err != nil {
+						result <- characterizationResult{err: err}
+						return
+					}
+					rows, err := view.ListProjects("")
+					result <- characterizationResult{rows: rows, err: err}
+				}
+				if tc.startCanceledReaderFirst {
+					go read(ctx, "project-a", canceled)
+					characterizationWait(t, entered)
+					go read(context.Background(), "project-b", survivor)
+				} else {
+					go read(context.Background(), "project-b", survivor)
+					characterizationWait(t, entered)
+					go read(ctx, "project-a", canceled)
+				}
+				synctest.Wait()
+				cancel()
+				synctest.Wait()
+				select {
+				case result := <-canceled:
+					if !errors.Is(result.err, context.Canceled) {
+						t.Errorf("canceled reader returned %v", result.err)
+					}
+				default:
+					t.Error("canceled reader remained attached to the shared build")
+				}
+				select {
+				case result := <-survivor:
+					t.Errorf("surviving reader returned before release: %+v", result)
+					close(release)
+					return
+				default:
+				}
+
+				close(release)
+				result := characterizationWait(t, survivor)
+				characterizationEqual(t, result.rows, model.projects[1:], result.err)
+				if got := calls.Load(); got != 1 {
+					t.Fatalf("loader ran %d times, want 1", got)
+				}
+			})
+		})
+	}
+}
+
+func TestDashboardReadModelTimedOutBuildCanBeRetried(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		model := dashboardPrincipalReadModel()
+		cs := &CloudStore{dashboardReadModelLoad: func(ctx context.Context) (dashboardReadModel, error) {
+			if calls.Add(1) == 1 {
+				<-ctx.Done()
+				return dashboardReadModel{}, ctx.Err()
+			}
+			return model, nil
+		}}
+
+		start := time.Now()
+		if _, err := cs.ListProjects(""); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("first read error = %v, want build deadline", err)
+		}
+		if elapsed := time.Since(start); elapsed != dashboardReadModelBuildTimeout {
+			t.Fatalf("shared build waited %s, want %s", elapsed, dashboardReadModelBuildTimeout)
+		}
+		synctest.Wait()
+		for range 2 {
+			rows, err := cs.ListProjects("")
+			characterizationEqual(t, rows, model.projects, err)
+		}
+		if got := calls.Load(); got != 2 {
+			t.Fatalf("loader ran %d times, want one failed load and one successful rebuild", got)
+		}
+	})
+}
+
+func TestDashboardReadModelLateSuccessAfterDeadlineIsNotCached(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		release := make(chan struct{})
+		model := dashboardPrincipalReadModel()
+		cs := &CloudStore{dashboardReadModelLoad: func(context.Context) (dashboardReadModel, error) {
+			if calls.Add(1) == 1 {
+				<-release
+			}
+			return model, nil
+		}}
+
+		read := make(chan error, 1)
+		go func() {
+			_, err := cs.ListProjects("")
+			read <- err
+		}()
+		select {
+		case err := <-read:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("stalled read error = %v, want build deadline", err)
+			}
+		case <-time.After(dashboardReadModelBuildTimeout + time.Second):
+			t.Error("deadline did not release reader while the loader was stalled")
+		}
+		close(release)
+		synctest.Wait()
+
+		rows, err := cs.ListProjects("")
+		characterizationEqual(t, rows, model.projects, err)
+		if got := calls.Load(); got != 2 {
+			t.Fatalf("loader ran %d times, want rebuild after a late success", got)
+		}
+	})
 }

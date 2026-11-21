@@ -1684,7 +1684,7 @@ func TestDashboardReadModelScopedFiltersAllowlistAcrossSurfaces(t *testing.T) {
 func TestDashboardQuerySurfacesReuseCachedReadModelUntilInvalidated(t *testing.T) {
 	loadCalls := 0
 	cs := &CloudStore{}
-	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+	cs.dashboardReadModelLoad = func(context.Context) (dashboardReadModel, error) {
 		loadCalls++
 		return dashboardReadModel{
 			projects:     []DashboardProjectRow{{Project: "proj-a", Chunks: 1, Sessions: 1, Observations: 1, Prompts: 1}},
@@ -1741,7 +1741,7 @@ func TestDashboardQuerySurfacesReuseCachedReadModelUntilInvalidated(t *testing.T
 func TestSetDashboardAllowedProjectsInvalidatesCachedReadModel(t *testing.T) {
 	loadCalls := 0
 	cs := &CloudStore{}
-	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+	cs.dashboardReadModelLoad = func(context.Context) (dashboardReadModel, error) {
 		loadCalls++
 		return dashboardReadModel{}, nil
 	}

@@ -75,12 +75,12 @@ func TestDashboardProjectRefreshSkipsUnchangedHistoryPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeProjectRefreshChunk(t, cs, "alpha", "alpha-2", "charlie")
-	expected, err := cs.buildDashboardReadModel()
+	expected, err := cs.buildDashboardReadModel(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	reads := countBetaHistoryReads(t, cs)
-	got, err := cs.loadDashboardNeutralReadModel()
+	got, err := cs.loadDashboardNeutralReadModel(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,12 +162,12 @@ func TestDashboardProjectRefreshMixedHistoryFallsBackPostgres(t *testing.T) {
 			} else {
 				writeProjectRefreshChunk(t, cs, "alpha", "alpha-2", "alice")
 			}
-			expected, err := cs.buildDashboardReadModel()
+			expected, err := cs.buildDashboardReadModel(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
 			reads := countBetaHistoryReads(t, cs)
-			got, err := cs.loadDashboardNeutralReadModel()
+			got, err := cs.loadDashboardNeutralReadModel(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -188,7 +188,7 @@ func TestDashboardProjectRefreshDeletesAndReplacementPostgres(t *testing.T) {
 	cs := openIsolatedCloudStore(t)
 	writeProjectRefreshChunk(t, cs, "alpha", "alpha-1", "alice")
 	writeProjectRefreshChunk(t, cs, "beta", "beta-1", "bob")
-	before, err := cs.loadDashboardNeutralReadModel()
+	before, err := cs.loadDashboardNeutralReadModel(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,11 +200,11 @@ func TestDashboardProjectRefreshDeletesAndReplacementPostgres(t *testing.T) {
 	if _, err := cs.InsertMutationBatch(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
-	expected, err := cs.buildDashboardReadModel()
+	expected, err := cs.buildDashboardReadModel(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := cs.loadDashboardNeutralReadModel()
+	got, err := cs.loadDashboardNeutralReadModel(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,6 +238,14 @@ func TestDashboardProjectInvalidationFencesDirtyUnion(t *testing.T) {
 	if cs.dashboardReadModel.projectPartitionSafe || cs.dashboardReadModelDirty != nil {
 		t.Fatal("hard invalidation retained partition baseline")
 	}
+	expiredCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	expired := &dashboardReadModelBuild{ctx: expiredCtx, gen: cs.dashboardReadModelGen, done: make(chan struct{}), model: base}
+	cs.dashboardReadModelBuild = expired
+	cs.finishDashboardReadModelBuild(expired)
+	if cs.dashboardReadModelOK || expired.err != context.DeadlineExceeded || expired.model.projects != nil {
+		t.Fatal("expired build was accepted at publication")
+	}
 	fresh := &dashboardReadModelBuild{gen: cs.dashboardReadModelGen, done: make(chan struct{}), model: base}
 	cs.finishDashboardReadModelBuild(fresh)
 	if !cs.dashboardReadModelOK || cs.dashboardReadModelDirty != nil {
@@ -248,7 +256,7 @@ func TestDashboardProjectInvalidationFencesDirtyUnion(t *testing.T) {
 func TestDashboardProjectRefreshFailureDoesNotCachePostgres(t *testing.T) {
 	cs := openIsolatedCloudStore(t)
 	writeProjectRefreshChunk(t, cs, "alpha", "alpha-1", "alice")
-	before, err := cs.loadDashboardNeutralReadModel()
+	before, err := cs.loadDashboardNeutralReadModel(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +265,7 @@ func TestDashboardProjectRefreshFailureDoesNotCachePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	wrapDashboardHistoryPayload(t, cs, "cloud_chunks", "refresh_payload(payload)")
-	if _, err := cs.loadDashboardNeutralReadModel(); err == nil {
+	if _, err := cs.loadDashboardNeutralReadModel(context.Background()); err == nil {
 		t.Fatal("failed refresh returned success")
 	}
 	if cs.dashboardReadModelOK || len(cs.dashboardReadModelDirty) != 1 {
@@ -269,11 +277,11 @@ func TestDashboardProjectRefreshFailureDoesNotCachePostgres(t *testing.T) {
 	if _, err := cs.db.Exec(`DROP VIEW cloud_chunks; ALTER TABLE cloud_chunks_history RENAME TO cloud_chunks`); err != nil {
 		t.Fatal(err)
 	}
-	expected, err := cs.buildDashboardReadModel()
+	expected, err := cs.buildDashboardReadModel(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := cs.loadDashboardNeutralReadModel()
+	got, err := cs.loadDashboardNeutralReadModel(context.Background())
 	if err != nil || !reflect.DeepEqual(got, expected) {
 		t.Fatalf("refresh retry got%+v err%v", got, err)
 	}
@@ -353,11 +361,11 @@ func TestDashboardProjectRefreshConcurrentInvalidationPostgres(t *testing.T) {
 					t.Fatalf("dirty union lost:%+v", cs.dashboardReadModelDirty)
 				}
 			}
-			expected, err := cs.buildDashboardReadModel()
+			expected, err := cs.buildDashboardReadModel(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := cs.loadDashboardNeutralReadModel()
+			got, err := cs.loadDashboardNeutralReadModel(context.Background())
 			if err != nil || !reflect.DeepEqual(got, expected) {
 				t.Fatalf("follow-up got%+v err%v", got, err)
 			}

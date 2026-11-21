@@ -907,14 +907,17 @@ func (m dashboardReadModel) filterPrompts(project, query string) []DashboardProm
 
 // loadDashboardReadModel applies legacy deployment policy at every read boundary.
 func (cs *CloudStore) loadDashboardReadModel() (dashboardReadModel, error) {
-	model, err := cs.loadDashboardNeutralReadModel()
+	model, err := cs.loadDashboardNeutralReadModel(context.Background())
 	if err != nil {
 		return dashboardReadModel{}, err
 	}
 	return model.scoped(cs.dashboardAllowedScopes), nil
 }
 
-func (cs *CloudStore) loadDashboardNeutralReadModel() (dashboardReadModel, error) {
+func (cs *CloudStore) loadDashboardNeutralReadModel(ctx context.Context) (dashboardReadModel, error) {
+	if err := ctx.Err(); err != nil {
+		return dashboardReadModel{}, err
+	}
 	if cs == nil {
 		return dashboardReadModel{}, fmt.Errorf("cloudstore: not initialized")
 	}
@@ -938,10 +941,10 @@ func (cs *CloudStore) loadDashboardNeutralReadModel() (dashboardReadModel, error
 	if build := cs.dashboardReadModelBuild; build != nil {
 		build.waiters.Add(1)
 		cs.dashboardReadModelMu.Unlock()
-		<-build.done
-		return build.model, build.err
+		return build.wait(ctx)
 	}
-	build := &dashboardReadModelBuild{gen: cs.dashboardReadModelGen, done: make(chan struct{})}
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), dashboardReadModelBuildTimeout)
+	build := &dashboardReadModelBuild{ctx: buildCtx, gen: cs.dashboardReadModelGen, done: make(chan struct{})}
 	cs.dashboardReadModelBuild = build
 	base := cs.dashboardReadModel
 	projects := make([]string, 0, len(cs.dashboardReadModelDirty))
@@ -950,25 +953,30 @@ func (cs *CloudStore) loadDashboardNeutralReadModel() (dashboardReadModel, error
 	}
 	cs.dashboardReadModelMu.Unlock()
 
-	finished := false
+	go func() {
+		defer cancelBuild()
+		cs.runDashboardReadModelBuild(build, base, projects)
+	}()
+	return build.wait(ctx)
+}
+
+// A request owns only its wait. The shared build can still satisfy other readers
+// after the request that started it disconnects.
+const dashboardReadModelBuildTimeout = 30 * time.Second
+
+func (cs *CloudStore) runDashboardReadModelBuild(build *dashboardReadModelBuild, base dashboardReadModel, projects []string) {
+	ctx := build.ctx
 	defer func() {
-		if !finished {
-			// The loader panicked: release waiters with an error before the panic unwinds.
-			build.err = errDashboardReadModelBuildAborted
-			cs.finishDashboardReadModelBuild(build)
+		if cause := recover(); cause != nil {
+			build.err = fmt.Errorf("%w: %v", errDashboardReadModelBuildAborted, cause)
 		}
+		cs.finishDashboardReadModelBuild(build)
 	}()
 	if cs.dashboardReadModelLoad != nil {
-		build.model, build.err = cs.dashboardReadModelLoad()
+		build.model, build.err = cs.dashboardReadModelLoad(ctx)
 	} else {
-		build.model, build.err = cs.refreshDashboardProjects(base, projects)
+		build.model, build.err = cs.refreshDashboardProjects(ctx, base, projects)
 	}
-	if build.err != nil {
-		build.model = dashboardReadModel{}
-	}
-	finished = true
-	cs.finishDashboardReadModelBuild(build)
-	return build.model, build.err
 }
 
 var errDashboardReadModelBuildAborted = errors.New("cloudstore: dashboard read model build aborted")
@@ -976,6 +984,7 @@ var errDashboardReadModelBuildAborted = errors.New("cloudstore: dashboard read m
 // dashboardReadModelBuild is one in-flight read-model build shared by every
 // cache miss that arrives while it runs.
 type dashboardReadModelBuild struct {
+	ctx     context.Context
 	gen     uint64
 	done    chan struct{}
 	waiters atomic.Int32
@@ -983,11 +992,33 @@ type dashboardReadModelBuild struct {
 	err     error
 }
 
+func (build *dashboardReadModelBuild) wait(ctx context.Context) (dashboardReadModel, error) {
+	select {
+	case <-ctx.Done():
+		return dashboardReadModel{}, ctx.Err()
+	case <-build.ctx.Done():
+		// Completion closes done before canceling the build context.
+		select {
+		case <-build.done:
+		default:
+			return dashboardReadModel{}, build.ctx.Err()
+		}
+	case <-build.done:
+	}
+	return build.model, build.err
+}
+
 // finishDashboardReadModelBuild publishes a successful build only when no
 // invalidation happened since it started, then releases its waiters. Errors
 // are never cached.
 func (cs *CloudStore) finishDashboardReadModelBuild(build *dashboardReadModelBuild) {
 	cs.dashboardReadModelMu.Lock()
+	if build.ctx != nil && build.ctx.Err() != nil {
+		build.err = build.ctx.Err()
+	}
+	if build.err != nil {
+		build.model = dashboardReadModel{}
+	}
 	if cs.dashboardReadModelBuild == build {
 		cs.dashboardReadModelBuild = nil
 	}
@@ -1000,18 +1031,18 @@ func (cs *CloudStore) finishDashboardReadModelBuild(build *dashboardReadModelBui
 	close(build.done)
 }
 
-func (cs *CloudStore) buildDashboardReadModel() (dashboardReadModel, error) {
+func (cs *CloudStore) buildDashboardReadModel(ctx context.Context) (dashboardReadModel, error) {
 	// Rows are streamed in canonical fold order so only one decoded chunk
 	// payload is alive at a time; materializing every chunk exhausted memory.
 	fold := newDashboardReadModelFold()
-	if err := cs.streamDashboardChunkRows(fold.applyChunk); err != nil {
+	if err := cs.streamDashboardChunkRowsForProject(ctx, "", fold.applyChunk); err != nil {
 		return dashboardReadModel{}, err
 	}
-	if err := cs.streamDashboardMutationRows(fold.applyMutation); err != nil {
+	if err := cs.streamDashboardMutationRowsForProject(ctx, "", fold.applyMutation); err != nil {
 		return dashboardReadModel{}, err
 	}
 	model := fold.finish()
-	controls, err := cs.ListProjectSyncControls()
+	controls, err := cs.listProjectSyncControls(ctx)
 	if err != nil {
 		return dashboardReadModel{}, err
 	}
@@ -1185,7 +1216,12 @@ type DashboardScopedStore struct {
 // DashboardStoreForProjects scopes the neutral cache by managed grants only.
 // An empty grant set intentionally produces an empty view, never wildcard access.
 func (cs *CloudStore) DashboardStoreForProjects(projects []string) (*DashboardScopedStore, error) {
-	model, err := cs.loadDashboardNeutralReadModel()
+	return cs.DashboardStoreForProjectsContext(context.Background(), projects)
+}
+
+// DashboardStoreForProjectsContext lets a request cancel its wait for the shared dashboard read model.
+func (cs *CloudStore) DashboardStoreForProjectsContext(ctx context.Context, projects []string) (*DashboardScopedStore, error) {
+	model, err := cs.loadDashboardNeutralReadModel(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1534,20 +1570,7 @@ func (s *DashboardScopedStore) ListDistinctTypes() ([]string, error) {
 }
 
 func (s *DashboardScopedStore) SystemHealth() (DashboardSystemHealth, error) {
-	health, err := s.base.SystemHealth()
-	if err != nil {
-		return DashboardSystemHealth{}, err
-	}
-	health.Projects = len(s.model.projects)
-	health.Contributors = len(s.model.contributors)
-	health.Chunks = s.model.admin.Chunks
-	health.Sessions, health.Observations, health.Prompts = 0, 0, 0
-	for _, detail := range s.model.projectDetails {
-		health.Sessions += len(detail.Sessions)
-		health.Observations += len(detail.Observations)
-		health.Prompts += len(detail.Prompts)
-	}
-	return health, nil
+	return s.base.dashboardSystemHealth(s.model), nil
 }
 
 func (s *DashboardScopedStore) ListProjectSyncControls() ([]ProjectSyncControl, error) {
@@ -1632,13 +1655,9 @@ const dashboardChunkStreamQuery = `SELECT chunk_id, project_name, created_by, cr
 const dashboardMutationStreamQuery = `SELECT seq, project, entity, entity_key, op, payload, occurred_at FROM cloud_mutations
 	ORDER BY seq ASC`
 
-// streamDashboardChunkRows decodes cloud_chunks one row at a time in canonical
+// streamDashboardChunkRowsForProject decodes cloud_chunks one row at a time in canonical
 // fold order. The decoded payload is only valid for the duration of apply.
-func (cs *CloudStore) streamDashboardChunkRows(apply func(dashboardChunkRow) error) error {
-	return cs.streamDashboardChunkRowsForProject("", apply)
-}
-
-func (cs *CloudStore) streamDashboardChunkRowsForProject(project string, apply func(dashboardChunkRow) error) error {
+func (cs *CloudStore) streamDashboardChunkRowsForProject(ctx context.Context, project string, apply func(dashboardChunkRow) error) error {
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
 	}
@@ -1649,7 +1668,7 @@ func (cs *CloudStore) streamDashboardChunkRowsForProject(project string, apply f
 		query = strings.Replace(query, "\n\tORDER BY", "\n\tWHERE project_name = $1\n\tORDER BY", 1)
 		args = append(args, project)
 	}
-	rows, err := cs.db.QueryContext(context.Background(), query, args...)
+	rows, err := cs.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("cloudstore: dashboard query chunks: %w", err)
 	}
@@ -1681,13 +1700,9 @@ func (cs *CloudStore) streamDashboardChunkRowsForProject(project string, apply f
 	return nil
 }
 
-// streamDashboardMutationRows reads cloud_mutations one row at a time in seq
+// streamDashboardMutationRowsForProject reads cloud_mutations one row at a time in seq
 // order. row.payload aliases driver memory and is only valid during apply.
-func (cs *CloudStore) streamDashboardMutationRows(apply func(dashboardMutationRow) error) error {
-	return cs.streamDashboardMutationRowsForProject("", apply)
-}
-
-func (cs *CloudStore) streamDashboardMutationRowsForProject(project string, apply func(dashboardMutationRow) error) error {
+func (cs *CloudStore) streamDashboardMutationRowsForProject(ctx context.Context, project string, apply func(dashboardMutationRow) error) error {
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
 	}
@@ -1698,7 +1713,7 @@ func (cs *CloudStore) streamDashboardMutationRowsForProject(project string, appl
 		query = strings.Replace(query, "\n\tORDER BY", "\n\tWHERE project = $1\n\tORDER BY", 1)
 		args = append(args, project)
 	}
-	rows, err := cs.db.QueryContext(context.Background(), query, args...)
+	rows, err := cs.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("cloudstore: dashboard query mutations: %w", err)
 	}
@@ -1740,6 +1755,10 @@ func (cs *CloudStore) SystemHealth() (DashboardSystemHealth, error) {
 		return DashboardSystemHealth{}, err
 	}
 
+	return cs.dashboardSystemHealth(model), nil
+}
+
+func (cs *CloudStore) dashboardSystemHealth(model dashboardReadModel) DashboardSystemHealth {
 	totalSessions := 0
 	totalObservations := 0
 	totalPrompts := 0
@@ -1767,7 +1786,7 @@ func (cs *CloudStore) SystemHealth() (DashboardSystemHealth, error) {
 		Observations: totalObservations,
 		Prompts:      totalPrompts,
 		Chunks:       model.admin.Chunks,
-	}, nil
+	}
 }
 
 // ─── Batch 6: Connected Navigation Methods ───────────────────────────────────

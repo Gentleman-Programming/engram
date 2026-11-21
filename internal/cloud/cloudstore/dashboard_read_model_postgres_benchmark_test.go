@@ -112,7 +112,7 @@ func dashboardPGOpen(tb testing.TB, axis string, history int) *dashboardPGFixtur
 	default:
 		tb.Fatalf("unknown history axis %q", axis)
 	}
-	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+	cs.dashboardReadModelLoad = func(context.Context) (dashboardReadModel, error) {
 		f.builds.Add(1)
 		if f.entered != nil {
 			f.entered <- struct{}{}
@@ -123,7 +123,7 @@ func dashboardPGOpen(tb testing.TB, axis string, history int) *dashboardPGFixtur
 			}
 		}
 		start := time.Now()
-		model, err := cs.buildDashboardReadModel()
+		model, err := cs.buildDashboardReadModel(context.Background())
 		f.buildNS.Add(time.Since(start).Nanoseconds())
 		return model, err
 	}

@@ -78,7 +78,7 @@ type CloudServer struct {
 	principalState      principalStateStore
 	adminIdentity       AdminIdentityStore
 	managedHasher       *cloudauth.ManagedTokenHasher
-	dashboardScope      func([]string) (dashboard.DashboardStore, error)
+	dashboardScope      func(context.Context, []string) (dashboard.DashboardStore, error)
 	dashboardSessionKey []byte
 	dashboardAdmin      string
 	port                int
@@ -391,9 +391,9 @@ func (s *CloudServer) dashboardStoreForRequest(store dashboard.DashboardStore) f
 		}
 		var view dashboard.DashboardStore
 		if s.dashboardScope != nil {
-			view, err = s.dashboardScope(projects)
+			view, err = s.dashboardScope(r.Context(), projects)
 		} else if cloudStore, ok := s.store.(*cloudstore.CloudStore); ok {
-			view, err = cloudStore.DashboardStoreForProjects(projects)
+			view, err = cloudStore.DashboardStoreForProjectsContext(r.Context(), projects)
 		} else {
 			return nil, errors.New("managed dashboard scoped store is not configured")
 		}
