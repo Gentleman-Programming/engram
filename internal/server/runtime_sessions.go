@@ -12,15 +12,27 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
+type expectedRuntimeSessionID string
+
+func (id *expectedRuntimeSessionID) UnmarshalJSON(data []byte) error {
+	var value string
+	if *id != "" || json.Unmarshal(data, &value) != nil || strings.TrimSpace(value) == "" {
+		return errors.New("expected_effective_id must be a single nonblank session ID")
+	}
+	*id = expectedRuntimeSessionID(value)
+	return nil
+}
+
 // Runtime operations never register or repair an identity. Both the root and
 // selected continuation must already belong to the supplied runtime context.
 func (s *Server) handleRuntimeSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID            string `json:"id"`
-		Project       string `json:"project"`
-		Directory     string `json:"directory"`
-		OwnershipMode string `json:"ownership_mode"`
-		Summary       string `json:"summary"`
+		ID                  string                   `json:"id"`
+		Project             string                   `json:"project"`
+		Directory           string                   `json:"directory"`
+		OwnershipMode       string                   `json:"ownership_mode"`
+		Summary             string                   `json:"summary"`
+		ExpectedEffectiveID expectedRuntimeSessionID `json:"expected_effective_id"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -35,10 +47,17 @@ func (s *Server) handleRuntimeSession(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "invalid ownership_mode")
 		return
 	}
+	end := r.URL.Path == "/runtime-sessions/end"
+	if !end && body.ExpectedEffectiveID != "" {
+		jsonError(w, http.StatusBadRequest, "expected_effective_id is only accepted when ending a runtime session")
+		return
+	}
 	directory := projectpkg.RuntimeWorktreeDirectory(body.Directory)
 	var id string
 	var err error
-	if r.URL.Path == "/runtime-sessions/end" {
+	if body.ExpectedEffectiveID != "" {
+		id, err = s.store.EndRuntimeSessionIfCurrent(body.ID, body.Project, directory, body.OwnershipMode, body.Summary, string(body.ExpectedEffectiveID))
+	} else if end {
 		id, err = s.store.EndRuntimeSession(body.ID, body.Project, directory, body.OwnershipMode, body.Summary)
 	} else {
 		id, err = s.store.ResolveRuntimeSessionWithOwnershipMode(body.ID, body.Project, directory, body.OwnershipMode)
@@ -48,14 +67,14 @@ func (s *Server) handleRuntimeSession(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, sql.ErrNoRows) {
 			status = http.StatusNotFound
 		}
-		if errors.Is(err, store.ErrRuntimeSessionScopeConflict) {
+		if errors.Is(err, store.ErrRuntimeSessionScopeConflict) || errors.Is(err, store.ErrRuntimeSessionEffectiveIDMismatch) {
 			status = http.StatusConflict
 		}
 		jsonError(w, status, err.Error())
 		return
 	}
 	ack := map[string]string{"id": id, "status": "resolved"}
-	if r.URL.Path == "/runtime-sessions/end" {
+	if end {
 		ack["status"] = "ended"
 		s.notifyWrite()
 	}
