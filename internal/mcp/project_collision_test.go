@@ -121,6 +121,33 @@ func TestMCPImplicitGitProjectCollisionAdvisory(t *testing.T) {
 				empty["content"] = "There is no learning section in this input."
 				call(tool, second, empty, false)
 			}
+			var rejectWrite string
+			switch tc.name {
+			case "mem_save":
+				rejectWrite = `CREATE TRIGGER reject_fixture_collision BEFORE INSERT ON observations
+					WHEN NEW.title = 'rejected-collision'
+					BEGIN SELECT RAISE(ABORT, 'fixture rejected collision'); END`
+			case "mem_session_start":
+				rejectWrite = `CREATE TRIGGER reject_fixture_collision BEFORE INSERT ON sessions
+					WHEN NEW.id = 'rejected-collision'
+					BEGIN SELECT RAISE(ABORT, 'fixture rejected collision'); END`
+			}
+			if rejectWrite != "" {
+				if _, err := db.DB().Exec(rejectWrite); err != nil {
+					t.Fatal(err)
+				}
+				t.Chdir(collisionDirectory)
+				result, err := tool(context.Background(), mcppkg.CallToolRequest{
+					Params: mcppkg.CallToolParams{Arguments: args("rejected-collision")},
+				})
+				if err != nil || result == nil || !result.IsError {
+					t.Fatalf("fixture write unexpectedly succeeded: result=%+v error=%v", result, err)
+				}
+				if message := callResultText(t, result); !strings.Contains(message, "fixture rejected collision") ||
+					strings.Contains(message, "another Git checkout") {
+					t.Fatalf("expected the fixture failure without an advisory, got %q", message)
+				}
+			}
 			warning := call(tool, collisionDirectory, args("collision"), true)
 			if tc.name == "mem_save" && !strings.Contains(warning, "auto-promoted child repository:") {
 				t.Fatalf("collision advisory replaced the project discovery warning: %q", warning)
