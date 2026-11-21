@@ -1308,6 +1308,10 @@ The Git binding is private to each clone and shared by that clone's linked workt
 
 Use `engram init [project_name] [--force]` to write `.engram/config.json` in the current directory. When `project_name` is omitted, Engram uses the current directory basename. `--force` replaces an existing config; without it, init stops and tells you that the config already exists.
 
+Different Git remotes can end in the same repository name. For example, `client-a/customer-solution.git` and `client-b/customer-solution.git` can both resolve to `customer-solution`. Before capturing memories, run `engram init client-a` in the first repository and `engram init client-b` in the second to give them distinct project names.
+
+If the repositories already share a project, the new names apply when Engram resolves the project from those repositories in the future. Existing sessions and observations stay under the shared name. Selective recovery requires evidence tying each record to its original repository.
+
 If the resolving process cannot read `.engram/config.json`, the diagnostic starts
 with `cannot read .engram/config.json` and includes the filesystem error. Invalid
 JSON or project names retain `invalid .engram/config.json`. Both failures stop
