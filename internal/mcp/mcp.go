@@ -1828,6 +1828,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		// Update detRes to reflect normalized project for envelope accuracy
 		detRes.Project = project
+		addImplicitGitProjectAdvisory(s, &detRes)
 		return respondWithProject(detRes, msg, extra), nil
 	}
 }
@@ -2122,6 +2123,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 
 		detRes.Project = project
 		msg := fmt.Sprintf("Prompt saved: %q", truncate(content, 80)) + truncationWarning(truncation)
+		addImplicitGitProjectAdvisory(s, &detRes)
 		return respondWithProject(detRes, msg, map[string]any{"truncation": truncation}), nil
 	}
 }
@@ -2632,6 +2634,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 				extra["review_after"] = *obs.ReviewAfter
 			}
 		}
+		addImplicitGitProjectAdvisory(s, &detRes)
 		return respondWithProject(detRes, msg, extra), nil
 	}
 }
@@ -2652,6 +2655,11 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		activity.RecordToolCall(defaultSessionID(project))
 		resolvedDirectory = runtimeSessionDirectory(resolvedDirectory)
 
+		var newImplicitSession bool
+		if detRes.HasImplicitGitProject() {
+			_, err := s.GetSession(id)
+			newImplicitSession = errors.Is(err, sql.ErrNoRows)
+		}
 		if _, err := s.RegisterSessionWithProjectProvenance(id, project, resolvedDirectory, store.SessionOwnershipShared, false, false, captureProjectEvidence(s, detRes, id, "", cfg.DefaultProject), nil); err != nil {
 			if errors.Is(err, store.ErrSessionAlreadyEnded) {
 				result := errorWithMeta(
@@ -2666,6 +2674,9 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		}
 
 		detRes.Project = project
+		if newImplicitSession {
+			addImplicitGitProjectAdvisory(s, &detRes)
+		}
 		return respondWithProject(detRes, fmt.Sprintf("Session %q started for project %q", id, project), nil), nil
 	}
 }
@@ -2757,6 +2768,9 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		detRes.Project = project
+		if result.Saved > 0 {
+			addImplicitGitProjectAdvisory(s, &detRes)
+		}
 		return respondWithProject(detRes, fmt.Sprintf(
 			"Passive capture complete: extracted=%d saved=%d duplicates=%d",
 			result.Extracted, result.Saved, result.Duplicates,
@@ -3637,6 +3651,19 @@ func firstProjectValue(explicit, defaultProject string) string {
 		return value
 	}
 	return ""
+}
+
+// addImplicitGitProjectAdvisory preserves other resolver warnings and runs only
+// after a capture or new session succeeds, so a failure cannot consume it.
+func addImplicitGitProjectAdvisory(s *store.Store, res *projectpkg.DetectionResult) {
+	advisory := res.ImplicitGitProjectCollisionWarning(s.DataDir())
+	if advisory == "" {
+		return
+	}
+	if res.Warning != "" {
+		res.Warning += "\n"
+	}
+	res.Warning += advisory
 }
 
 // respondWithProject wraps a tool result by prepending the project envelope
