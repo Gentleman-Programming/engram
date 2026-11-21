@@ -1311,7 +1311,7 @@ Use `engram init [project_name] [--force]` to write `.engram/config.json` in the
 
 Different Git remotes can end in the same repository name. For example, `client-a/customer-solution.git` and `client-b/customer-solution.git` can both resolve to `customer-solution`. Before capturing memories, run `engram init client-a` from the first repository's root and `engram init client-b` from the second repository's root to give them distinct project names.
 
-When the CLI observes independent Git checkouts selecting the same project implicitly in one local store, the later checkout receives a warning once. The save completes under the current name. Linked worktrees share the checkout identity and explicit project names skip this advisory.
+When CLI or MCP capture first observes independent Git checkouts selecting the same project implicitly in one local store, the later checkout receives a warning once. The capture completes under the current name. MCP can also return the warning when a new session selects its project implicitly. Linked worktrees share the checkout identity. Explicit project names and operations on an existing session keep their current behavior.
 
 If the repositories already share a project, the new names apply when Engram resolves the project from those repositories in the future. Existing sessions and observations stay under the shared name. Selective recovery requires evidence tying each record to its original repository.
 

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,11 +12,24 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/identityfile"
 )
 
+// HasImplicitGitProject reports whether the selection has a private Git binding.
+func (r DetectionResult) HasImplicitGitProject() bool {
+	return r.repositoryID != ""
+}
+
+// ImplicitGitProjectCollisionWarning shares the local advisory across capture clients.
+func (r DetectionResult) ImplicitGitProjectCollisionWarning(dataDir string) string {
+	if !r.FirstImplicitGitProjectCollision(dataDir) {
+		return ""
+	}
+	return fmt.Sprintf("Warning: project %q is also selected automatically in another Git checkout. Run engram init <distinct-name> to separate future captures.", r.Project)
+}
+
 // FirstImplicitGitProjectCollision records a local implicit capture attempt and
 // reports the first conflicting use by this repository. The advisory neither
 // reserves a project name nor changes the resolved owner of a capture.
 func (r DetectionResult) FirstImplicitGitProjectCollision(dataDir string) bool {
-	if r.repositoryID == "" || r.Project == "" || dataDir == "" {
+	if !r.HasImplicitGitProject() || r.Project == "" || dataDir == "" {
 		return false
 	}
 	key := sha256.Sum256([]byte(r.Project))
