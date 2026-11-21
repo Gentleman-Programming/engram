@@ -134,4 +134,17 @@ func TestCLISaveWarnsOnceBeforeImplicitProjectCollision(t *testing.T) {
 			t.Fatalf("project %q count=%d want=%d err=%v", project, count, want, err)
 		}
 	}
+
+	t.Run("unavailable advisory metadata still permits save", func(t *testing.T) {
+		cfg := testConfig(t)
+		if err := os.WriteFile(filepath.Join(cfg.DataDir, "git-project-advisories-v1"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		withCwd(t, first)
+		withArgs(t, "engram", "save", "advisory unavailable", "fixture content")
+		stdout, stderr := captureOutput(t, func() { cmdSave(cfg) })
+		if !strings.Contains(stdout, "Memory saved:") || stderr != "" {
+			t.Fatalf("expected an ordinary save, got stdout=%q stderr=%q", stdout, stderr)
+		}
+	})
 }
