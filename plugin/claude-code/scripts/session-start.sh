@@ -42,11 +42,10 @@ if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
 fi
 fi
 
-PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Create session. Claude keeps the session ID on --resume, so resume=true lets
 # the server register a live continuation when the original session already ended.
-PROJECT=$(engram_register_claude_session "$SESSION_ID" "$PROJECT" "$CWD")
+PROJECT=$(engram_resolve_and_register_claude_session "$SESSION_ID" "$CWD")
 
 # Emit the confirmed effective identity before optional history, in slim and
 # full modes. Preserve managed-local transport instead of exporting its URL as

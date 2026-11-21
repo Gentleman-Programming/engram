@@ -146,9 +146,15 @@ func TestHookExternalProjectRouting(t *testing.T) {
 					scope := map[string]any{"id": "host", "directory": cwd, "project": project}
 					switch action {
 					case "claude-pre-tool-use":
+						if !external {
+							scope["registration_project_source"] = "dir_basename"
+						}
 						scope["ownership_mode"] = "project_owned"
 						add("POST", "/sessions", scope)
 					case "codex-register":
+						if !external {
+							scope["registration_project_source"] = "dir_basename"
+						}
 						scope["resume"] = true
 						add("POST", "/sessions", scope)
 					case "codex-session-end":

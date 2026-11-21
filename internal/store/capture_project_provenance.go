@@ -12,9 +12,19 @@ import (
 // ProjectProvenance is local capture evidence, never an ownership or enrollment grant.
 // A nil value means the caller did not provide evidence.
 type ProjectProvenance struct {
-	Source     string `json:"source"`
-	Directory  string `json:"directory,omitempty"`
-	RawProject string `json:"raw_project,omitempty"`
+	Source               string `json:"source"`
+	Directory            string `json:"directory,omitempty"`
+	RawProject           string `json:"raw_project,omitempty"`
+	rootRegistrationOnly bool
+}
+
+// DetectedRootProjectProvenance records a hook's local resolver source only
+// when registration creates the root session.
+func DetectedRootProjectProvenance(source string) *ProjectProvenance {
+	if !projectpkg.IsCanonicalProjectSource(source) {
+		return nil
+	}
+	return &ProjectProvenance{Source: source, rootRegistrationOnly: true}
 }
 
 var ErrInvalidProjectProvenance = errors.New("invalid project_provenance")

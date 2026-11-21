@@ -21,7 +21,7 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 		t.Run(agent+" uses configured project instead of git-derived name", func(t *testing.T) {
 			cwd := lifecycleProjectDirectory(t)
 			var requestedCWD string
-			var sessionProject string
+			var sessionProject, sessionSource string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/health":
@@ -32,11 +32,12 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 				case "/sessions":
 					var payload struct {
 						Project string `json:"project"`
+						Source  string `json:"registration_project_source"`
 					}
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Errorf("decode session payload: %v", err)
 					}
-					sessionProject = payload.Project
+					sessionProject, sessionSource = payload.Project, payload.Source
 					w.WriteHeader(http.StatusNoContent)
 				case "/context":
 					_, _ = w.Write([]byte(`{"context":""}`))
@@ -56,6 +57,9 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 			}
 			if sessionProject != "configured-project" {
 				t.Fatalf("session project = %q, want configured project instead of git-derived", sessionProject)
+			}
+			if sessionSource != "config" {
+				t.Fatalf("session source = %q, want config", sessionSource)
 			}
 		})
 
@@ -100,7 +104,7 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 
 		t.Run(agent+" accepts a process override from canonical resolution", func(t *testing.T) {
 			cwd := lifecycleProjectDirectory(t)
-			var sessionProject string
+			var sessionProject, sessionSource string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/health":
@@ -110,11 +114,12 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 				case "/sessions":
 					var payload struct {
 						Project string `json:"project"`
+						Source  string `json:"registration_project_source"`
 					}
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Errorf("decode session payload: %v", err)
 					}
-					sessionProject = payload.Project
+					sessionProject, sessionSource = payload.Project, payload.Source
 					w.WriteHeader(http.StatusNoContent)
 				default:
 					w.WriteHeader(http.StatusNotFound)
@@ -125,6 +130,9 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 			runLifecycleSessionStart(t, bashPath, agent, server.URL, binary, `{"session_id":"override-session","cwd":`+jsonQuote(cwd)+`}`)
 			if sessionProject != "override-project" {
 				t.Fatalf("session project = %q; want process override", sessionProject)
+			}
+			if sessionSource != "process_override" {
+				t.Fatalf("session source = %q, want process_override", sessionSource)
 			}
 		})
 	}

@@ -216,3 +216,58 @@ func TestCaptureProjectProvenanceInvalidSessionDoesNotRegister(t *testing.T) {
 		t.Fatal("invalid metadata registered a session")
 	}
 }
+
+func TestCaptureDetectedProjectSourceOnlyOnFirstRoot(t *testing.T) {
+	st := newServerTestStore(t)
+	handler := New(st, 0).Handler()
+	dir := t.TempDir()
+	post := func(id string, source any, explicit any) string {
+		t.Helper()
+		payload, err := json.Marshal(map[string]any{
+			"id": id, "project": "example", "directory": dir, "resume": true,
+			"registration_project_source": source, "project_provenance": explicit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest("POST", "/sessions", strings.NewReader(string(payload))))
+		if rec.Code != 201 {
+			t.Fatalf("POST = %d: %s", rec.Code, rec.Body.String())
+		}
+		var response struct{ ID string }
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response.ID
+	}
+	check := func(id, want string) {
+		t.Helper()
+		p, err := st.CaptureProjectProvenance("session", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want == "" {
+			if p != nil {
+				t.Fatalf("session %q received advisory provenance %+v", id, p)
+			}
+			return
+		}
+		if p == nil || p.Source != want || p.Directory != "" || p.RawProject != "" {
+			t.Fatalf("session %q provenance=%+v, want only source %q", id, p, want)
+		}
+	}
+	check(post("root", "git_remote", nil), "git_remote")
+	check(post("root", "config", nil), "git_remote")
+	if err := st.EndSession("root", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	continuation := post("root", "config", nil)
+	if continuation != "root:resume:2" {
+		t.Fatalf("resumed session = %q, want root:resume:2", continuation)
+	}
+	check(continuation, "")
+	check(post("invalid-type", 42, nil), "")
+	check(post("invalid-value", "explicit_override", nil), "")
+	check(post("explicit", "git_remote", map[string]string{"source": "explicit_override"}), "explicit_override")
+}

@@ -119,7 +119,7 @@ engram_curl() {
 # Lifecycle hooks register through the server; it owns continuation allocation.
 # Return the authoritative project for the hook's subsequent context request.
 engram_register_claude_session() {
-  local id="$1" project="$2" dir="$3"
+  local id="$1" project="$2" dir="$3" source="${4:-}"
   local mode="project_owned" encoded_id session="" persisted_project=""
   local response code lookup_status attempt
   if [ -z "$id" ]; then
@@ -160,6 +160,7 @@ engram_register_claude_session() {
   # Project resolution may change while Claude keeps the same host ID. Use
   # only an exact root response; never move its owner to match today's cwd.
   if [ -n "$session" ]; then
+    source=""
     persisted_project=$(printf '%s' "$session" | jq -ej --arg id "$id" '
       select(.id == $id) | .project |
       select(type == "string" and (gsub("^[[:space:]]+|[[:space:]]+$"; "") | length) > 0)
@@ -169,10 +170,12 @@ engram_register_claude_session() {
       mode="shared"
     fi
   fi
+  [ "${ENGRAM_MANAGED_LOCAL:-0}" = 1 ] || source=""
   if ! engram_curl -sf "${ENGRAM_URL}/sessions" \
     -X POST -H "Content-Type: application/json" \
-    -d "$(jq -n --arg id "$id" --arg project "$project" --arg dir "$dir" --arg mode "$mode" \
-      '{id: $id, project: $project, directory: $dir, ownership_mode: $mode, resume: true}')" >/dev/null 2>/dev/null; then
+    -d "$(jq -n --arg id "$id" --arg project "$project" --arg dir "$dir" --arg mode "$mode" --arg source "$source" \
+      '{id: $id, project: $project, directory: $dir, ownership_mode: $mode, resume: true}
+       + (if $source != "" then {registration_project_source: $source} else {} end)')" >/dev/null 2>/dev/null; then
     # Never log the response body, session ID, project, cwd or credentials.
     printf '%s\n' "warning: Engram session registration failed: server rejected the request or could not be reached; memory writes may be denied. Check the Engram server and retry SessionStart." >&2
   fi
@@ -186,10 +189,17 @@ engram_health_matches_instance() {
   printf '%s' "$response" | jq -e --arg expected "$expected" '.instance_id? == $expected' >/dev/null 2>&1
 }
 
+engram_resolve_and_register_claude_session() {
+  local id="$1" dir="$2" selection
+  selection=$(resolve_project "$dir" registration) || selection=""
+  # The unit separator avoids Windows jq newline conversion.
+  engram_register_claude_session "$id" "${selection%$'\037'*}" "$dir" "${selection##*$'\037'}"
+}
+
 # Resolve the project through the server, which owns project policy.
 # An unavailable, malformed, empty, or ambiguous response is not a project.
 resolve_project() {
-  local dir="$1"
+  local dir="$1" format="${2:-project}"
   [ -n "$dir" ] || return 1
 
   local encoded_cwd response
@@ -200,14 +210,14 @@ resolve_project() {
   }
   [ -n "$response" ] || return 1
   # Let Bash emit the LF: native Windows jq uses CRLF, and jq 1.6 has no -b.
-  printf '%s' "$response" | jq -sej '
+  printf '%s' "$response" | jq -sej --arg format "$format" '
     if length == 1 then .[0] else error("expected one project response") end |
     if (.project | type) == "string"
       and (.project | gsub("^[[:space:]]+|[[:space:]]+$"; "") | length) > 0
       and (.project_source | type) == "string"
       and (.project_source as $source | ["config", "git_remote", "git_root", "git_child", "dir_basename", "process_override"] | index($source) != null)
       and (has("error_hint") | not)
-    then .project
+    then .project, (if $format == "registration" then "\u001f", .project_source else empty end)
     else error("canonical project resolution failed")
     end
   ' 2>/dev/null || {

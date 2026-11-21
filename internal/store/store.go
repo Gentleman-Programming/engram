@@ -3858,7 +3858,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 		if err := s.startSessionTx(tx, id, registrationProject, registrationDirectory, registrationMode); err != nil {
 			return err
 		}
-		if !found {
+		if !found && (provenance == nil || !provenance.rootRegistrationOnly || id == root) {
 			if err := captureProjectProvenanceTx(tx, "session", id, provenance); err != nil {
 				return err
 			}

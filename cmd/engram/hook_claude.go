@@ -235,14 +235,14 @@ func confirmHookSessionWithin(id, cwd string, projectOwned bool, platform string
 		}
 		return continuation, nil
 	}
-	project := session.Project
+	selection := hookProjectSelection{name: session.Project}
 	if !known {
 		var resolutionErr error
-		if project, resolutionErr = hookResolveCwdProject(ctx, client, base, cwd); resolutionErr != nil {
+		if selection, resolutionErr = hookResolveCwdProject(ctx, client, base, cwd); resolutionErr != nil {
 			return "", resolutionErr
 		}
 	}
-	if err := hookRegisterSession(ctx, client, base, id, project, cwd, projectOwned); err != nil {
+	if err := hookRegisterSession(ctx, client, base, id, selection, cwd, projectOwned); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -276,7 +276,7 @@ func hookLiveContinuation(ctx context.Context, client *http.Client, base string,
 		resolved.Status != "resolved" || resolved.ResumedFrom != root.ID || !codexContinuation(resolved.ID, root.ID) {
 		return "", false
 	}
-	if err := hookRegisterSession(ctx, client, base, resolved.ID, root.Project, root.Directory, root.OwnershipMode == "project_owned"); err != nil {
+	if err := hookRegisterSession(ctx, client, base, resolved.ID, hookProjectSelection{name: root.Project}, root.Directory, root.OwnershipMode == "project_owned"); err != nil {
 		return "", false
 	}
 	return resolved.ID, true
@@ -352,43 +352,57 @@ func hookUsesClientProject() bool {
 	return strings.TrimSpace(os.Getenv("ENGRAM_URL")) != ""
 }
 
+type hookProjectSelection struct {
+	name   string
+	source string
+}
+
+// registrationFields carries the original local resolution as advisory evidence.
+func (p hookProjectSelection) registrationFields(id, cwd string) map[string]any {
+	fields := map[string]any{"id": id, "project": p.name, "directory": cwd}
+	if p.source != "" {
+		fields["registration_project_source"] = p.source
+	}
+	return fields
+}
+
 // hookResolveCwdProject derives first-registration identity on the client when
 // explicitly connected to an external endpoint. Local defaults retain server
 // resolution. Both paths share the caller's existing confirmation deadline.
-func hookResolveCwdProject(ctx context.Context, client *http.Client, base, cwd string) (string, error) {
+func hookResolveCwdProject(ctx context.Context, client *http.Client, base, cwd string) (hookProjectSelection, error) {
 	if hookUsesClientProject() {
 		result, err := projectpkg.InspectLocalProject(ctx, cwd)
 		if err != nil {
 			if ctx.Err() != nil {
-				return "", ctx.Err()
+				return hookProjectSelection{}, ctx.Err()
 			}
-			return "", errHookSessionUnconfirmed
+			return hookProjectSelection{}, errHookSessionUnconfirmed
 		}
-		return result.Project, nil
+		return hookProjectSelection{name: result.Project}, nil
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil)
 	if err != nil {
-		return "", errHookSessionUnconfirmed
+		return hookProjectSelection{}, errHookSessionUnconfirmed
 	}
 	response, err := client.Do(request)
 	if err != nil || response == nil {
-		return "", errHookSessionUnconfirmed
+		return hookProjectSelection{}, errHookSessionUnconfirmed
 	}
 	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, hookDenialBodyLimit))
 	if err != nil {
-		return "", errHookSessionUnconfirmed
+		return hookProjectSelection{}, errHookSessionUnconfirmed
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", hookResolutionDenial(body)
+		return hookProjectSelection{}, hookResolutionDenial(body)
 	}
-	project, ok := codexProjectAuthority(body)
+	selection, ok := codexProjectAuthority(body)
 	if !ok {
 		// A resolvable-looking answer without a usable project carries an
 		// error_hint (for example an ambiguous cwd); name that cause too.
-		return "", hookResolutionDenial(body)
+		return hookProjectSelection{}, hookResolutionDenial(body)
 	}
-	return project, nil
+	return selection, nil
 }
 
 // hookDenialBodyLimit bounds how much of an error body the hook parses; error
@@ -428,8 +442,8 @@ func (e *hookDenialError) Unwrap() error { return e.cause }
 
 func (e *hookDenialError) Error() string { return e.message }
 
-func hookRegisterSession(ctx context.Context, client *http.Client, base, id, project, cwd string, projectOwned bool) error {
-	registration := map[string]string{"id": id, "project": project, "directory": cwd}
+func hookRegisterSession(ctx context.Context, client *http.Client, base, id string, selection hookProjectSelection, cwd string, projectOwned bool) error {
+	registration := selection.registrationFields(id, cwd)
 	if projectOwned {
 		registration["ownership_mode"] = "project_owned"
 	}
