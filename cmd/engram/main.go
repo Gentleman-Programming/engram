@@ -1663,6 +1663,10 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
+	if resolved.FirstImplicitGitProjectCollision(s.DataDir()) {
+		fmt.Fprintf(os.Stderr, "Warning: project %q is also selected automatically in another Git checkout. Run engram init <distinct-name> to separate future captures.\n", projectName)
+	}
+
 	// --org wins when given explicitly; otherwise inherit from the nearest
 	// .engram/config.json org field for this cwd, independent of how the
 	// project name itself was resolved (#776).
