@@ -294,6 +294,53 @@ return { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, l
   get localReady() { return localReady }, set localReady(value: boolean) { localReady = value } }
 }
 
+// The CLI can wait up to 20s for its start lock and 15s for readiness.
+const MANAGED_LAUNCH_TIMEOUT_MS = 40_000
+
+function startManagedDaemon(): Promise<"started" | "unsupported" | "failed"> {
+  return new Promise((resolve) => {
+    const launcher = spawn(ENGRAM_BIN, ["run", "-d"], {
+      // Older cores can print an update diagnostic before rejecting run.
+      env: { ...process.env, ENGRAM_NO_UPDATE_CHECK: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    })
+    let stderrTail = ""
+    let stdoutPrefix = ""
+    launcher.stderr?.on("data", (chunk) => {
+      stderrTail = (stderrTail + String(chunk)).slice(-256)
+    })
+    launcher.stdout?.on("data", (chunk) => {
+      stdoutPrefix += String(chunk).slice(0, 256 - stdoutPrefix.length)
+    })
+
+    const deadline = setTimeout(() => {
+      // Let the CLI finish its own startup or cleanup after OpenCode moves on.
+      launcher.unref()
+      for (const pipe of [launcher.stdout, launcher.stderr]) {
+        if (pipe && "unref" in pipe && typeof pipe.unref === "function") pipe.unref()
+      }
+      resolve("failed")
+    }, MANAGED_LAUNCH_TIMEOUT_MS)
+    launcher.once("error", () => {
+      clearTimeout(deadline)
+      resolve("failed")
+    })
+    launcher.once("close", (code) => {
+      clearTimeout(deadline)
+      if (code === 0) {
+        resolve("started")
+        return
+      }
+      // Older cores print usage to stdout and reject the command at the end
+      // of stderr, after any startup notices. Daemon failures can quote logs.
+      const rejectedRun = /(?:^|\n)unknown command: run(?:\r?\n)*$/.test(stderrTail)
+      const printedUsage = /^engram v[^\r\n]+\r?\n\r?\nUsage:\r?\n  engram <command> \[arguments\]\r?\n/.test(stdoutPrefix)
+      resolve(code === 1 && rejectedRun && printedUsage ? "unsupported" : "failed")
+    })
+  })
+}
+
 function truncate(str: string, max: number): string {
   if (!str) return ""
   return str.length > max ? str.slice(0, max) + "..." : str
@@ -762,16 +809,22 @@ export const Engram: Plugin = async (ctx) => {
 		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
 		client.localReady = await isEngramRunning(expectedID)
 		if (!client.localReady && !CONFIGURED_ENGRAM_URL) {
-      const serverChild = spawn(ENGRAM_BIN, ["serve"], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      })
-      serverChild.on("error", () => warn("startup"))
-      serverChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("startup") })
-      serverChild.unref()
-			await new Promise((r) => setTimeout(r, 500))
+      const startup = await startManagedDaemon()
 			client.localReady = await isEngramRunning(expectedID)
+      if (!client.localReady && startup === "unsupported") {
+        const serverChild = spawn(ENGRAM_BIN, ["serve"], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        })
+        serverChild.on("error", () => warn("startup"))
+        serverChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("startup") })
+        serverChild.unref()
+        await new Promise((r) => setTimeout(r, 500))
+        client.localReady = await isEngramRunning(expectedID)
+      } else if (!client.localReady && startup === "failed") {
+        warn("startup")
+      }
 		}
     if (!client.localReady) warn("readiness")
 	} catch { warn("startup") }

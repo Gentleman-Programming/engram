@@ -152,6 +152,9 @@ async function createRuntime(t, {
   emitSpawnError = false,
   emitSpawnExit = false,
   spawnExit = [1, null],
+  daemonStderr = "",
+  daemonStdout = "",
+  onPendingDaemonStart,
   installBun = true,
   configuredEngramURL,
   realServerFetch = false,
@@ -216,6 +219,9 @@ async function createRuntime(t, {
   childProcess.spawn = (command, args, options) => {
     let errorListener
     let exitListener
+    let closeListener
+    let stderrListener
+    let stdoutListener
     const child = {
       events: [],
       on(event, listener) {
@@ -225,6 +231,21 @@ async function createRuntime(t, {
           errorListener = listener
         }
         return this
+      },
+      once(event, listener) {
+        if (event === "close") closeListener = listener
+        else this.on(event, listener)
+        return this
+      },
+      stderr: {
+        on(event, listener) {
+          if (event === "data") stderrListener = listener
+        },
+      },
+      stdout: {
+        on(event, listener) {
+          if (event === "data") stdoutListener = listener
+        },
       },
       unref() {
         this.events.push("unref")
@@ -236,6 +257,18 @@ async function createRuntime(t, {
       },
     }
     spawns.push({ args: [command, ...args], options, child })
+    if (args[0] === "run") queueMicrotask(() => {
+      if (onPendingDaemonStart) {
+        onPendingDaemonStart()
+        return
+      }
+      if (emitSpawnError) errorListener?.(new Error("simulated spawn failure"))
+      else {
+        if (daemonStderr) stderrListener?.(Buffer.from(daemonStderr))
+        if (daemonStdout) stdoutListener?.(Buffer.from(daemonStdout))
+        closeListener?.(...(emitSpawnExit ? spawnExit : [0, null]))
+      }
+    })
     if (args[0] === "sync" && args[1] === "--import") startupEvents.push("import:spawn")
     return child
   }
@@ -365,11 +398,12 @@ for (const failure of ["HTTP", "transport"]) {
 }
 
 for (const kind of ["error", "exit", "signal"]) {
-  test(`degraded startup warning retains asynchronous serve ${kind}`, async (t) => {
+  test(`degraded startup warning retains asynchronous daemon ${kind}`, async (t) => {
     const runtime = await createRuntime(t, { healthOK: false, emitSpawnError: kind === "error", emitSpawnExit: kind !== "error", spawnExit: kind === "signal" ? [null, "SIGTERM"] : [1, null] })
     const output = { output: "original" }
     await runtime.after({ tool: "read", sessionID: "runtime" }, output)
     assert.match(output.output, /Engram degraded.*startup/)
+    assert.deepEqual(runtime.spawns.map(({ args }) => args.slice(1)), [["run", "-d"]])
     assert.equal(output.output.match(/Engram degraded/g).length, 1)
     assert.ok(output.output.length < 400)
     const next = { output: "next" }
@@ -618,11 +652,12 @@ for (const adapterPath of ["./engram.ts", "../../internal/setup/plugins/opencode
       args: ["custom-engram", "instance-id"],
       options: { encoding: "utf8", windowsHide: true },
     }])
-    assert.deepEqual(runtime.spawns.map(({ args, options }) => ({ args, options })), [
-      { args: ["custom-engram", "serve"], options: { detached: true, stdio: "ignore", windowsHide: true } },
+    assert.equal(runtime.spawns[0].options.env.ENGRAM_NO_UPDATE_CHECK, "1")
+    assert.deepEqual(runtime.spawns.map(({ args, options: { env, ...options } }) => ({ args, options })), [
+      { args: ["custom-engram", "run", "-d"], options: { stdio: ["ignore", "pipe", "pipe"], windowsHide: true } },
       { args: ["custom-engram", "sync", "--import"], options: { cwd: "C:\\work\\engram", detached: true, stdio: "ignore", windowsHide: true } },
     ])
-    assert.ok(runtime.spawns.every(({ child }) => child.events.includes("unref")))
+    assert.ok(runtime.spawns[1].child.events.includes("unref"))
     assert.deepEqual(runtime.startupEvents, ["project-current:response", "import:spawn"])
     assert.equal(runtime.healthURLs.length, 2)
     await runtime.event("session.created", session("runtime"))
@@ -653,7 +688,7 @@ test("adapter treats blank optional Engram environment values as unset at its im
   ]) {
     await t.test(scenario.name, async (t) => {
       const runtime = await createRuntime(t, { ...scenario, healthOK: false })
-      const server = runtime.spawns.find(({ args }) => args[1] === "serve")
+      const server = runtime.spawns.find(({ args }) => args[1] === "run")
 
       assert.equal(server?.args[0], scenario.engramBin?.trim() ? scenario.engramBin : "engram")
       assert.equal(new URL(runtime.healthURLs[0]).port, scenario.engramPort?.trim() ? scenario.engramPort : "7437")
@@ -670,7 +705,7 @@ test("an explicit OpenCode ENGRAM_URL keeps precedence and its exact value", asy
     healthOK: false,
   })
 
-  assert.equal(runtime.spawns.some(({ args }) => args[1] === "serve"), false)
+  assert.deepEqual(runtime.spawns, [])
   assert.equal(runtime.healthURLs[0], `${configuredEngramURL}/health`)
 })
 
@@ -745,10 +780,72 @@ test("manifest import ignores an asynchronous child launch error", async (t) => 
 
 test("server startup ignores an asynchronous child launch error", async (t) => {
   const runtime = await createRuntime(t, { healthOK: false, emitSpawnError: true })
-  const server = runtime.spawns.find(({ args }) => args[1] === "serve")
 
   assert.equal(typeof runtime.plugin.event, "function")
-  assert.deepEqual(server?.child.events, ["error", "unref", "error:emitted"])
+  assert.deepEqual(runtime.spawns.map(({ args }) => args.slice(1)), [["run", "-d"]])
+})
+
+test("an older core's unknown run command after startup logs permits legacy detached serve", async (t) => {
+  let checks = 0
+  const runtime = await createRuntime(t, {
+    healthOK: () => ++checks > 2,
+    emitSpawnExit: true,
+    daemonStderr: "[engram] migration complete — memories recovered\r\n".repeat(8) + "unknown command: run\r\n\r\n",
+    daemonStdout: "engram v3.6.2 — Persistent memory for AI coding agents\r\n\r\nUsage:\r\n  engram <command> [arguments]\r\n",
+  })
+  assert.deepEqual(runtime.spawns.map(({ args }) => args.slice(1)), [["run", "-d"], ["serve"]])
+  assert.equal(runtime.spawns[0].options.env.ENGRAM_NO_UPDATE_CHECK, "1")
+  assert.deepEqual(runtime.spawns[1].options, { detached: true, stdio: "ignore", windowsHide: true })
+})
+
+test("a legacy phrase inside an ordinary daemon failure never permits detached serve", async (t) => {
+  const runtime = await createRuntime(t, {
+    healthOK: false,
+    emitSpawnExit: true,
+    daemonStderr: "engram: daemon did not start; recent log lines\nunknown command: run\n",
+  })
+  assert.deepEqual(runtime.spawns.map(({ args }) => args.slice(1)), [["run", "-d"]])
+  const output = { output: "original" }
+  await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+  assert.match(output.output, /Engram degraded.*startup/)
+  assert.doesNotMatch(output.output, /unknown command/)
+})
+
+test("a concurrent daemon is reused when run exits after losing the start race", async (t) => {
+  let checks = 0
+  const runtime = await createRuntime(t, {
+    healthOK: () => ++checks > 1,
+    emitSpawnExit: true,
+    daemonStderr: "already running (pid 1234)",
+  })
+  await runtime.event("session.created", session("runtime"))
+  assert.deepEqual(runtime.spawns.map(({ args }) => args.slice(1)), [["run", "-d"]])
+  assert.deepEqual(runtime.registeredIDs, ["runtime"])
+  const output = { output: "original" }
+  await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+  assert.equal(output.output, "original")
+})
+
+test("a pending managed launcher stops blocking startup without starting another server", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  let daemonStarted
+  const launched = new Promise((resolve) => { daemonStarted = resolve })
+  let healthy = false
+  const starting = createRuntime(t, { healthOK: () => healthy, onPendingDaemonStart: daemonStarted })
+  await launched
+  t.mock.timers.tick(39_999)
+  assert.equal(await Promise.race([starting, new Promise((resolve) => setImmediate(resolve, null))]), null)
+  t.mock.timers.tick(1)
+
+  const runtime = await Promise.race([starting, new Promise((resolve) => setImmediate(resolve, null))])
+  assert.ok(runtime, "the plugin must finish initializing without a launcher exit")
+  assert.deepEqual(runtime.spawns.map(({ args }) => args.slice(1)), [["run", "-d"]])
+  assert.ok(runtime.spawns[0].child.events.includes("unref"))
+
+  healthy = true
+  await runtime.event("session.created", session("runtime"))
+  assert.deepEqual(runtime.registeredIDs, ["runtime"])
+  assert.equal(runtime.spawns.length, 1)
 })
 
 test("save nudge fails closed for malformed and non-array observation responses", async (t) => {

@@ -19,6 +19,11 @@ import (
 
 // All prompt work shares this deadline; Codex kills hooks at 2s.
 const codexUserPromptDeadline = 1500 * time.Millisecond
+
+// The compact hook has 10s, including project lookup (up to 2s), prior context
+// (up to 3s), and process startup and output.
+const codexCompactionResolveDeadline = 3 * time.Second
+
 const codexToolSearchMessage = "CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:mcp__engram__mem_save,mcp__engram__mem_search,mcp__engram__mem_context,mcp__engram__mem_session_summary,mcp__engram__mem_session_start,mcp__engram__mem_session_end,mcp__engram__mem_get_observation,mcp__engram__mem_suggest_topic_key,mcp__engram__mem_capture_passive,mcp__engram__mem_save_prompt,mcp__engram__mem_update,mcp__engram__mem_current_project,mcp__engram__mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding."
 
 type codexPromptInput struct {
@@ -162,6 +167,7 @@ func codexRegisterAt(ctx context.Context, client *http.Client, base, host, cwd, 
 }
 
 const codexCoreUpgradeReason = "Engram core lacks runtime session resolution. Upgrade the core to match the CLI, then manually restart the running Engram server and start a new Codex session."
+const codexSessionNotRegisteredReason = "Codex host session is not registered; start a new Codex session to register it"
 
 func codexRuntimeAt(ctx context.Context, client *http.Client, base, host, cwd, project, operation string) string {
 	id, _ := codexRuntimeResult(ctx, client, base, host, cwd, project, operation)
@@ -224,7 +230,7 @@ func codexRuntimeRequest(ctx context.Context, client *http.Client, base, host st
 	if response.StatusCode == http.StatusNotFound && operation == "resolve" {
 		var message string
 		if decodeErr == nil && json.Unmarshal(fields["error"], &message) == nil && message == "sql: no rows in result set" {
-			return "", "Codex host session is not registered; start a new Codex session to register it", false
+			return "", codexSessionNotRegisteredReason, false
 		}
 		// A plain HTTP 404 is an absent route, not a missing identity.
 		if decodeErr != nil && strings.TrimSpace(string(data)) == "404 page not found" {
@@ -257,11 +263,16 @@ func cmdCodexLifecycle(action string) {
 	if err != nil {
 		return
 	}
-	result := runCodexLifecycle(action, data, codexHookURL())
+	result, code := runCodexLifecycle(action, data, codexHookURL())
+	jsonOutput := os.Getenv("ENGRAM_HOOK_OUTPUT") == "json"
+	if code != "" && jsonOutput {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"error_code": code})
+		return
+	}
 	if result != "" {
 		// Internal shell callers opt into JSON to retain opaque identity bytes.
 		// The default text output remains compatible with existing CLI callers.
-		if os.Getenv("ENGRAM_HOOK_OUTPUT") == "json" {
+		if jsonOutput {
 			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"session_id": result})
 		} else {
 			_, _ = fmt.Fprintln(os.Stdout, result)
@@ -270,16 +281,27 @@ func cmdCodexLifecycle(action string) {
 }
 
 // Runtime identity belongs to the core, not a second platform-specific cache.
-func runCodexLifecycle(action string, data []byte, base string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
+func runCodexLifecycle(action string, data []byte, base string) (string, string) {
+	// A process-scoped flag from the adapter allows older cores to continue
+	// handling codex-resolve with their existing budget.
+	compaction := action == "codex-resolve" && os.Getenv("ENGRAM_HOOK_CODEX_COMPACTION") == "1"
+	budget := codexUserPromptDeadline
+	if compaction {
+		budget = codexCompactionResolveDeadline
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	return runCodexLifecycleContext(ctx, action, data, base)
-}
 
-// The guard owns its context so a failed resolution can retain timeout evidence.
-func runCodexLifecycleContext(ctx context.Context, action string, data []byte, base string) string {
-	id, _ := runCodexLifecycleResult(ctx, action, data, base)
-	return id
+	id, reason := runCodexLifecycleResult(ctx, action, data, base)
+	if compaction && id == "" {
+		switch {
+		case ctx.Err() == context.DeadlineExceeded:
+			return "", "runtime_resolve_deadline"
+		case reason == codexSessionNotRegisteredReason:
+			return "", "runtime_session_not_registered"
+		}
+	}
+	return id, ""
 }
 
 func runCodexLifecycleResult(ctx context.Context, action string, data []byte, base string) (string, string) {

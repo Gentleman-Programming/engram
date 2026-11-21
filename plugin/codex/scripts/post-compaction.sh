@@ -21,7 +21,7 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Register and retain only the server-confirmed runtime identity.
-SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD" codex-resolve) && REGISTERED=1 || REGISTERED=0
+SESSION_HANDOFF=$(ENGRAM_HOOK_CODEX_COMPACTION=1 engram_session_handoff "$INPUT" "$PROJECT" "$CWD" codex-resolve) && REGISTERED=1 || REGISTERED=0
 
 # Fetch context from previous sessions
 CONTEXT=""

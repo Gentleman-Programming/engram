@@ -185,7 +185,27 @@ func TestSignPathArtifactConfiguration(t *testing.T) {
 }
 func TestSignPathPreservesReleaseStaging(t *testing.T) {
 	staging := signPathRead(t, ".github/workflows/stage-release-candidate.yml")
-	for _, want := range []string{"permissions:\n  contents: read", "persist-credentials: false", "-mod=readonly -trimpath -buildvcs=true", "./cmd/engram", "vcs.modified=false"} {
+	lf := strings.ReplaceAll(staging, "\r\n", "\n")
+	for _, tc := range []struct {
+		name     string
+		text     string
+		readOnly bool
+	}{
+		{name: "LF", text: lf, readOnly: true},
+		{name: "CRLF", text: strings.ReplaceAll(lf, "\n", "\r\n"), readOnly: true},
+		{name: "write permission", text: "permissions:\n  contents: write\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var workflow signPathWorkflow
+			if err := yaml.Unmarshal([]byte(tc.text), &workflow); err != nil {
+				t.Fatal(err)
+			}
+			if contents := workflow.Permissions["contents"]; (contents == "read") != tc.readOnly {
+				t.Errorf("contents permission = %q, want read-only = %t", contents, tc.readOnly)
+			}
+		})
+	}
+	for _, want := range []string{"persist-credentials: false", "-mod=readonly -trimpath -buildvcs=true", "./cmd/engram", "vcs.modified=false"} {
 		if !strings.Contains(staging, want) {
 			t.Errorf("staging behavior missing %q", want)
 		}
