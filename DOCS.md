@@ -1313,6 +1313,8 @@ Different Git remotes can end in the same repository name. For example, `client-
 
 If the repositories already share a project, the new names apply when Engram resolves the project from those repositories in the future. Existing sessions and observations stay under the shared name. Selective recovery requires evidence tying each record to its original repository.
 
+An active session keeps its original project after `engram init`. To save under the new name, start a fresh agent session from the renamed repository. If you manage session IDs directly through MCP, call `mem_session_start` with a fresh `id` and the repository's `directory`, then use that same ID as `session_id` for later saves.
+
 If the resolving process cannot read `.engram/config.json`, the diagnostic starts
 with `cannot read .engram/config.json` and includes the filesystem error. Invalid
 JSON or project names retain `invalid .engram/config.json`. Both failures stop
