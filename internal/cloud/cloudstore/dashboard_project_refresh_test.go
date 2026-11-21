@@ -238,6 +238,14 @@ func TestDashboardProjectInvalidationFencesDirtyUnion(t *testing.T) {
 	if cs.dashboardReadModel.projectPartitionSafe || cs.dashboardReadModelDirty != nil {
 		t.Fatal("hard invalidation retained partition baseline")
 	}
+	expiredCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	expired := &dashboardReadModelBuild{ctx: expiredCtx, gen: cs.dashboardReadModelGen, done: make(chan struct{}), model: base}
+	cs.dashboardReadModelBuild = expired
+	cs.finishDashboardReadModelBuild(expired)
+	if cs.dashboardReadModelOK || expired.err != context.DeadlineExceeded || expired.model.projects != nil {
+		t.Fatal("expired build was accepted at publication")
+	}
 	fresh := &dashboardReadModelBuild{gen: cs.dashboardReadModelGen, done: make(chan struct{}), model: base}
 	cs.finishDashboardReadModelBuild(fresh)
 	if !cs.dashboardReadModelOK || cs.dashboardReadModelDirty != nil {

@@ -970,12 +970,6 @@ func (cs *CloudStore) runDashboardReadModelBuild(build *dashboardReadModelBuild,
 		if cause := recover(); cause != nil {
 			build.err = fmt.Errorf("%w: %v", errDashboardReadModelBuildAborted, cause)
 		}
-		if err := ctx.Err(); err != nil {
-			build.err = err
-		}
-		if build.err != nil {
-			build.model = dashboardReadModel{}
-		}
 		cs.finishDashboardReadModelBuild(build)
 	}()
 	if cs.dashboardReadModelLoad != nil {
@@ -1019,6 +1013,12 @@ func (build *dashboardReadModelBuild) wait(ctx context.Context) (dashboardReadMo
 // are never cached.
 func (cs *CloudStore) finishDashboardReadModelBuild(build *dashboardReadModelBuild) {
 	cs.dashboardReadModelMu.Lock()
+	if build.ctx != nil && build.ctx.Err() != nil {
+		build.err = build.ctx.Err()
+	}
+	if build.err != nil {
+		build.model = dashboardReadModel{}
+	}
 	if cs.dashboardReadModelBuild == build {
 		cs.dashboardReadModelBuild = nil
 	}
