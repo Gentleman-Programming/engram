@@ -1,45 +1,43 @@
-package project
+package identityfile
 
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
 
-const lockedRepositoryBindingJSON = `{"version":1,"id":"00000000000000000000000000000001","project":"project"}`
+const lockedIdentityContents = "complete identity\n"
 
-func TestReadRepositoryBindingFileWindowsSharingViolation(t *testing.T) {
+func TestReadFileWindowsSharingViolation(t *testing.T) {
 	t.Run("recovers after release", func(t *testing.T) {
-		_, path, release := lockRepositoryBindingFile(t)
+		path, release := lockIdentityFile(t)
 		retries := 0
-		data, err := readRepositoryBindingFileWithRetry(path, func(time.Duration) {
+		data, err := readFileWithRetry(path, func(time.Duration) {
 			retries++
 			release()
 		})
-		if err != nil || string(data) != lockedRepositoryBindingJSON || retries != 1 {
+		if err != nil || string(data) != lockedIdentityContents || retries != 1 {
 			t.Fatalf("read = %q, %v after %d retries, want original contents after one retry", data, err, retries)
 		}
 	})
 
 	t.Run("exhausts retries while locked", func(t *testing.T) {
-		commonDir, path, _ := lockRepositoryBindingFile(t)
+		path, _ := lockIdentityFile(t)
 		var waits []time.Duration
-		data, err := readRepositoryBindingFileWithRetry(path, func(delay time.Duration) {
+		data, err := readFileWithRetry(path, func(delay time.Duration) {
 			waits = append(waits, delay)
 		})
 		if data != nil || !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || len(waits) != 4 {
 			t.Fatalf("read = %q, %v after waits %v, want sharing violation after four retries", data, err, waits)
 		}
-		if binding, err := readRepositoryBinding(commonDir); binding != (repositoryBinding{}) || !errors.Is(err, ErrRepositoryBinding) {
-			t.Fatalf("readRepositoryBinding = %+v, %v, want repository binding error", binding, err)
-		}
 	})
 
 	t.Run("returns missing file immediately", func(t *testing.T) {
-		data, err := readRepositoryBindingFileWithRetry(repositoryBindingPath(t.TempDir()), func(time.Duration) {
+		data, err := readFileWithRetry(filepath.Join(t.TempDir(), "identity"), func(time.Duration) {
 			t.Fatal("missing file should not be retried")
 		})
 		if data != nil || !errors.Is(err, os.ErrNotExist) {
@@ -48,11 +46,10 @@ func TestReadRepositoryBindingFileWindowsSharingViolation(t *testing.T) {
 	})
 }
 
-func lockRepositoryBindingFile(t *testing.T) (commonDir, path string, release func()) {
+func lockIdentityFile(t *testing.T) (path string, release func()) {
 	t.Helper()
-	commonDir = t.TempDir()
-	path = repositoryBindingPath(commonDir)
-	if err := os.WriteFile(path, []byte(lockedRepositoryBindingJSON), 0o600); err != nil {
+	path = filepath.Join(t.TempDir(), "identity")
+	if err := os.WriteFile(path, []byte(lockedIdentityContents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	name, err := windows.UTF16PtrFromString(path)
@@ -74,5 +71,5 @@ func lockRepositoryBindingFile(t *testing.T) (commonDir, path string, release fu
 		handle = windows.InvalidHandle
 	}
 	t.Cleanup(release)
-	return commonDir, path, release
+	return path, release
 }

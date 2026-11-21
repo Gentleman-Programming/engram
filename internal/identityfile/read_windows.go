@@ -1,4 +1,4 @@
-package project
+package identityfile
 
 import (
 	"errors"
@@ -8,11 +8,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func readRepositoryBindingFile(path string) ([]byte, error) {
-	return readRepositoryBindingFileWithRetry(path, time.Sleep)
+// ReadFile reads a published identity file, allowing a short sharing conflict
+// during concurrent publication to clear.
+func ReadFile(path string) ([]byte, error) {
+	return readFileWithRetry(path, time.Sleep)
 }
 
-func readRepositoryBindingFileWithRetry(path string, wait func(time.Duration)) ([]byte, error) {
+func readFileWithRetry(path string, wait func(time.Duration)) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	// The winning rename can briefly deny read sharing. Limit the scheduled
 	// backoff to 15ms and return other errors immediately.
