@@ -294,25 +294,49 @@ return { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, l
   get localReady() { return localReady }, set localReady(value: boolean) { localReady = value } }
 }
 
+// The CLI can wait up to 20s for its start lock and 15s for readiness.
+const MANAGED_LAUNCH_TIMEOUT_MS = 40_000
+
 function startManagedDaemon(): Promise<"started" | "unsupported" | "failed"> {
   return new Promise((resolve) => {
-    // The CLI owns readiness, concurrent-start admission, and failed-start
-    // cleanup. Wait for it to finish instead of launching another child.
     const launcher = spawn(ENGRAM_BIN, ["run", "-d"], {
       // Older cores can print an update diagnostic before rejecting run.
       env: { ...process.env, ENGRAM_NO_UPDATE_CHECK: "1" },
-      stdio: ["ignore", "ignore", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     })
-    let stderrPrefix = ""
+    let stderrTail = ""
+    let stdoutPrefix = ""
     launcher.stderr?.on("data", (chunk) => {
-      stderrPrefix += String(chunk).slice(0, 256 - stderrPrefix.length)
+      stderrTail = (stderrTail + String(chunk)).slice(-256)
     })
-    launcher.once("error", () => resolve("failed"))
+    launcher.stdout?.on("data", (chunk) => {
+      stdoutPrefix += String(chunk).slice(0, 256 - stdoutPrefix.length)
+    })
+
+    const deadline = setTimeout(() => {
+      // Let the CLI finish its own startup or cleanup after OpenCode moves on.
+      launcher.unref()
+      for (const pipe of [launcher.stdout, launcher.stderr]) {
+        if (pipe && "unref" in pipe && typeof pipe.unref === "function") pipe.unref()
+      }
+      resolve("failed")
+    }, MANAGED_LAUNCH_TIMEOUT_MS)
+    launcher.once("error", () => {
+      clearTimeout(deadline)
+      resolve("failed")
+    })
     launcher.once("close", (code) => {
-      if (code === 0) resolve("started")
-      else if (code === 1 && /^unknown command: run\r?\n/.test(stderrPrefix)) resolve("unsupported")
-      else resolve("failed")
+      clearTimeout(deadline)
+      if (code === 0) {
+        resolve("started")
+        return
+      }
+      // Older cores print usage to stdout and reject the command at the end
+      // of stderr, after any startup notices. Daemon failures can quote logs.
+      const rejectedRun = /(?:^|\n)unknown command: run(?:\r?\n)*$/.test(stderrTail)
+      const printedUsage = /^engram v[^\r\n]+\r?\n\r?\nUsage:\r?\n  engram <command> \[arguments\]\r?\n/.test(stdoutPrefix)
+      resolve(code === 1 && rejectedRun && printedUsage ? "unsupported" : "failed")
     })
   })
 }
