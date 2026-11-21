@@ -1315,6 +1315,8 @@ If the repositories already share a project, the new names apply when Engram res
 
 An active session keeps its original project after `engram init`. To save under the new name, start a fresh agent session from the repository root. If you manage session IDs directly through MCP, call `mem_session_start` with a fresh `id` and set `directory` to the repository root, then use that same ID as `session_id` for later saves.
 
+For `mem_save` calls that omit both `project` and `session_id`, `ENGRAM_PROJECT` and `engram mcp --project` take precedence over repository detection. To use the repository's new name for those calls, remove the override or set it to the intended name in your MCP launch configuration, then restart the MCP server.
+
 If the resolving process cannot read `.engram/config.json`, the diagnostic starts
 with `cannot read .engram/config.json` and includes the filesystem error. Invalid
 JSON or project names retain `invalid .engram/config.json`. Both failures stop
