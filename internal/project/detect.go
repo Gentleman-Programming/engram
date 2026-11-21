@@ -111,6 +111,16 @@ var (
 	}
 )
 
+// IsCanonicalProjectSource accepts the sources used by successful local hook resolution.
+func IsCanonicalProjectSource(source string) bool {
+	switch source {
+	case SourceConfig, SourceGitRemote, SourceGitRoot, SourceGitChild, SourceDirBasename, SourceProcessOverride:
+		return true
+	default:
+		return false
+	}
+}
+
 // DetectionResult carries the full output of DetectProjectFull.
 type DetectionResult struct {
 	// Project is the resolved project name. Empty when detection returns an error.

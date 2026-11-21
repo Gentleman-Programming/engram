@@ -12,14 +12,13 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Ensure session exists. Claude keeps the session ID across compaction as it
 # does on --resume, so the root may already be ended; resume=true lets the
 # server register a live continuation instead of refusing with
 # session_already_ended, which would leave every later write denied by the
 # PreToolUse gate. Registers exactly like session-start.sh.
-PROJECT=$(engram_register_claude_session "$SESSION_ID" "$PROJECT" "$CWD")
+PROJECT=$(engram_resolve_and_register_claude_session "$SESSION_ID" "$CWD")
 
 # Refresh the effective binding after registration, including resumed roots.
 # This context is independent of slim/full protocol verbosity and history.

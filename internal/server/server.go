@@ -588,13 +588,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID                string                   `json:"id"`
-		Project           string                   `json:"project"`
-		Directory         string                   `json:"directory"`
-		OwnershipMode     string                   `json:"ownership_mode"`
-		Resume            bool                     `json:"resume"`
-		Isolated          bool                     `json:"isolated"`
-		ProjectProvenance *store.ProjectProvenance `json:"project_provenance,omitempty"`
+		ID                        string                   `json:"id"`
+		Project                   string                   `json:"project"`
+		Directory                 string                   `json:"directory"`
+		OwnershipMode             string                   `json:"ownership_mode"`
+		Resume                    bool                     `json:"resume"`
+		Isolated                  bool                     `json:"isolated"`
+		ProjectProvenance         *store.ProjectProvenance `json:"project_provenance,omitempty"`
+		RegistrationProjectSource json.RawMessage          `json:"registration_project_source"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -617,10 +618,17 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "isolated registration requires project_owned ownership and an empty directory")
 		return
 	}
+	provenance := body.ProjectProvenance
+	if provenance == nil && len(body.RegistrationProjectSource) > 0 {
+		var source string
+		if json.Unmarshal(body.RegistrationProjectSource, &source) == nil {
+			provenance = store.DetectedRootProjectProvenance(source)
+		}
+	}
 	effectiveID := body.ID
 	timings := requestWriteTimings(r)
 	var err error
-	effectiveID, err = s.store.RegisterSessionWithProjectProvenance(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode, body.Resume, body.Isolated, body.ProjectProvenance, timings)
+	effectiveID, err = s.store.RegisterSessionWithProjectProvenance(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode, body.Resume, body.Isolated, provenance, timings)
 	if err != nil {
 		var conflict *store.SessionProjectConflictError
 		switch {

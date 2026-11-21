@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 )
 
 // All prompt work shares this deadline; Codex kills hooks at 2s.
@@ -75,10 +77,11 @@ func runCodexUserPromptSubmit(input []byte, baseURL, stateDir string, now func()
 	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
 	defer cancel()
 	_, client := hookEndpointClient(baseURL)
-	project, authorized := codexHookProject(ctx, client, baseURL, in.SessionID, in.CWD)
+	selection, authorized := codexHookProject(ctx, client, baseURL, in.SessionID, in.CWD)
 	if !authorized {
 		return fallback
 	}
+	project := selection.name
 	effective := codexRuntimeAt(ctx, client, baseURL, in.SessionID, in.CWD, project, "resolve")
 	if effective == "" {
 		return fallback
@@ -144,11 +147,13 @@ func codexContinuation(id, host string) bool {
 	return n != "" && strings.IndexFunc(n, func(r rune) bool { return r < '0' || r > '9' }) < 0
 }
 
-func codexRegisterAt(ctx context.Context, client *http.Client, base, host, cwd, project string) string {
+func codexRegisterAt(ctx context.Context, client *http.Client, base, host, cwd string, selection hookProjectSelection) string {
 	if strings.TrimSpace(host) == "" {
 		return ""
 	}
-	body, _ := json.Marshal(map[string]any{"id": host, "directory": cwd, "project": project, "resume": true})
+	registration := selection.registrationFields(host, cwd)
+	registration["resume"] = true
+	body, _ := json.Marshal(registration)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/sessions", strings.NewReader(string(body)))
 	if err != nil {
 		return ""
@@ -311,17 +316,17 @@ func runCodexLifecycleResult(ctx context.Context, action string, data []byte, ba
 		return "", failure
 	}
 	_, client := hookEndpointClient(base)
-	project, ok := codexHookProject(ctx, client, base, in.SessionID, in.CWD)
+	selection, ok := codexHookProject(ctx, client, base, in.SessionID, in.CWD)
 	if !ok {
 		return "", failure
 	}
 	switch action {
 	case "codex-register":
-		return codexRegisterAt(ctx, client, base, in.SessionID, in.CWD, project), ""
+		return codexRegisterAt(ctx, client, base, in.SessionID, in.CWD, selection), ""
 	case "codex-resolve":
-		return codexRuntimeResult(ctx, client, base, in.SessionID, in.CWD, project, "resolve")
+		return codexRuntimeResult(ctx, client, base, in.SessionID, in.CWD, selection.name, "resolve")
 	case "codex-session-end":
-		_ = codexRuntimeAt(ctx, client, base, in.SessionID, in.CWD, project, "end")
+		_ = codexRuntimeAt(ctx, client, base, in.SessionID, in.CWD, selection.name, "end")
 	}
 	return "", failure
 }
@@ -331,21 +336,21 @@ func runCodexLifecycleResult(ctx context.Context, action string, data []byte, ba
 // sessions retain caller-project permissions, requiring usable client evidence;
 // a failed inspection never falls back to the persisted owner. Runtime conflict
 // handling still performs its own authoritative lookup before its one retry.
-func codexHookProject(ctx context.Context, client *http.Client, base, host, cwd string) (string, bool) {
+func codexHookProject(ctx context.Context, client *http.Client, base, host, cwd string) (hookProjectSelection, bool) {
 	if hookUsesClientProject() {
 		owner, known, err := hookSessionOwnerProject(ctx, client, base, host)
 		if err != nil {
-			return "", false
+			return hookProjectSelection{}, false
 		}
 		if known && owner.OwnershipMode == "project_owned" {
-			return owner.Project, true
+			return hookProjectSelection{name: owner.Project}, true
 		}
 		project, err := hookResolveCwdProject(ctx, client, base, cwd)
 		return project, err == nil
 	}
 	var authority json.RawMessage
 	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil, &authority) {
-		return "", false
+		return hookProjectSelection{}, false
 	}
 	return codexProjectAuthority(authority)
 }
@@ -401,28 +406,20 @@ func codexFirstPrompt(path string) bool {
 	}
 	return !os.IsExist(err)
 }
-func codexProjectAuthority(raw json.RawMessage) (string, bool) {
+func codexProjectAuthority(raw json.RawMessage) (hookProjectSelection, bool) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil {
-		return "", false
+		return hookProjectSelection{}, false
 	}
 	if _, hasErrorHint := fields["error_hint"]; hasErrorHint {
-		return "", false
+		return hookProjectSelection{}, false
 	}
 	var project, source string
 	if json.Unmarshal(fields["project"], &project) != nil || strings.TrimSpace(project) == "" ||
-		json.Unmarshal(fields["project_source"], &source) != nil || !codexProjectSource(source) {
-		return "", false
+		json.Unmarshal(fields["project_source"], &source) != nil || !projectpkg.IsCanonicalProjectSource(source) {
+		return hookProjectSelection{}, false
 	}
-	return project, true
-}
-func codexProjectSource(source string) bool {
-	for _, allowed := range []string{"config", "git_remote", "git_root", "git_child", "dir_basename", "process_override"} {
-		if source == allowed {
-			return true
-		}
-	}
-	return false
+	return hookProjectSelection{name: project, source: source}, true
 }
 func codexSessionAge(ctx context.Context, c *http.Client, baseURL, sessionID string, now time.Time) (time.Duration, bool) {
 	if sessionID == "" {
