@@ -37,14 +37,20 @@ engram_native_hook() {
 
 # Transport the server-confirmed runtime identity; never choose a session here.
 engram_session_handoff() {
-  local input="$1" project="$2" dir="$3" action="$4" effective="" identity=""
+  local input="$1" project="$2" action="$4" effective=""
   if [ -n "$project" ]; then
     effective=$(printf '%s' "$input" | engram_native_hook "$action" 2>/dev/null) || effective=""
-    identity=$(printf '%s' "$effective" | jq -esc '
-      if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
-      then {session_id: .[0].session_id} else error("invalid identity") end
-    ' 2>/dev/null) || identity=""
   fi
+  engram_render_session_handoff "$effective"
+}
+
+engram_render_session_handoff() {
+  local effective="$1" identity=""
+  identity=$(printf '%s' "$effective" | jq -esc '
+    if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
+      and (.[0] | (has("error") or has("error_code")) | not) and .[0].project_lookup_complete != true
+    then {session_id: .[0].session_id} else error("invalid identity") end
+  ' 2>/dev/null) || identity=""
 
   local confirmed=1
   [ -n "$identity" ] && confirmed=0

@@ -68,8 +68,17 @@ func cmdHook(args []string) {
 		cmdResolveHookProject()
 		return
 	}
+	if len(args) == 2 && args[0] == "codex-resolve" && args[1] == "--local-compaction" {
+		if hookUsesClientProject() || strings.TrimSpace(os.Getenv("ENGRAM_SOCKET")) != "" {
+			fmt.Fprintln(os.Stderr, "local compaction requires the implicit TCP endpoint")
+			exitFunc(2)
+			return
+		}
+		cmdCodexLifecycle(args[0], true)
+		return
+	}
 	if len(args) == 1 && (args[0] == "codex-register" || args[0] == "codex-resolve" || args[0] == "codex-session-end") {
-		cmdCodexLifecycle(args[0])
+		cmdCodexLifecycle(args[0], false)
 		return
 	}
 	if len(args) == 1 && args[0] == "codex-user-prompt-submit" {
@@ -563,14 +572,14 @@ func guardCodexPreToolUse(input []byte) []byte {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationBudget())
 	defer cancel()
-	effective, reason := runCodexLifecycleResult(ctx, "codex-resolve", input, codexHookURL())
-	if effective == "" {
+	resolved := runCodexLifecycleResult(ctx, "codex-resolve", input, codexHookURL(), false)
+	if resolved.SessionID == "" {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return hookSessionConfirmationDeny("Codex", ctx.Err())
 		}
-		return claudePreToolUseDeny(reason)
+		return claudePreToolUseDeny(resolved.reason)
 	}
-	payload["session_id"], _ = json.Marshal(effective)
+	payload["session_id"], _ = json.Marshal(resolved.SessionID)
 	bound, _ := json.Marshal(payload)
 	return transformCodexPreToolUse(bound)
 }

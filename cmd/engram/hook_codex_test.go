@@ -116,7 +116,7 @@ func TestCodexResumeBindsEndedHostContinuation(t *testing.T) {
 	}
 	useLegacyLocalHookEndpoint(t, endpoint.URL)
 	startup, _ := json.Marshal(codexPromptInput{SessionID: "ended-host", CWD: root})
-	if id, _ := runCodexLifecycle("codex-register", startup, endpoint.URL); id != "ended-host:resume:2" {
+	if id := runCodexLifecycle("codex-register", startup, endpoint.URL, false).SessionID; id != "ended-host:resume:2" {
 		t.Fatalf("startup = %q", id)
 	}
 	input := []byte(`{"session_id":"ended-host","cwd":` + strconv.Quote(root) + `,"tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model-forged","title":"resume","content":"resume"}}`)
@@ -195,7 +195,7 @@ func TestCodexResumeLifecycleUsesConfirmedBinding(t *testing.T) {
 	_ = response.Body.Close()
 	input, _ := json.Marshal(codexPromptInput{CWD: root, SessionID: "host", Prompt: "resumed prompt"})
 	for _, phase := range []string{"codex-register", "codex-resolve"} {
-		if id, _ := runCodexLifecycle(phase, input, endpoint.URL); id != "host:resume:2" {
+		if id := runCodexLifecycle(phase, input, endpoint.URL, false).SessionID; id != "host:resume:2" {
 			t.Fatalf("%s effective id = %q", phase, id)
 		}
 	}
@@ -209,9 +209,9 @@ func TestCodexResumeLifecycleUsesConfirmedBinding(t *testing.T) {
 		t.Fatalf("resolution/prompt registered: %d registrations", before)
 	}
 	missing, _ := json.Marshal(codexPromptInput{CWD: root, SessionID: "missing"})
-	runCodexLifecycle("codex-session-end", missing, endpoint.URL)
-	runCodexLifecycle("codex-session-end", input, endpoint.URL)
-	runCodexLifecycle("codex-session-end", input, endpoint.URL)
+	runCodexLifecycle("codex-session-end", missing, endpoint.URL, false)
+	runCodexLifecycle("codex-session-end", input, endpoint.URL, false)
+	runCodexLifecycle("codex-session-end", input, endpoint.URL, false)
 	if registrations.Load() != before {
 		t.Fatal("close registered a session")
 	}

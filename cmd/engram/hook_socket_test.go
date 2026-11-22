@@ -55,7 +55,7 @@ func TestNativeHooksSocket(t *testing.T) {
 	t.Setenv("ENGRAM_PORT", "invalid")
 	input := []byte(`{"session_id":"host","cwd":"/work","prompt":"remember","tool_name":"mcp__engram__mem_save","tool_input":{}}`)
 	t.Run("lifecycle", func(t *testing.T) {
-		if got, _ := runCodexLifecycle("codex-register", input, codexHookURL()); got != "host" {
+		if got := runCodexLifecycle("codex-register", input, codexHookURL(), false).SessionID; got != "host" {
 			t.Fatalf("registration = %q", got)
 		}
 	})

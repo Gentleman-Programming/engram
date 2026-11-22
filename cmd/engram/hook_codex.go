@@ -263,33 +263,34 @@ func codexRuntimeRequest(ctx context.Context, client *http.Client, base, host st
 	return id, "", false
 }
 
-func cmdCodexLifecycle(action string) {
+type codexLifecycleResult struct {
+	SessionID             string `json:"session_id,omitempty"`
+	Project               string `json:"project,omitempty"`
+	ProjectLookupComplete bool   `json:"project_lookup_complete,omitempty"`
+	ErrorCode             string `json:"error_code,omitempty"`
+	reason                string
+}
+
+func cmdCodexLifecycle(action string, localCompaction bool) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return
 	}
-	result, code := runCodexLifecycle(action, data, codexHookURL())
-	jsonOutput := os.Getenv("ENGRAM_HOOK_OUTPUT") == "json"
-	if code != "" && jsonOutput {
-		_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"error_code": code})
-		return
-	}
-	if result != "" {
-		// Internal shell callers opt into JSON to retain opaque identity bytes.
-		// The default text output remains compatible with existing CLI callers.
-		if jsonOutput {
-			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"session_id": result})
-		} else {
-			_, _ = fmt.Fprintln(os.Stdout, result)
+	result := runCodexLifecycle(action, data, codexHookURL(), localCompaction)
+	if os.Getenv("ENGRAM_HOOK_OUTPUT") == "json" {
+		if result.SessionID != "" || result.Project != "" || result.ProjectLookupComplete || result.ErrorCode != "" {
+			_ = json.NewEncoder(os.Stdout).Encode(result)
 		}
+	} else if result.SessionID != "" {
+		_, _ = fmt.Fprintln(os.Stdout, result.SessionID)
 	}
 }
 
 // Runtime identity belongs to the core, not a second platform-specific cache.
-func runCodexLifecycle(action string, data []byte, base string) (string, string) {
+func runCodexLifecycle(action string, data []byte, base string, localCompaction bool) codexLifecycleResult {
 	// A process-scoped flag from the adapter allows older cores to continue
 	// handling codex-resolve with their existing budget.
-	compaction := action == "codex-resolve" && os.Getenv("ENGRAM_HOOK_CODEX_COMPACTION") == "1"
+	compaction := action == "codex-resolve" && (localCompaction || os.Getenv("ENGRAM_HOOK_CODEX_COMPACTION") == "1")
 	budget := codexUserPromptDeadline
 	if compaction {
 		budget = codexCompactionResolveDeadline
@@ -297,38 +298,52 @@ func runCodexLifecycle(action string, data []byte, base string) (string, string)
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	id, reason := runCodexLifecycleResult(ctx, action, data, base)
-	if compaction && id == "" {
+	result := runCodexLifecycleResult(ctx, action, data, base, localCompaction)
+	if !localCompaction {
+		result.Project = ""
+		result.ProjectLookupComplete = false
+	}
+	if compaction && result.SessionID == "" {
 		switch {
 		case ctx.Err() == context.DeadlineExceeded:
-			return "", "runtime_resolve_deadline"
-		case reason == codexSessionNotRegisteredReason:
-			return "", "runtime_session_not_registered"
+			result.ErrorCode = "runtime_resolve_deadline"
+		case result.reason == codexSessionNotRegisteredReason:
+			result.ErrorCode = "runtime_session_not_registered"
 		}
 	}
-	return id, ""
+	return result
 }
 
-func runCodexLifecycleResult(ctx context.Context, action string, data []byte, base string) (string, string) {
+func runCodexLifecycleResult(ctx context.Context, action string, data []byte, base string, localCompaction bool) codexLifecycleResult {
 	const failure = "Codex host session resolution could not be confirmed"
 	var in codexPromptInput
 	if json.Unmarshal(data, &in) != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.CWD) == "" || base == "" {
-		return "", failure
+		return codexLifecycleResult{reason: failure}
 	}
 	_, client := hookEndpointClient(base)
-	selection, ok := codexHookProject(ctx, client, base, in.SessionID, in.CWD)
+	projectClient := client
+	if localCompaction {
+		// The old adapter required a project response from the configured origin.
+		// A redirect must not select the authority on this standalone path.
+		direct := *client
+		direct.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		projectClient = &direct
+	}
+	selection, ok := codexHookProject(ctx, projectClient, base, in.SessionID, in.CWD)
 	if !ok {
-		return "", failure
+		// The adapter can skip a repeated presentation lookup after this attempt.
+		return codexLifecycleResult{reason: failure, ProjectLookupComplete: localCompaction}
 	}
 	switch action {
 	case "codex-register":
-		return codexRegisterAt(ctx, client, base, in.SessionID, in.CWD, selection), ""
+		return codexLifecycleResult{SessionID: codexRegisterAt(ctx, client, base, in.SessionID, in.CWD, selection)}
 	case "codex-resolve":
-		return codexRuntimeResult(ctx, client, base, in.SessionID, in.CWD, selection.name, "resolve")
+		id, reason := codexRuntimeResult(ctx, client, base, in.SessionID, in.CWD, selection.name, "resolve")
+		return codexLifecycleResult{SessionID: id, Project: selection.name, reason: reason}
 	case "codex-session-end":
 		_ = codexRuntimeAt(ctx, client, base, in.SessionID, in.CWD, selection.name, "end")
 	}
-	return "", failure
+	return codexLifecycleResult{reason: failure}
 }
 
 // codexHookProject selects identity without changing runtime scope semantics.

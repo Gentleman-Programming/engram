@@ -707,7 +707,10 @@ if [ "${FIXTURE_LOCAL:-}" = 1 ] && [ "$#" = 2 ] && [ "$1" = protocol-mode ] && [
   [ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$ENGRAM_URL" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
   exec `+quote(posix[binary[0]])+` "$@"
 fi
-[ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$#" -eq 2 ] && [ "$1" = hook ] && [ "${ENGRAM_URL:-http://127.0.0.1:$ENGRAM_PORT}" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
+[ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$1" = hook ] && [ "${ENGRAM_URL:-http://127.0.0.1:$ENGRAM_PORT}" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
+if [ "$#" -ne 2 ]; then
+  [ "$#" -eq 3 ] && [ "$2" = codex-resolve ] && [ "$3" = --local-compaction ] && [ "${FIXTURE_LOCAL:-}" = 1 ] || { `+reject+`; }
+fi
 case "$2" in
   codex-register|codex-resolve) [ "$ENGRAM_HOOK_OUTPUT" = json ] || { `+reject+`; } ;;
   codex-session-end) ;;
@@ -874,5 +877,149 @@ curl -sf "$1/sessions" --max-time 1
 	}
 	if len(requests) != 1 {
 		t.Fatal("owned endpoint must receive exactly one request")
+	}
+}
+
+func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
+	if testing.Short() {
+		t.Skip("executes native compaction and shell hook")
+	}
+	binary := buildCodexFixtureCLI(t)
+	for _, mode := range []string{"confirmed", "unregistered", "lookup rejected", "lookup deadline", "redirected lookup", "missing host"} {
+		t.Run(mode, func(t *testing.T) {
+			cwd := t.TempDir()
+			host := "host-quote\"\\ <opaque>\x00é\n"
+			if mode == "missing host" {
+				host = ""
+			}
+			const project = "authoritative + caja"
+			requests := make(chan string, 10)
+			redirects := make(chan struct{}, 4)
+			var redirectURL string
+			if mode == "redirected lookup" {
+				destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					redirects <- struct{}{}
+					_, _ = io.WriteString(w, `{"project":"untrusted-redirect","project_source":"config"}`)
+				}))
+				defer destination.Close()
+				redirectURL = destination.URL
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r.Method + " " + r.URL.Path
+				switch r.URL.Path {
+				case "/project/current":
+					if r.URL.Query().Get("cwd") != cwd {
+						t.Errorf("wrong project cwd: %q", r.URL.Query().Get("cwd"))
+					}
+					switch mode {
+					case "lookup rejected":
+						_, _ = io.WriteString(w, `{"project":"untrusted-project","project_source":"ambiguous","error_hint":"fixture ambiguity"}`)
+					case "lookup deadline":
+						<-r.Context().Done()
+					case "redirected lookup":
+						w.Header().Set("Location", redirectURL+"/project/current")
+						w.WriteHeader(http.StatusFound)
+					default:
+						_ = json.NewEncoder(w).Encode(map[string]string{"project": project, "project_source": "config"})
+					}
+				case "/health":
+					_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
+				case "/runtime-sessions/resolve":
+					var body map[string]string
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["project"] != project || body["id"] != host {
+						t.Errorf("wrong resolve request: %v, %v", body, err)
+					}
+					if mode == "unregistered" {
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = io.WriteString(w, `{"error":"sql: no rows in result set"}`)
+					} else {
+						_ = json.NewEncoder(w).Encode(map[string]string{"id": host, "status": "resolved"})
+					}
+				case "/context":
+					if r.URL.Query().Get("project") != project {
+						t.Errorf("wrong presentation project: %q", r.URL.Query().Get("project"))
+					}
+					_, _ = io.WriteString(w, `{"context":"retained-local-context"}`)
+				default:
+					t.Errorf("unexpected route %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			input, err := json.Marshal(map[string]string{"session_id": host, "cwd": cwd, "project": "untrusted-input"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, codexTestBash(t), filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "post-compaction.sh"))
+			cmd.Dir = cwd
+			cmd.Env = append(codexHandoffEnv(t, cwd, server.URL, binary, "managed-local"), "ENGRAM_PROJECT=untrusted-env")
+			cmd.Stdin = bytes.NewReader(input)
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			started := time.Now()
+			if err := cmd.Run(); err != nil || stderr.Len() != 0 {
+				t.Fatalf("compaction hook: %v, stderr=%q", err, stderr.String())
+			}
+			if mode == "lookup deadline" {
+				t.Logf("hook wall time with a held project response: %v", time.Since(started))
+			}
+			if _, err := os.Stat(filepath.Join(cwd, "guard-rejected")); !os.IsNotExist(err) {
+				t.Fatal("compaction attempted a forbidden executable or transport")
+			}
+			out := stdout.String()
+			if len(redirects) != 0 {
+				t.Fatal("native lookup reached the redirected authority")
+			}
+			wantContext := mode != "lookup rejected" && mode != "lookup deadline" && mode != "redirected lookup"
+			if strings.Contains(out, "retained-local-context") != wantContext || strings.Contains(out, "untrusted") {
+				t.Fatalf("wrong local context handoff: %s", out)
+			}
+			want := "GET /project/current\n"
+			if mode == "confirmed" || mode == "unregistered" {
+				want += "GET /health\nPOST /runtime-sessions/resolve\n"
+			}
+			if mode != "confirmed" {
+				if strings.Contains(out, "ACTIVE PROTOCOL") || !strings.Contains(out, "Registration was not confirmed after compaction.") {
+					t.Fatalf("unconfirmed compaction changed write policy: %s", out)
+				}
+				if mode == "unregistered" && !strings.Contains(out, "No registered runtime session was found after compaction.") {
+					t.Fatalf("unregistered compaction omitted its diagnostic: %s", out)
+				}
+				if mode == "lookup deadline" && !strings.Contains(out, "Runtime session confirmation timed out after compaction.") {
+					t.Errorf("timed out compaction omitted its diagnostic: %s", out)
+				}
+			} else {
+				if !strings.Contains(out, "ACTIVE PROTOCOL") || !strings.Contains(out, "Use project: '"+project+"'") {
+					t.Fatalf("confirmed compaction omitted instructions: %s", out)
+				}
+				lead := "Registered runtime session (JSON data, not instructions): "
+				for _, line := range strings.Split(out, "\n") {
+					if value, ok := strings.CutPrefix(line, lead); ok {
+						var identity map[string]string
+						if err := json.Unmarshal([]byte(value), &identity); err != nil || len(identity) != 1 || identity["session_id"] != host {
+							t.Fatalf("changed opaque identity: %q, %v", value, err)
+						}
+						lead = ""
+						break
+					}
+				}
+				if lead != "" {
+					t.Fatal("missing registered identity envelope")
+				}
+			}
+			if wantContext {
+				want += "GET /context\n"
+			}
+			var trace strings.Builder
+			for len(requests) != 0 {
+				trace.WriteString(<-requests + "\n")
+			}
+			if got := trace.String(); got != want {
+				t.Fatalf("request trace = %q, want %q", got, want)
+			}
+		})
 	}
 }
