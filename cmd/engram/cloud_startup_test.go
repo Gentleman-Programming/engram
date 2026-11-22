@@ -80,7 +80,7 @@ func TestRunCloudServeGatesRoutesUntilRuntimeIsReady(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		allowBuild()
-		startup.Close()
+		_ = startup.Close()
 		if err := <-done; !errors.Is(err, net.ErrClosed) {
 			t.Errorf("serve failure: %v", err)
 		}
@@ -111,7 +111,7 @@ func TestRunCloudServeGatesRoutesUntilRuntimeIsReady(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		body, err := io.ReadAll(res.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -180,7 +180,7 @@ func TestRunCloudServeBindFailureDoesNotInitialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	cfg := cloud.DefaultConfig()
 	cfg.Port = listener.Addr().(*net.TCPAddr).Port
 	stubCloudStartupRuntime(t, func(context.Context, cloud.Config) (cloudServerRuntime, error) {
@@ -213,7 +213,7 @@ func TestRunCloudServeClosesListenerOnInitializationFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		if res.StatusCode != http.StatusServiceUnavailable {
 			t.Errorf("starting health returned %d", res.StatusCode)
 		}
@@ -226,7 +226,7 @@ func TestRunCloudServeClosesListenerOnInitializationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cannot rebind startup address %s: %v", addr, err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 }
 
 // startupFailureListener accepts one HTTP connection, then waits for the
@@ -254,7 +254,7 @@ func TestRunCloudServeCancelsInitializationOnAcceptFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	var failOnce, cleanupOnce sync.Once
 	acceptFailed := make(chan struct{})
 	unblockCleanup := make(chan struct{})
@@ -307,7 +307,7 @@ func TestRunCloudServeCancelsInitializationOnAcceptFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		if _, err := io.Copy(io.Discard, res.Body); err != nil {
 			t.Fatal(err)
 		}
