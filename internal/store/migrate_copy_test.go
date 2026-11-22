@@ -228,11 +228,20 @@ func TestMigrateCopyLogicalWAL(t *testing.T) {
 			if _, err = s.db.Exec(sql); err != nil {
 				t.Fatal(err)
 			}
+			walPath := filepath.Join(src, "engram.db-wal")
+			wal, err := os.ReadFile(walPath)
+			if err != nil || len(wal) == 0 {
+				t.Fatalf("capture uncheckpointed WAL: %d bytes, %v", len(wal), err)
+			}
 			if err = s.Close(); err != nil {
 				t.Fatal(err)
 			}
-			// Restore the checkpointed base; the new logical state exists only in WAL.
+			// Restore the pre-close snapshot: closing the last connection can
+			// checkpoint and trim the persistent WAL.
 			if err = os.WriteFile(filepath.Join(src, "engram.db"), base, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(walPath, wal, 0600); err != nil {
 				t.Fatal(err)
 			}
 			if err = os.WriteFile(filepath.Join(src, "engram.db-shm"), []byte("source SHM must not be reused"), 0600); err != nil {
