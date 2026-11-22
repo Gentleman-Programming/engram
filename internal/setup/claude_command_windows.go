@@ -23,6 +23,7 @@ const (
 var (
 	claudeIsProcessInJob          = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
 	assignClaudeSetupJob          = windows.AssignProcessToJobObject
+	openClaudeSetupProcess        = windows.OpenProcess
 	errClaudeNestedJobUnavailable = errors.New("Windows rejected the nested Claude setup job")
 )
 
@@ -148,9 +149,7 @@ func runClaudeJob(ctx context.Context, name string, args ...string) ([]byte, err
 			runErr = fmt.Errorf("exit status %d", status)
 		}
 	}
-	if err := drainClaudeJob(job, process.Process); err != nil {
-		return nil, errors.Join(runErr, fmt.Errorf("drain Claude setup job: %w", err))
-	}
+	drainClaudeJob(job, process)
 	if _, err := output.Seek(0, io.SeekStart); err != nil {
 		return nil, errors.Join(runErr, err)
 	}
@@ -202,51 +201,87 @@ func configureClaudeJob(job windows.Handle, draining bool) error {
 	return err
 }
 
-func drainClaudeJob(job, root windows.Handle) error {
+func drainClaudeJob(job windows.Handle, root windows.ProcessInformation) {
 	slow := time.AfterFunc(5*time.Second, func() {
 		fmt.Fprintln(os.Stderr, "Windows is still stopping Claude. Setup will hold the profile lock until process cleanup finishes.")
 	})
 	defer slow.Stop()
 
-	stopErr := configureClaudeJob(job, true)
-	members, listErr := openClaudeJobMembers(job)
-	listErr = errors.Join(stopErr, listErr)
-	defer func() {
-		for _, process := range members {
-			windows.CloseHandle(process)
-		}
-	}()
-	if err := windows.TerminateJobObject(job, 1); err != nil {
-		return errors.Join(listErr, err)
+	// Preserve the PID census before termination can remove members from it.
+	// Keep the profile locked if Windows cannot establish the cleanup state.
+	retryClaudeCleanup(func() error { return configureClaudeJob(job, true) })
+	var pids []uintptr
+	retryClaudeCleanup(func() error {
+		var err error
+		pids, err = claudeJobProcessIDs(job)
+		return err
+	})
+	type member struct {
+		pid     uint32
+		process windows.Handle
 	}
-	// Accounting can reach zero while process objects are still terminating.
-	// Keep handles for the root and known children through their final exit.
-	for _, process := range append(members, root) {
-		if _, err := windows.WaitForSingleObject(process, windows.INFINITE); err != nil {
-			listErr = errors.Join(listErr, err)
+	var members []member
+	for _, pid := range pids {
+		if uint32(pid) == root.ProcessId {
+			continue
+		}
+		process, err := openClaudeJobMember(job, uint32(pid))
+		if err != nil || process != 0 {
+			members = append(members, member{pid: uint32(pid), process: process})
 		}
 	}
+	retryClaudeCleanup(func() error { return windows.TerminateJobObject(job, 1) })
+	waitClaudeJobExit(root.Process)
+	for _, child := range members {
+		if child.process == 0 {
+			// If the initial open was inconclusive, retain the PID even
+			// when job accounting drops to zero. An exit must be observed
+			// or the identity must be confirmed gone before we can unlock.
+			retryClaudeCleanup(func() error {
+				var err error
+				child.process, err = openClaudeJobMember(job, child.pid)
+				return err
+			})
+		}
+		if child.process != 0 {
+			waitClaudeJobExit(child.process)
+			windows.CloseHandle(child.process)
+		}
+	}
+
 	var accounting struct {
 		totalUserTime, totalKernelTime, periodUserTime, periodKernelTime int64
 		pageFaults, totalProcesses, activeProcesses, terminatedProcesses uint32
 	}
-	for {
+	retryClaudeCleanup(func() error {
 		if err := windows.QueryInformationJobObject(job, windows.JobObjectBasicAccountingInformation,
 			uintptr(unsafe.Pointer(&accounting)), uint32(unsafe.Sizeof(accounting)), nil); err != nil {
-			return errors.Join(listErr, err)
+			return err
 		}
-		if accounting.activeProcesses == 0 {
-			return listErr
+		if accounting.activeProcesses != 0 {
+			return errors.New("Claude setup job still has active processes")
 		}
+		return nil
+	})
+}
+
+func waitClaudeJobExit(process windows.Handle) {
+	retryClaudeCleanup(func() error {
+		_, err := windows.WaitForSingleObject(process, windows.INFINITE)
+		return err
+	})
+}
+
+func retryClaudeCleanup(step func() error) {
+	for step() != nil {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-func openClaudeJobMembers(job windows.Handle) ([]windows.Handle, error) {
+func claudeJobProcessIDs(job windows.Handle) ([]uintptr, error) {
 	// JOBOBJECT_BASIC_PROCESS_ID_LIST has two DWORDs followed by a variable
 	// ULONG_PTR array. An aligned uintptr buffer works on either target.
 	const headerWords = int(8 / unsafe.Sizeof(uintptr(0)))
-	var pids []uintptr
 	for count := 8; ; count *= 2 {
 		buffer := make([]uintptr, headerWords+count)
 		err := windows.QueryInformationJobObject(job, windows.JobObjectBasicProcessIdList,
@@ -258,29 +293,28 @@ func openClaudeJobMembers(job windows.Handle) ([]windows.Handle, error) {
 			return nil, err
 		}
 		header := (*[2]uint32)(unsafe.Pointer(&buffer[0]))
-		pids = buffer[headerWords : headerWords+int(header[1])]
-		break
+		if header[1] < header[0] {
+			continue // Windows requires a larger buffer for a complete census.
+		}
+		return buffer[headerWords : headerWords+int(header[1])], nil
 	}
-	var members []windows.Handle
-	var openErr error
-	for _, pid := range pids {
-		process, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
-			continue // The PID already exited.
-		}
-		if err != nil {
-			openErr = errors.Join(openErr, err)
-			continue
-		}
-		belongs, err := claudeProcessInJob(process, job)
-		if err != nil || !belongs {
-			windows.CloseHandle(process)
-			openErr = errors.Join(openErr, err)
-			continue // The PID may have been recycled after the snapshot.
-		}
-		members = append(members, process)
+}
+
+func openClaudeJobMember(job windows.Handle, pid uint32) (windows.Handle, error) {
+	process, err := openClaudeSetupProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		// The census contains valid, nonzero PIDs. This one is now gone.
+		return 0, nil
 	}
-	return members, openErr
+	if err != nil {
+		return 0, err
+	}
+	belongs, err := claudeProcessInJob(process, job)
+	if err != nil || !belongs {
+		windows.CloseHandle(process)
+		return 0, err // Confirmed non-member means the original PID was recycled.
+	}
+	return process, nil
 }
 
 func claudeProcessInJob(process, job windows.Handle) (bool, error) {

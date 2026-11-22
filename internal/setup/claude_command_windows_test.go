@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -64,7 +65,12 @@ func TestClaudeOrdinarySetupAfterSuspendedAssignmentDenial(t *testing.T) {
 	}
 }
 
-func TestClaudeProfileTimeoutDrainsBeforeReleasingLock(t *testing.T) {
+func TestClaudeProfileCancellationDrainsBeforeReleasingLock(t *testing.T) {
+	t.Run("observed process exits", func(t *testing.T) { testClaudeProfileCancellation(t, false) })
+	t.Run("child open denied during drain", func(t *testing.T) { testClaudeProfileCancellation(t, true) })
+}
+
+func testClaudeProfileCancellation(t *testing.T, withholdChild bool) {
 	profile := t.TempDir()
 	root := filepath.Join(profile, managedClaudeDirectory)
 	t.Setenv("ENGRAM_TEST_CLAUDE_JOB", profile)
@@ -73,6 +79,38 @@ func TestClaudeProfileTimeoutDrainsBeforeReleasingLock(t *testing.T) {
 		err    error
 	}
 	done := make(chan result, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	probeReady := make(chan struct{})
+	permitOpen := make(chan struct{})
+	retriedAfterExit := make(chan struct{}, 1)
+	var permit sync.Once
+	allowCleanup := func() { permit.Do(func() { close(permitOpen) }) }
+	var child windows.Handle
+	var childPID uint32
+	if withholdChild {
+		original := openClaudeSetupProcess
+		t.Cleanup(func() { openClaudeSetupProcess = original })
+		openClaudeSetupProcess = func(access uint32, inherit bool, pid uint32) (windows.Handle, error) {
+			select {
+			case <-probeReady:
+				if pid == childPID {
+					select {
+					case <-permitOpen:
+					default:
+						if state, _ := windows.WaitForSingleObject(child, 0); state == windows.WAIT_OBJECT_0 {
+							select {
+							case retriedAfterExit <- struct{}{}:
+							default:
+							}
+						}
+						return 0, windows.ERROR_ACCESS_DENIED
+					}
+				}
+			default:
+			}
+			return original(access, inherit, pid)
+		}
+	}
 	go func() {
 		defer close(done)
 		release, err := lockManagedClaude(root)
@@ -80,38 +118,62 @@ func TestClaudeProfileTimeoutDrainsBeforeReleasingLock(t *testing.T) {
 			done <- result{err: err}
 			return
 		}
-		out, err := runClaudeProfileProcess(3*time.Second, os.Args[0], "-test.run=^TestClaudeProfileJobWorker$", "--", "parent")
+		out, err := runClaudeJob(ctx, os.Args[0], "-test.run=^TestClaudeProfileJobWorker$", "--", "parent")
 		release()
 		done <- result{out, err}
 	}()
 	defer func() {
 		// Always wait for the fixture to exit before t.TempDir is removed.
+		allowCleanup()
+		cancel()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			t.Error("timed-out fixture still running")
+			t.Error("canceled fixture still running")
 		}
 	}()
-	deadline := time.Now().Add(2 * time.Second)
-	child := openClaudeTestProcess(t, filepath.Join(profile, "child.pid"), deadline)
+	deadline := time.Now().Add(10 * time.Second)
+	child, childPID = openClaudeTestProcess(t, filepath.Join(profile, "child.pid"), deadline)
 	defer windows.CloseHandle(child)
-	parent := openClaudeTestProcess(t, filepath.Join(profile, "parent.pid"), deadline)
+	parent, _ := openClaudeTestProcess(t, filepath.Join(profile, "parent.pid"), deadline)
 	defer windows.CloseHandle(parent)
+	close(probeReady)
 
 	release, err := lockManagedClaude(root)
 	if err == nil {
 		release()
 		t.Fatal("competing setup acquired lock during Claude command")
 	}
-	finished := <-done
-	if !errors.Is(finished.err, context.DeadlineExceeded) ||
+	cancel()
+	if withholdChild {
+		select {
+		case <-retriedAfterExit:
+		case <-done:
+			t.Fatal("cleanup returned without resolving the omitted child")
+		case <-time.After(10 * time.Second):
+			t.Fatal("cleanup did not retry the omitted child after termination")
+		}
+		competing, err := lockManagedClaude(root)
+		if err == nil {
+			competing()
+			t.Fatal("competing setup acquired the lock without verified child exit")
+		}
+		allowCleanup()
+	}
+	var finished result
+	select {
+	case finished = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Claude process did not finish after cancellation")
+	}
+	if !errors.Is(finished.err, context.Canceled) ||
 		!strings.Contains(string(finished.output), "Claude parent ready") ||
 		!strings.Contains(string(finished.output), "Claude writer ready") {
-		t.Fatalf("deadline result = %v, output = %q", finished.err, finished.output)
+		t.Fatalf("cancellation result = %v, output = %q", finished.err, finished.output)
 	}
 	release, err = lockManagedClaude(root)
 	if err != nil {
-		t.Fatalf("profile still locked after timeout: %v", err)
+		t.Fatalf("profile still locked after cancellation: %v", err)
 	}
 	defer release()
 	for _, process := range []windows.Handle{parent, child} {
@@ -126,7 +188,7 @@ func TestClaudeProfileTimeoutDrainsBeforeReleasingLock(t *testing.T) {
 	}
 }
 
-func openClaudeTestProcess(t *testing.T, pidFile string, deadline time.Time) windows.Handle {
+func openClaudeTestProcess(t *testing.T, pidFile string, deadline time.Time) (windows.Handle, uint32) {
 	t.Helper()
 	for time.Now().Before(deadline) {
 		raw, err := os.ReadFile(pidFile)
@@ -142,13 +204,13 @@ func openClaudeTestProcess(t *testing.T, pidFile string, deadline time.Time) win
 					windows.CloseHandle(process)
 					t.Fatalf("fixture writer was not running: state %d, error %v", state, err)
 				}
-				return process
+				return process, uint32(pid)
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("no subprocess at %s", pidFile)
-	return 0
+	return 0, 0
 }
 
 func TestClaudeProfileJobWorker(t *testing.T) {

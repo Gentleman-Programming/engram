@@ -54,6 +54,12 @@ func TestCmdSetupNativePromptRejectsConflictingOptions(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
+	oldSetter := setupSetClaudeWindowsNativePrompt
+	t.Cleanup(func() { setupSetClaudeWindowsNativePrompt = oldSetter })
+	setupSetClaudeWindowsNativePrompt = func(bool) error {
+		t.Fatal("invalid arguments reached the native prompt setter")
+		return nil
+	}
 	enable := "--native-windows-prompt=enable"
 	for _, args := range [][]string{
 		{"codex", enable},
@@ -70,6 +76,48 @@ func TestCmdSetupNativePromptRejectsConflictingOptions(t *testing.T) {
 		if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "engram setup claude-code --native-windows-prompt=enable|disable") {
 			t.Fatalf("args=%v: expected validation error, panic=%v stderr=%q", args, recovered, stderr)
 		}
+	}
+}
+
+func TestCmdSetupNativePromptDispatch(t *testing.T) {
+	stubRuntimeHooks(t)
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	oldSetter := setupSetClaudeWindowsNativePrompt
+	t.Cleanup(func() { setupSetClaudeWindowsNativePrompt = oldSetter })
+	for _, tc := range []struct {
+		name   string
+		mode   string
+		enable bool
+		err    error
+	}{
+		{name: "enable", mode: "enable", enable: true},
+		{name: "disable", mode: "disable", enable: false},
+		{name: "setter error", mode: "disable", err: errors.New("cannot select managed Bash")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			setupSetClaudeWindowsNativePrompt = func(enable bool) error {
+				calls++
+				if enable != tc.enable {
+					t.Fatalf("setter received enable=%v, want %v", enable, tc.enable)
+				}
+				return tc.err
+			}
+			withArgs(t, "engram", "setup", "claude-code", "--native-windows-prompt="+tc.mode)
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+			if calls != 1 {
+				t.Fatalf("native prompt setter calls = %d", calls)
+			}
+			if tc.err != nil {
+				if recovered != exitCode(1) || stdout != "" || !strings.Contains(stderr, tc.err.Error()) {
+					t.Fatalf("setter failure = (%q, %q, %v)", stdout, stderr, recovered)
+				}
+			} else if recovered != nil || stderr != "" ||
+				stdout != "Claude Code Windows native prompt hook "+tc.mode+"d.\n" {
+				t.Fatalf("setter success = (%q, %q, %v)", stdout, stderr, recovered)
+			}
+		})
 	}
 }
 

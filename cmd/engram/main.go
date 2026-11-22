@@ -124,6 +124,7 @@ var (
 	setupAddClaudeCodeAllowlist            = setup.AddClaudeCodeAllowlist
 	setupAddClaudeCodeMemoryWriteAllowlist = setup.AddClaudeCodeMemoryWriteAllowlist
 	setupEnsureClaudeCodeUserMCP           = setup.EnsureClaudeCodeUserMCP
+	setupSetClaudeWindowsNativePrompt      = setup.SetClaudeWindowsNativePrompt
 	setupVerifyClaudeCodeSlim              = setup.VerifyClaudeCodeSlimCapability
 	scanInputLine                          = fmt.Scanln
 
@@ -3686,7 +3687,7 @@ func cmdSetup(cfg store.Config) {
 			fatal(fmt.Errorf("usage: engram setup claude-code --native-windows-prompt=enable|disable"))
 			return
 		}
-		if err := setup.SetClaudeWindowsNativePrompt(nativePrompt == "enable"); err != nil {
+		if err := setupSetClaudeWindowsNativePrompt(nativePrompt == "enable"); err != nil {
 			fatal(err)
 			return
 		}
