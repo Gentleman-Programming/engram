@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -21,12 +22,12 @@ func stubCloudStartupPort(t *testing.T) {
 	t.Helper()
 	original := listenCloudDuringStartup
 	t.Cleanup(func() { listenCloudDuringStartup = original })
-	listenCloudDuringStartup = func(_ string, _ int) (*cloudserver.StartupListener, error) {
-		return cloudserver.ListenDuringStartup("127.0.0.1", 0)
+	listenCloudDuringStartup = func(network, _ string) (net.Listener, error) {
+		return net.Listen(network, "127.0.0.1:0")
 	}
 }
 
-func stubCloudStartupRuntime(t *testing.T, build func(cloud.Config) (cloudServerRuntime, error)) {
+func stubCloudStartupRuntime(t *testing.T, build func(context.Context, cloud.Config) (cloudServerRuntime, error)) {
 	t.Helper()
 	original := newCloudRuntime
 	t.Cleanup(func() { newCloudRuntime = original })
@@ -43,11 +44,11 @@ func (a *cloudStartupTestAuthenticator) Authorize(*http.Request) error {
 func TestRunCloudServeGatesRoutesUntilRuntimeIsReady(t *testing.T) {
 	cfg := cloud.DefaultConfig()
 	cfg.Port = 0
-	opened := make(chan *cloudserver.StartupListener, 1)
+	opened := make(chan net.Listener, 1)
 	originalListen := listenCloudDuringStartup
 	t.Cleanup(func() { listenCloudDuringStartup = originalListen })
-	listenCloudDuringStartup = func(host string, port int) (*cloudserver.StartupListener, error) {
-		startup, err := cloudserver.ListenDuringStartup(host, port)
+	listenCloudDuringStartup = func(network, addr string) (net.Listener, error) {
+		startup, err := net.Listen(network, addr)
 		opened <- startup
 		return startup, err
 	}
@@ -55,7 +56,7 @@ func TestRunCloudServeGatesRoutesUntilRuntimeIsReady(t *testing.T) {
 	auth := &cloudStartupTestAuthenticator{}
 	building := make(chan struct{})
 	release := make(chan struct{})
-	stubCloudStartupRuntime(t, func(cfg cloud.Config) (cloudServerRuntime, error) {
+	stubCloudStartupRuntime(t, func(_ context.Context, cfg cloud.Config) (cloudServerRuntime, error) {
 		close(building)
 		<-release
 		return &defaultCloudRuntime{
@@ -68,7 +69,7 @@ func TestRunCloudServeGatesRoutesUntilRuntimeIsReady(t *testing.T) {
 	allowBuild := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(allowBuild)
 
-	var startup *cloudserver.StartupListener
+	var startup net.Listener
 	select {
 	case startup = <-opened:
 	case <-time.After(5 * time.Second):
@@ -80,7 +81,7 @@ func TestRunCloudServeGatesRoutesUntilRuntimeIsReady(t *testing.T) {
 	t.Cleanup(func() {
 		allowBuild()
 		startup.Close()
-		if err := <-done; !errors.Is(err, http.ErrServerClosed) {
+		if err := <-done; !errors.Is(err, net.ErrClosed) {
 			t.Errorf("serve failure: %v", err)
 		}
 	})
@@ -182,7 +183,7 @@ func TestRunCloudServeBindFailureDoesNotInitialize(t *testing.T) {
 	defer listener.Close()
 	cfg := cloud.DefaultConfig()
 	cfg.Port = listener.Addr().(*net.TCPAddr).Port
-	stubCloudStartupRuntime(t, func(cloud.Config) (cloudServerRuntime, error) {
+	stubCloudStartupRuntime(t, func(context.Context, cloud.Config) (cloudServerRuntime, error) {
 		t.Fatal("runtime initialized despite bind failure")
 		return nil, nil
 	})
@@ -198,15 +199,15 @@ func TestRunCloudServeClosesListenerOnInitializationFailure(t *testing.T) {
 	var addr string
 	originalListen := listenCloudDuringStartup
 	t.Cleanup(func() { listenCloudDuringStartup = originalListen })
-	listenCloudDuringStartup = func(host string, port int) (*cloudserver.StartupListener, error) {
-		startup, err := cloudserver.ListenDuringStartup(host, port)
+	listenCloudDuringStartup = func(network, address string) (net.Listener, error) {
+		startup, err := net.Listen(network, address)
 		if err == nil {
 			addr = startup.Addr().String()
 		}
 		return startup, err
 	}
 	want := errors.New("startup repair failed")
-	stubCloudStartupRuntime(t, func(cloud.Config) (cloudServerRuntime, error) {
+	stubCloudStartupRuntime(t, func(context.Context, cloud.Config) (cloudServerRuntime, error) {
 		client := &http.Client{Timeout: 2 * time.Second}
 		res, err := client.Get("http://" + addr + "/health")
 		if err != nil {
@@ -226,4 +227,123 @@ func TestRunCloudServeClosesListenerOnInitializationFailure(t *testing.T) {
 		t.Fatalf("cannot rebind startup address %s: %v", addr, err)
 	}
 	defer listener.Close()
+}
+
+// startupFailureListener accepts one HTTP connection, then waits for the
+// test to inject a permanent accept error while the initializer is active.
+type startupFailureListener struct {
+	net.Listener
+	accepted bool
+	fail     <-chan struct{}
+	err      error
+}
+
+func (l *startupFailureListener) Accept() (net.Conn, error) {
+	if !l.accepted {
+		l.accepted = true
+		return l.Listener.Accept()
+	}
+	<-l.fail
+	return nil, l.err
+}
+
+func TestRunCloudServeCancelsInitializationOnAcceptFailure(t *testing.T) {
+	cfg := cloud.DefaultConfig()
+	cfg.Port = 0
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var failOnce, cleanupOnce sync.Once
+	acceptFailed := make(chan struct{})
+	unblockCleanup := make(chan struct{})
+	failAccept := func() { failOnce.Do(func() { close(acceptFailed) }) }
+	finishCleanup := func() { cleanupOnce.Do(func() { close(unblockCleanup) }) }
+	want := errors.New("owned startup listener failed to accept")
+	originalListen := listenCloudDuringStartup
+	t.Cleanup(func() { listenCloudDuringStartup = originalListen })
+	listenCloudDuringStartup = func(string, string) (net.Listener, error) {
+		return &startupFailureListener{Listener: listener, fail: acceptFailed, err: want}, nil
+	}
+
+	initStarted := make(chan struct{})
+	canceled := make(chan error, 1)
+	stubCloudStartupRuntime(t, func(ctx context.Context, _ cloud.Config) (cloudServerRuntime, error) {
+		close(initStarted)
+		<-ctx.Done()
+		canceled <- context.Cause(ctx)
+		<-unblockCleanup
+		return nil, ctx.Err()
+	})
+	done := make(chan struct{})
+	var serveErr error
+	go func() {
+		defer close(done)
+		serveErr = runCloudServe(cfg)
+	}()
+	t.Cleanup(func() {
+		failAccept()
+		finishCleanup()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("startup runner did not finish during cleanup")
+		}
+	})
+	select {
+	case <-initStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runtime init did not start")
+	}
+
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+	address := "http://" + listener.Addr().String() + "/health"
+	checkStarting := func() {
+		t.Helper()
+		res, err := client.Get(address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		if _, err := io.Copy(io.Discard, res.Body); err != nil {
+			t.Fatal(err)
+		}
+		if res.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("startup health returned %d", res.StatusCode)
+		}
+	}
+	checkStarting()
+	failAccept()
+	select {
+	case err := <-canceled:
+		if !errors.Is(err, want) {
+			t.Fatalf("initializer cancellation cause = %v, want %v", err, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("accept failure did not cancel runtime initialization")
+	}
+	select {
+	case <-done:
+		t.Fatal("startup returned before initializer cleanup")
+	default:
+	}
+	checkStarting()
+
+	finishCleanup()
+	select {
+	case <-done:
+		if !errors.Is(serveErr, want) {
+			t.Fatalf("startup returned %v, want accept error %v", serveErr, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("startup did not return after initializer cleanup")
+	}
+	rebound, err := net.Listen("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("listener not released after accept failure: %v", err)
+	}
+	_ = rebound.Close()
 }

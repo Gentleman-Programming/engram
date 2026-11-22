@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2198,7 +2199,7 @@ func TestCloudDashboardDocsEnablementFlowIsExecutable(t *testing.T) {
 	stubCloudStartupPort(t)
 	runtimeStub := &stubCloudRuntimeServer{}
 	oldRuntime := newCloudRuntime
-	newCloudRuntime = func(c cloud.Config) (cloudServerRuntime, error) {
+	newCloudRuntime = func(_ context.Context, c cloud.Config) (cloudServerRuntime, error) {
 		seen = c
 		return runtimeStub, nil
 	}
@@ -2482,7 +2483,7 @@ func TestCmdCloudServeStartsCloudRuntime(t *testing.T) {
 	stubCloudStartupPort(t)
 	runtimeStub := &stubCloudRuntimeServer{}
 	oldRuntime := newCloudRuntime
-	newCloudRuntime = func(c cloud.Config) (cloudServerRuntime, error) {
+	newCloudRuntime = func(_ context.Context, c cloud.Config) (cloudServerRuntime, error) {
 		seen = c
 		return runtimeStub, nil
 	}
@@ -2518,7 +2519,7 @@ func TestCmdCloudServeRequiresAuthTokenByDefault(t *testing.T) {
 
 	originalListen := listenCloudDuringStartup
 	t.Cleanup(func() { listenCloudDuringStartup = originalListen })
-	listenCloudDuringStartup = func(string, int) (*cloudserver.StartupListener, error) {
+	listenCloudDuringStartup = func(string, string) (net.Listener, error) {
 		t.Fatal("cloud serve attempted to listen with invalid auth configuration")
 		return nil, nil
 	}
@@ -2583,7 +2584,7 @@ func TestCmdCloudServeInsecureModeDoesNotRequireJWTServiceStartup(t *testing.T) 
 	stubCloudStartupPort(t)
 	runtimeStub := &stubCloudRuntimeServer{}
 	oldRuntime := newCloudRuntime
-	newCloudRuntime = func(c cloud.Config) (cloudServerRuntime, error) {
+	newCloudRuntime = func(_ context.Context, c cloud.Config) (cloudServerRuntime, error) {
 		return runtimeStub, nil
 	}
 	t.Cleanup(func() { newCloudRuntime = oldRuntime })

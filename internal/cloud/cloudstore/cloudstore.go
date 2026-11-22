@@ -40,6 +40,11 @@ var ErrChunkConflict = errors.New("cloudstore: chunk id conflict")
 var ErrSessionIndexHistoricalResolutionRequired = errors.New("cloudstore: session index requires explicit historical resolution")
 
 func New(cfg cloud.Config) (*CloudStore, error) {
+	return NewContext(context.Background(), cfg)
+}
+
+// NewContext opens the Store and initializes its schema and session index.
+func NewContext(ctx context.Context, cfg cloud.Config) (*CloudStore, error) {
 	dsn := strings.TrimSpace(cfg.DSN)
 	if dsn == "" {
 		return nil, fmt.Errorf("cloudstore: database dsn is required")
@@ -48,14 +53,14 @@ func New(cfg cloud.Config) (*CloudStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: open postgres: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
+	if err := db.PingContext(pingCtx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("cloudstore: ping postgres: %w", err)
 	}
 	store := &CloudStore{db: db}
-	if err := store.migrate(context.Background()); err != nil {
+	if err := store.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1115,6 +1120,9 @@ func (cs *CloudStore) BackfillMutationChunks(ctx context.Context, project string
 
 	chunks := make([]materializedMutationChunk, 0)
 	for start := 0; start < len(missing); start += mutationBackfillChunkSize {
+		if err := ctx.Err(); err != nil {
+			return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: plan mutation chunk backfill: %w", err)
+		}
 		end := start + mutationBackfillChunkSize
 		if end > len(missing) {
 			end = len(missing)

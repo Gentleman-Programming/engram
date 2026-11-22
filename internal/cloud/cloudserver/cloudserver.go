@@ -245,17 +245,13 @@ func (s *CloudServer) Start(startup *StartupListener) error {
 	if startup.addr != addr {
 		return fmt.Errorf("cloud server address %s differs from startup listener %s (bound to %s)", addr, startup.addr, startup.Addr())
 	}
-	select {
-	case <-startup.done:
-		return startup.err
-	default:
+	if err := startup.publish(s.Handler()); err != nil {
+		return err
 	}
-	startup.handler = s.Handler()
 	log.Printf("[engram-cloud] listening on %s", addr)
-	// Publishing readiness makes the fully configured handler visible to requests.
-	close(startup.ready)
-	<-startup.done
-	return startup.err
+	ctx := startup.InitializationContext()
+	<-ctx.Done()
+	return context.Cause(ctx)
 }
 
 func (s *CloudServer) Handler() http.Handler {

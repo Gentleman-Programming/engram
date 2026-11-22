@@ -19,7 +19,7 @@ func TestCloudRuntimePersistsUnknownTokenRequestAuthAudit(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_TOKEN", legacySyncToken)
 	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
 
-	runtime, err := newCloudRuntime(cloud.Config{
+	runtime, err := newCloudRuntime(context.Background(), cloud.Config{
 		DSN:              testDSN,
 		JWTSecret:        "audit-integration-jwt-secret-32-bytes-plus",
 		AllowedProjects:  []string{"audit-project"},

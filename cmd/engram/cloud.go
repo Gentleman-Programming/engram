@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -77,16 +78,16 @@ func (r *defaultCloudRuntime) Start(startup *cloudserver.StartupListener) error 
 	return r.server.Start(startup)
 }
 
-var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
+var newCloudRuntime = func(ctx context.Context, cfg cloud.Config) (cloudServerRuntime, error) {
 	started := time.Now()
 	fmt.Fprintln(os.Stderr, "engram cloud startup: initializing PostgreSQL store and session index")
-	cs, err := cloudstore.New(cfg)
+	cs, err := cloudstore.NewContext(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 	fmt.Fprintf(os.Stderr, "engram cloud startup: PostgreSQL store and session index initialized elapsed=%s\n", time.Since(started).Round(time.Millisecond))
 	allowedProjects := normalizeAllowedProjects(cfg.AllowedProjects)
-	if err := backfillAllowedProjectMutationChunks(context.Background(), cs, allowedProjects); err != nil {
+	if err := backfillAllowedProjectMutationChunks(ctx, cs, allowedProjects); err != nil {
 		_ = cs.Close()
 		return nil, err
 	}
@@ -1024,16 +1025,20 @@ func cmdCloudServe() {
 	}
 }
 
-var listenCloudDuringStartup = cloudserver.ListenDuringStartup
+var listenCloudDuringStartup = net.Listen
 
 func runCloudServe(cfg cloud.Config) error {
-	startup, err := listenCloudDuringStartup(cfg.BindHost, cfg.Port)
+	startup, err := cloudserver.ListenDuringStartup(cfg.BindHost, cfg.Port, listenCloudDuringStartup)
 	if err != nil {
 		return err
 	}
 	defer startup.Close()
-	runtime, err := newCloudRuntime(cfg)
+	ctx := startup.InitializationContext()
+	runtime, err := newCloudRuntime(ctx, cfg)
 	if err != nil {
+		if serveErr := context.Cause(ctx); serveErr != nil {
+			return serveErr
+		}
 		return err
 	}
 	fmt.Printf("Starting Engram cloud server on port %d\n", cfg.Port)

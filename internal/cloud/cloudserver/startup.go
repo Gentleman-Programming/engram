@@ -1,48 +1,67 @@
 package cloudserver
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // StartupListener serves a generic unavailable response until Start publishes
 // a fully initialized CloudServer. The caller owns its lifetime.
 type StartupListener struct {
-	addr     string
-	listener net.Listener
-	server   http.Server
-	ready    chan struct{}
-	handler  http.Handler
-	done     chan struct{}
-	err      error
+	addr           string
+	listener       net.Listener
+	server         http.Server
+	initialization context.Context
+	mu             sync.Mutex
+	ready          chan struct{}
+	handler        http.Handler
 }
 
-func ListenDuringStartup(host string, port int) (*StartupListener, error) {
+func ListenDuringStartup(host string, port int, listen func(string, string) (net.Listener, error)) (*StartupListener, error) {
 	addr := cloudListenAddress(host, port)
-	listener, err := net.Listen("tcp", addr)
+	listener, err := listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithCancelCause(context.Background())
 	startup := &StartupListener{
-		addr: addr, listener: listener, ready: make(chan struct{}), done: make(chan struct{}),
+		addr: addr, listener: listener, initialization: ctx, ready: make(chan struct{}),
 	}
 	startup.server = http.Server{Handler: http.HandlerFunc(startup.serveHTTP), DisableGeneralOptionsHandler: true}
 	go func() {
-		startup.err = startup.server.Serve(listener)
-		close(startup.done)
+		err := startup.server.Serve(listener)
+		startup.mu.Lock()
+		cancel(err)
+		startup.mu.Unlock()
 	}()
 	return startup, nil
 }
 
 func (s *StartupListener) Addr() net.Addr { return s.listener.Addr() }
 
+// InitializationContext ends with the HTTP serve error when the listener stops.
+func (s *StartupListener) InitializationContext() context.Context { return s.initialization }
+
 func (s *StartupListener) Close() {
 	_ = s.server.Close()
 	_ = s.listener.Close()
-	<-s.done
+	<-s.initialization.Done()
+}
+
+func (s *StartupListener) publish(handler http.Handler) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := context.Cause(s.initialization); err != nil {
+		return err
+	}
+	s.handler = handler
+	close(s.ready)
+	return nil
 }
 
 func (s *StartupListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
