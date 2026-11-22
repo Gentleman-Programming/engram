@@ -3649,11 +3649,13 @@ func (s *Store) RegisterIsolatedSessionTimed(id, project string, resume bool, ti
 
 // sessions.id uses SQLite's default BINARY collation: ':' follows ASCII '9'.
 const continuationSessionsQuery = `SELECT id, ended_at FROM sessions WHERE id >= ? AND id < ? ORDER BY id`
+const liveContinuationSessionsQuery = `SELECT id, ended_at FROM sessions WHERE id >= ? AND id < ? AND ended_at IS NULL ORDER BY id`
 
 // continuationSessionTx selects the lowest numeric live continuation, or the
-// next ordinal after all numeric suffixes. Literal prefix comparison avoids SQL
-// wildcard interpretation. Arbitrary precision ordinals impose no restart cap.
-func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string, error) {
+// next ordinal after all numeric suffixes if the caller can allocate one.
+// Literal prefix comparison avoids SQL wildcard interpretation. Arbitrary
+// precision ordinals impose no restart cap.
+func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string, allocate bool) (string, error) {
 	var endedAt *string
 	err := tx.QueryRowContext(ctx, `SELECT ended_at FROM sessions WHERE id = ?`, root).Scan(&endedAt)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && endedAt == nil) {
@@ -3663,7 +3665,11 @@ func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string
 		return "", err
 	}
 	prefix := root + ":resume:"
-	rows, err := tx.QueryContext(ctx, continuationSessionsQuery, prefix+"0", prefix+":")
+	query := liveContinuationSessionsQuery
+	if allocate {
+		query = continuationSessionsQuery
+	}
+	rows, err := tx.QueryContext(ctx, query, prefix+"0", prefix+":")
 	if err != nil {
 		return "", err
 	}
@@ -3688,7 +3694,7 @@ func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string
 		if !ok {
 			continue
 		}
-		if n.Cmp(max) > 0 {
+		if allocate && n.Cmp(max) > 0 {
 			max.Set(n)
 		}
 		if ended == nil && (liveOrdinal == nil || n.Cmp(liveOrdinal) < 0) {
@@ -3702,6 +3708,9 @@ func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string
 		// The normal registration checks this selected identity's ownership;
 		// a conflict must be returned, never skipped by advancing the ordinal.
 		return liveID, nil
+	}
+	if !allocate {
+		return "", sql.ErrNoRows
 	}
 	return prefix + max.Add(max, big.NewInt(1)).String(), nil
 }
@@ -3834,7 +3843,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 					}
 				}
 			}
-			id, err = continuationSessionTx(context.Background(), tx, root)
+			id, err = continuationSessionTx(context.Background(), tx, root, true)
 			if err != nil {
 				return err
 			}
@@ -3958,7 +3967,22 @@ var ErrRuntimeSessionScopeConflict = errors.New("runtime session scope conflict"
 // ErrRuntimeSessionEffectiveIDMismatch means the live session differs from the caller's expectation.
 var ErrRuntimeSessionEffectiveIDMismatch = errors.New("runtime session effective ID mismatch")
 
+var errRuntimeSessionNeedsWorktree = errors.New("runtime session needs worktree verification")
+
 func runtimeSessionTx(ctx context.Context, tx *sql.Tx, root, project, directory, mode string) (string, error) {
+	return runtimeSessionTxWithScopeCheck(ctx, tx, root, project, directory, mode, func(scope string, _ bool) error {
+		matches := projectpkg.RuntimeWorktreeDirectoryContext(ctx, scope) == projectpkg.RuntimeWorktreeDirectoryContext(ctx, directory)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !matches {
+			return ErrRuntimeSessionScopeConflict
+		}
+		return nil
+	})
+}
+
+func runtimeSessionTxWithScopeCheck(ctx context.Context, tx *sql.Tx, root, project, directory, mode string, checkScope func(string, bool) error) (string, error) {
 	if err := validateSessionID(root); err != nil {
 		return "", err
 	}
@@ -3980,12 +4004,8 @@ func runtimeSessionTx(ctx context.Context, tx *sql.Tx, root, project, directory,
 		if sessionRegistrationProjectError(id, owner, ownership, project, mode) != nil || ownership != mode || strings.TrimSpace(directory) == "" || strings.TrimSpace(scope) == "" {
 			return ErrRuntimeSessionScopeConflict
 		}
-		scopeMatches := projectpkg.RuntimeWorktreeDirectoryContext(ctx, scope) == projectpkg.RuntimeWorktreeDirectoryContext(ctx, directory)
-		if err := ctx.Err(); err != nil {
+		if err := checkScope(scope, live); err != nil {
 			return err
-		}
-		if !scopeMatches {
-			return ErrRuntimeSessionScopeConflict
 		}
 		if live && ended != nil {
 			return sql.ErrNoRows
@@ -3995,7 +4015,7 @@ func runtimeSessionTx(ctx context.Context, tx *sql.Tx, root, project, directory,
 	if err := validate(root, false); err != nil {
 		return "", err
 	}
-	id, err := continuationSessionTx(ctx, tx, root)
+	id, err := continuationSessionTx(ctx, tx, root, false)
 	if err != nil {
 		return "", err
 	}
@@ -4017,13 +4037,67 @@ func (s *Store) ResolveRuntimeSessionWithOwnershipMode(root, project, directory,
 	return id, err
 }
 
-// ResolveRuntimeSessionWithOwnershipModeContext reads one cancellable snapshot
-// of the root and its effective identity without reserving the WAL writer.
+// ResolveRuntimeSessionWithOwnershipModeContext verifies filesystem scopes
+// outside SQLite and returns the live binding from the final read snapshot.
 func (s *Store) ResolveRuntimeSessionWithOwnershipModeContext(ctx context.Context, root, project, directory, mode string) (string, error) {
+	type scopeCheck struct {
+		directory string
+		effective bool
+	}
+	worktrees := make(map[string]string, 3)
+	verified := make(map[scopeCheck]bool, 2)
+	resolve := func(path string) (string, bool) {
+		if resolved, ok := worktrees[path]; ok {
+			return resolved, true
+		}
+		resolved, found := projectpkg.InspectRuntimeWorktreeDirectory(ctx, path)
+		// A Git timeout or failure may be transient. Keep the historical
+		// fallback for this comparison without caching it for the next one.
+		if found {
+			worktrees[path] = resolved
+		}
+		return resolved, found
+	}
+	for checks := 0; ; checks++ {
+		var pending scopeCheck
+		id, err := s.readRuntimeSessionSnapshot(ctx, root, project, directory, mode, func(scope string, live bool) error {
+			key := scopeCheck{directory: scope, effective: live}
+			if verified[key] {
+				return nil
+			}
+			pending = key
+			return errRuntimeSessionNeedsWorktree
+		})
+		if err != errRuntimeSessionNeedsWorktree {
+			return id, err
+		}
+		// Root scope comes first, before scanning any continuations. Reopen
+		// the snapshot after checking a scope so concurrent ends or rebinds
+		// cannot pass on an earlier SQLite view. At most two scopes can qualify.
+		if checks == 2 {
+			return "", ErrRuntimeSessionScopeConflict
+		}
+		storedRoot, storedFound := resolve(pending.directory)
+		requestedRoot, requestedFound := resolve(directory)
+		if cancellation := ctx.Err(); cancellation != nil {
+			return "", cancellation
+		}
+		if storedRoot != requestedRoot {
+			return "", ErrRuntimeSessionScopeConflict
+		}
+		verified[pending] = true
+		if storedFound && requestedFound {
+			pending.effective = !pending.effective
+			verified[pending] = true
+		}
+	}
+}
+
+func (s *Store) readRuntimeSessionSnapshot(ctx context.Context, root, project, directory, mode string, checkScope func(string, bool) error) (string, error) {
 	var id string
 	err := s.withReadTxContext(ctx, func(tx *sql.Tx) error {
 		var err error
-		id, err = runtimeSessionTx(ctx, tx, root, project, directory, mode)
+		id, err = runtimeSessionTxWithScopeCheck(ctx, tx, root, project, directory, mode, checkScope)
 		return err
 	})
 	if cancellation := ctx.Err(); cancellation != nil {
