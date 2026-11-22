@@ -18,12 +18,13 @@ const (
 	claudeLocalTimeout     = 30 * time.Second // Local catalog, plugin cache and MCP writes.
 	claudeRemoteTimeout    = 2 * time.Minute  // Ordinary GitHub marketplace clone or refresh.
 	claudeSetupOutputLimit = 4 << 20
-
-	// The Windows SDK's ProcThreadAttributeValue(13, FALSE, TRUE, FALSE).
-	procThreadAttributeJobList = 0x0002000d
 )
 
-var claudeIsProcessInJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+var (
+	claudeIsProcessInJob          = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+	assignClaudeSetupJob          = windows.AssignProcessToJobObject
+	errClaudeNestedJobUnavailable = errors.New("Windows rejected the nested Claude setup job")
+)
 
 func claudeOrdinarySetupRunner(managed bool) claudeSetupRunner {
 	return func(name string, args ...string) ([]byte, error) {
@@ -31,7 +32,13 @@ func claudeOrdinarySetupRunner(managed bool) claudeSetupRunner {
 		if !managed && len(args) >= 3 && args[0] == "plugin" && args[1] == "marketplace" {
 			timeout = claudeRemoteTimeout
 		}
-		return runClaudeProfileCommand(timeout, name, args...)
+		out, err := runClaudeProfileCommand(timeout, name, args...)
+		if !managed && errors.Is(err, errClaudeNestedJobUnavailable) {
+			// Preserve legacy ordinary setup in shells that cannot start nested
+			// jobs. The containment attempt failed before Claude could run.
+			return runCommand(name, args...)
+		}
+		return out, err
 	}
 }
 
@@ -90,17 +97,13 @@ func runClaudeJob(ctx context.Context, name string, args ...string) ([]byte, err
 	if err := configureClaudeJob(job, false); err != nil {
 		return nil, fmt.Errorf("configure Claude setup job: %w", err)
 	}
-	attributes, err := windows.NewProcThreadAttributeList(2)
+	attributes, err := windows.NewProcThreadAttributeList(1)
 	if err != nil {
 		return nil, err
 	}
 	defer attributes.Delete()
 	if err := attributes.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&handles[0]), unsafe.Sizeof(handles)); err != nil {
 		return nil, err
-	}
-	// Assign the job at creation, so Claude cannot spawn before containment.
-	if err := attributes.Update(procThreadAttributeJobList, unsafe.Pointer(&job), unsafe.Sizeof(job)); err != nil {
-		return nil, fmt.Errorf("prepare Claude setup job assignment: %w", err)
 	}
 	startup := windows.StartupInfoEx{ProcThreadAttributeList: attributes.List()}
 	startup.Cb = uint32(unsafe.Sizeof(startup))
@@ -111,13 +114,32 @@ func runClaudeJob(ctx context.Context, name string, args ...string) ([]byte, err
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := windows.CreateProcess(app, line, nil, nil, true, windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_NO_WINDOW, nil, nil, &startup.StartupInfo, &process); err != nil {
-		return nil, fmt.Errorf("start Claude in its setup job: %w", err)
+	flags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_NO_WINDOW | windows.CREATE_SUSPENDED)
+	if err := windows.CreateProcess(app, line, nil, nil, true, flags, nil, nil, &startup.StartupInfo, &process); err != nil {
+		return nil, fmt.Errorf("start suspended Claude setup command: %w", err)
 	}
 	defer windows.CloseHandle(process.Process)
-	windows.CloseHandle(process.Thread)
-
-	runErr := waitClaudeProcess(ctx, process.Process)
+	defer windows.CloseHandle(process.Thread)
+	// The process inherits the Windows environment's normal parent job, if
+	// present. Its thread stays suspended until the additional job is set.
+	if err := assignClaudeSetupJob(job, process.Process); err != nil {
+		if stopErr := stopSuspendedClaude(process.Process); stopErr != nil {
+			return nil, errors.Join(err, stopErr)
+		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			if nested, checkErr := claudeProcessInJob(windows.CurrentProcess(), 0); checkErr == nil && nested {
+				return nil, fmt.Errorf("%w: %w", errClaudeNestedJobUnavailable, err)
+			}
+		}
+		return nil, fmt.Errorf("assign suspended Claude command to the setup job: %w", err)
+	}
+	runErr := ctx.Err()
+	if runErr == nil {
+		_, runErr = windows.ResumeThread(process.Thread)
+	}
+	if runErr == nil {
+		runErr = waitClaudeProcess(ctx, process.Process)
+	}
 	if runErr == nil {
 		var status uint32
 		if err := windows.GetExitCodeProcess(process.Process, &status); err != nil {
@@ -137,6 +159,18 @@ func runClaudeJob(ctx context.Context, name string, args ...string) ([]byte, err
 		return nil, errors.Join(runErr, errors.New("Claude setup output exceeded 4 MiB"))
 	}
 	return out, errors.Join(runErr, err)
+}
+
+func stopSuspendedClaude(process windows.Handle) error {
+	if err := windows.TerminateProcess(process, 1); err != nil {
+		state, waitErr := windows.WaitForSingleObject(process, 0)
+		if waitErr != nil || state != windows.WAIT_OBJECT_0 {
+			return errors.Join(err, waitErr)
+		}
+		return nil
+	}
+	_, err := windows.WaitForSingleObject(process, windows.INFINITE)
+	return err
 }
 
 func waitClaudeProcess(ctx context.Context, process windows.Handle) error {
@@ -169,6 +203,11 @@ func configureClaudeJob(job windows.Handle, draining bool) error {
 }
 
 func drainClaudeJob(job, root windows.Handle) error {
+	slow := time.AfterFunc(5*time.Second, func() {
+		fmt.Fprintln(os.Stderr, "Windows is still stopping Claude. Setup will hold the profile lock until process cleanup finishes.")
+	})
+	defer slow.Stop()
+
 	stopErr := configureClaudeJob(job, true)
 	members, listErr := openClaudeJobMembers(job)
 	listErr = errors.Join(stopErr, listErr)
@@ -233,16 +272,22 @@ func openClaudeJobMembers(job windows.Handle) ([]windows.Handle, error) {
 			openErr = errors.Join(openErr, err)
 			continue
 		}
-		var belongs uint32
-		ok, _, err := claudeIsProcessInJob.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&belongs)))
-		if ok == 0 || belongs == 0 {
+		belongs, err := claudeProcessInJob(process, job)
+		if err != nil || !belongs {
 			windows.CloseHandle(process)
-			if ok == 0 {
-				openErr = errors.Join(openErr, err)
-			}
+			openErr = errors.Join(openErr, err)
 			continue // The PID may have been recycled after the snapshot.
 		}
 		members = append(members, process)
 	}
 	return members, openErr
+}
+
+func claudeProcessInJob(process, job windows.Handle) (bool, error) {
+	var belongs uint32
+	ok, _, err := claudeIsProcessInJob.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&belongs)))
+	if ok == 0 {
+		return false, err
+	}
+	return belongs != 0, nil
 }
