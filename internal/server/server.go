@@ -638,11 +638,20 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	timings := requestWriteTimings(r)
 	var err error
 	ctx := r.Context()
-	directory := projectpkg.RuntimeWorktreeDirectoryContext(ctx, body.Directory)
-	if ctx.Err() != nil {
+	var refreshed bool
+	if mode == store.SessionOwnershipProjectOwned && !body.Resume && !body.Isolated && provenance == nil {
+		refreshed, err = s.store.TryRefreshProjectOwnedSession(ctx, body.ID, body.Project, timings)
+	}
+	if !refreshed && ctx.Err() != nil {
 		return
 	}
-	effectiveID, err = s.store.RegisterSessionWithProjectProvenance(body.ID, body.Project, directory, mode, body.Resume, body.Isolated, provenance, timings)
+	if !refreshed && err == nil {
+		directory := projectpkg.RuntimeWorktreeDirectoryContext(ctx, body.Directory)
+		if ctx.Err() != nil {
+			return
+		}
+		effectiveID, err = s.store.RegisterSessionWithProjectProvenance(body.ID, body.Project, directory, mode, body.Resume, body.Isolated, provenance, timings)
+	}
 	if err != nil {
 		var conflict *store.SessionProjectConflictError
 		switch {

@@ -203,7 +203,7 @@ func TestSessionIdentityRepairRejectsShadowedJournalIdentifiers(t *testing.T) {
 func TestShadowedIdentitySourceOrderAndDepth(t *testing.T) {
 	for _, tc := range []struct {
 		name, payload, identifier string
-		want bool
+		want                      bool
 	}{
 		{"source first", `{"id":"","id":"other"}`, "id", true},
 		{"source last", `{"id":"other","ID":""}`, "id", true},
@@ -284,6 +284,59 @@ func TestSessionIdentityRepairCountsOnlyCommittedRetry(t *testing.T) {
 	}
 	if got := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE disposition='pending' AND project='alpha'`); got != int(result.PublishedMutations) {
 		t.Fatalf("persisted publications=%d result=%d", got, result.PublishedMutations)
+	}
+}
+
+func TestRefreshProjectOwnedSessionRechecksIdentityAfterWriterRetry(t *testing.T) {
+	for _, change := range []bool{false, true} {
+		name := "same row"
+		if change {
+			name = "directory cleared"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := newTestStore(t)
+			const id, project, directory, oldLease = "session", "alpha", "/old checkout", "2001-02-03 04:05:06"
+			if err := s.StartSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB().Exec("UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?", oldLease, id); err != nil {
+				t.Fatal(err)
+			}
+			beginTx, commit := s.hooks.beginTx, s.hooks.commit
+			begins, commits := 0, 0
+			s.hooks.beginTx = func(db *sql.DB) (*sql.Tx, error) {
+				begins++
+				if begins == 2 && change {
+					if _, err := db.Exec("UPDATE sessions SET directory = '' WHERE id = ?", id); err != nil {
+						return nil, err
+					}
+				}
+				return beginTx(db)
+			}
+			s.hooks.commit = func(tx *sql.Tx) error {
+				commits++
+				if commits == 1 {
+					return errors.New("database is locked")
+				}
+				return commit(tx)
+			}
+			refreshed, err := s.TryRefreshProjectOwnedSession(t.Context(), id, project, nil)
+			s.hooks.beginTx, s.hooks.commit = beginTx, commit
+			if err != nil || refreshed == change || begins != 2 {
+				t.Fatalf("refreshed=%t begins=%d commits=%d err=%v", refreshed, begins, commits, err)
+			}
+			session, err := s.GetSession(id)
+			if err != nil || session.RuntimeLeaseExpiresAt == nil {
+				t.Fatalf("session=%+v err=%v", session, err)
+			}
+			if change {
+				if session.Directory != "" || *session.RuntimeLeaseExpiresAt != oldLease || commits != 1 {
+					t.Fatalf("ineligible retry changed the row: %+v commits=%d", session, commits)
+				}
+			} else if session.Directory != directory || *session.RuntimeLeaseExpiresAt <= oldLease || commits != 2 {
+				t.Fatalf("eligible retry did not preserve directory and renew lease: %+v commits=%d", session, commits)
+			}
+		})
 	}
 }
 

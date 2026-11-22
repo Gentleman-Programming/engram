@@ -3706,6 +3706,48 @@ func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string
 	return prefix + max.Add(max, big.NewInt(1)).String(), nil
 }
 
+var errSessionRegistrationNeedsDirectory = errors.New("session registration needs directory resolution")
+
+// TryRefreshProjectOwnedSession renews a complete, live project-owned registration.
+// A false result leaves registration to the caller's normal directory-aware path.
+func (s *Store) TryRefreshProjectOwnedSession(ctx context.Context, id, project string, timings *WriteTimings) (bool, error) {
+	project, _ = NormalizeProject(project)
+	if validateSessionID(id) != nil || project == "" {
+		return false, nil
+	}
+	const eligible = `SELECT directory FROM sessions
+		WHERE id = ? AND project = ? AND ownership_mode = ? AND ended_at IS NULL
+		AND ifnull(trim(directory, ?), '') <> ''`
+	args := []any{id, project, SessionOwnershipProjectOwned, sqlWhitespaceTrimSet}
+	var directory string
+	// This read avoids reserving a writer for requests that need Git. The row
+	// can change before the writer lock is acquired, so check it again there.
+	if err := s.db.QueryRowContext(ctx, eligible, args...).Scan(&directory); err != nil || strings.TrimSpace(directory) == "" {
+		return false, ctx.Err()
+	}
+	err := s.withWriteTimings(timings, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, eligible, args...).Scan(&directory); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return errSessionRegistrationNeedsDirectory
+			}
+			return err
+		}
+		if strings.TrimSpace(directory) == "" {
+			return errSessionRegistrationNeedsDirectory
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// The UPSERT preserves the eligible row's nonblank identity, so
+		// there is no caller directory to resolve or identity repair to sync.
+		return s.startSessionTx(tx, id, project, "", SessionOwnershipProjectOwned)
+	})
+	if errors.Is(err, errSessionRegistrationNeedsDirectory) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool, timings *WriteTimings, evidence ...*ProjectProvenance) error {
 	var provenance *ProjectProvenance
 	if len(evidence) != 0 {
