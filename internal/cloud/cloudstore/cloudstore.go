@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
@@ -1331,29 +1332,25 @@ func mutationEntrySignature(entry MutationEntry) (string, error) {
 	if len(payload) == 0 {
 		payload = json.RawMessage("{}")
 	}
-	doc := engramsync.ChunkData{Mutations: []store.SyncMutation{{
-		Project:   project,
-		Entity:    strings.TrimSpace(entry.Entity),
-		EntityKey: mutationEntityKey(entry.Entity, entry.EntityKey),
-		Op:        strings.TrimSpace(entry.Op),
-		Payload:   string(payload),
-	}}}
-	encoded, err := json.Marshal(doc)
+	mutation, err := chunkcodec.CanonicalizeMutationForProject(store.SyncMutation{
+		Entity:    mutationSignatureText(entry.Entity),
+		EntityKey: mutationSignatureText(entry.EntityKey),
+		Op:        mutationSignatureText(entry.Op),
+		Payload:   mutationSignatureText(string(payload)),
+	}, mutationSignatureText(project))
 	if err != nil {
 		return "", err
 	}
-	canonical, err := chunkcodec.CanonicalizeForProject(encoded, project)
-	if err != nil {
-		return "", err
+	return syncMutationSignature(mutation)
+}
+
+// mutationSignatureText preserves encoding/json's per-byte replacement for
+// malformed legacy strings previously serialized through a chunk.
+func mutationSignatureText(value string) string {
+	if utf8.ValidString(value) {
+		return value
 	}
-	chunk, err := parseChunkData(canonical)
-	if err != nil {
-		return "", err
-	}
-	if len(chunk.Mutations) != 1 {
-		return "", fmt.Errorf("expected one canonical mutation, got %d", len(chunk.Mutations))
-	}
-	return syncMutationSignature(chunk.Mutations[0])
+	return string([]rune(value))
 }
 
 func syncMutationSignature(mutation store.SyncMutation) (string, error) {
