@@ -6496,6 +6496,11 @@ func (s *Store) statsForProjectLimit(project string, maxProjects int) (*Stats, i
 // The sync_enrolled_projects branch ensures a project enrolled via EnrollProject()
 // without any other data is still recognized (JC1).
 func (s *Store) ProjectExists(name string) (bool, error) {
+	return s.ProjectExistsContext(context.Background(), name)
+}
+
+// ProjectExistsContext supports cancellation while validating a project.
+func (s *Store) ProjectExistsContext(ctx context.Context, name string) (bool, error) {
 	// Use LOWER(project) = ? so legacy data stored with mixed-case names
 	// (created before project normalization was enforced on writes) is found
 	// when queried with the current normalized (lowercase) name. The caller
@@ -6511,7 +6516,7 @@ SELECT 1 FROM (
   SELECT project FROM sync_enrolled_projects WHERE LOWER(project) = ?
 ) LIMIT 1`
 	var dummy int
-	err := s.db.QueryRow(query, name, name, name, name).Scan(&dummy)
+	err := s.db.QueryRowContext(ctx, query, name, name, name, name).Scan(&dummy)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -9769,7 +9774,12 @@ type ProjectNameCount struct {
 // ListProjectNames returns all distinct project names from observations,
 // ordered alphabetically. Used for fuzzy matching and consolidation.
 func (s *Store) ListProjectNames() ([]string, error) {
-	rows, err := s.queryItHook(s.db,
+	return s.ListProjectNamesContext(context.Background())
+}
+
+// ListProjectNamesContext supports cancellation while reading project names.
+func (s *Store) ListProjectNamesContext(ctx context.Context) ([]string, error) {
+	rows, err := s.queryContextSection(ctx, s.db,
 		`SELECT DISTINCT project FROM observations
 		 WHERE project IS NOT NULL AND project != '' AND deleted_at IS NULL
 		 ORDER BY project`,

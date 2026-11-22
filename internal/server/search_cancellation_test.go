@@ -25,16 +25,20 @@ func TestSearchCanceledRequest(t *testing.T) {
 }
 
 func TestReadCancellationWhileWaitingForConnection(t *testing.T) {
-	tests := map[string]string{
-		"search":                "/search?q=synthetic&all_projects=true",
-		"compact-search":        "/search?q=synthetic&all_projects=true&response_format=compact",
-		"context-sessions":      "/context?all_projects=true&pinned=-1&observations=-1&prompts=-1",
-		"context-pinned":        "/context?all_projects=true&sessions=-1&observations=-1&prompts=-1",
-		"context-observations":  "/context?all_projects=true&sessions=-1&pinned=-1&prompts=-1",
-		"context-prompts":       "/context?all_projects=true&sessions=-1&pinned=-1&observations=-1",
-		"context-older-history": "/context?all_projects=true&sessions=-1&pinned=-1&prompts=-1&older_history=true",
+	const canceledRead = "{\"error\":\"context canceled\"}\n"
+	const canceledProjectLookup = "{\"code\":\"project_resolution_failed\",\"error\":\"project resolution failed: context canceled\"}\n"
+	tests := map[string]struct{ path, errorBody string }{
+		"search":                {"/search?q=synthetic&all_projects=true", canceledRead},
+		"compact-search":        {"/search?q=synthetic&all_projects=true&response_format=compact", canceledRead},
+		"context-sessions":      {"/context?all_projects=true&pinned=-1&observations=-1&prompts=-1", canceledRead},
+		"context-pinned":        {"/context?all_projects=true&sessions=-1&observations=-1&prompts=-1", canceledRead},
+		"context-observations":  {"/context?all_projects=true&sessions=-1&pinned=-1&prompts=-1", canceledRead},
+		"context-prompts":       {"/context?all_projects=true&sessions=-1&pinned=-1&observations=-1", canceledRead},
+		"context-older-history": {"/context?all_projects=true&sessions=-1&pinned=-1&prompts=-1&older_history=true", canceledRead},
+		"context-project":       {"/context?project=fixture", canceledProjectLookup},
+		"search-project":        {"/search?q=synthetic&project=fixture", canceledProjectLookup},
 	}
-	for name, path := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			st := newServerTestStore(t)
 			if got := st.DB().Stats().MaxOpenConnections; got != 1 {
@@ -56,7 +60,7 @@ func TestReadCancellationWhileWaitingForConnection(t *testing.T) {
 					t.Error("handler did not finish after connection release")
 				}
 			})
-			req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil).WithContext(ctx)
 			rec := httptest.NewRecorder()
 			before := st.DB().Stats().WaitCount
 			go func() {
@@ -83,7 +87,7 @@ func TestReadCancellationWhileWaitingForConnection(t *testing.T) {
 			watchdog.Reset(5 * time.Second)
 			select {
 			case <-done:
-				if rec.Code != http.StatusInternalServerError || rec.Body.String() != "{\"error\":\"context canceled\"}\n" {
+				if rec.Code != http.StatusInternalServerError || rec.Body.String() != tc.errorBody {
 					t.Fatalf("canceled request = %d %s", rec.Code, rec.Body.String())
 				}
 			case <-watchdog.C:
