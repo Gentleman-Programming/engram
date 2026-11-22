@@ -52,12 +52,30 @@ func ReadRuntimeSessionDiagnostic(ctx context.Context, dataDir, root string) (Ru
 	if session.EndedAt == nil {
 		return RuntimeSessionDiagnosticActive, nil
 	}
-	_, err = s.ResolveRuntimeSessionWithOwnershipModeContext(ctx, root, session.Project, session.Directory, session.OwnershipMode)
+	effective, err := s.ResolveRuntimeSessionWithOwnershipModeContext(ctx, root, session.Project, session.Directory, session.OwnershipMode)
 	if errors.Is(err, sql.ErrNoRows) {
-		return RuntimeSessionDiagnosticEnded, nil
+		// An exact-ID deletion may have removed the root during resolution.
+		current, readErr := s.getSessionContext(ctx, root)
+		switch {
+		case errors.Is(readErr, sql.ErrNoRows):
+			return RuntimeSessionDiagnosticMissing, nil
+		case readErr != nil:
+			return "", readErr
+		case current.EndedAt == nil:
+			return RuntimeSessionDiagnosticActive, nil
+		case current.StartedAt != session.StartedAt || current.Project != session.Project ||
+			current.Directory != session.Directory || current.OwnershipMode != session.OwnershipMode:
+			return "", errors.New("engram: runtime session changed during diagnostic read")
+		default:
+			return RuntimeSessionDiagnosticEnded, nil
+		}
 	}
 	if err != nil {
 		return "", err
+	}
+	if effective == root {
+		// The final snapshot can observe a newly active row with the same ID.
+		return RuntimeSessionDiagnosticActive, nil
 	}
 	return RuntimeSessionDiagnosticContinued, nil
 }
