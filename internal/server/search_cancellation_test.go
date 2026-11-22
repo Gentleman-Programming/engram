@@ -28,6 +28,7 @@ func TestReadCancellationWhileWaitingForConnection(t *testing.T) {
 	const canceledRead = "{\"error\":\"context canceled\"}\n"
 	const canceledProjectLookup = "{\"code\":\"project_resolution_failed\",\"error\":\"project resolution failed: context canceled\"}\n"
 	tests := map[string]struct{ path, errorBody string }{
+		"health":                {"/health", "{\"error\":\"health check failed\"}\n"},
 		"search":                {"/search?q=synthetic&all_projects=true", canceledRead},
 		"compact-search":        {"/search?q=synthetic&all_projects=true&response_format=compact", canceledRead},
 		"context-sessions":      {"/context?all_projects=true&pinned=-1&observations=-1&prompts=-1", canceledRead},
