@@ -23,6 +23,7 @@ import (
 const (
 	claudeNativePromptHook = "claude-windows-user-prompt-submit"
 	claudePromptBash       = `"${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.sh"`
+	claudePromptPowerShell = "user-prompt-submit.ps1"
 	claudeHooksPath        = "hooks/hooks.json"
 	claudeManifestPath     = ".claude-plugin/plugin.json"
 )
@@ -83,7 +84,8 @@ func (b claudeBundle) verify(root string, githubCheckout bool) error {
 			return err
 		}
 		want := b[index].data
-		if githubCheckout && (filepath.Ext(rel) == ".json" || filepath.Ext(rel) == ".md") {
+		ext := filepath.Ext(rel)
+		if githubCheckout && (ext == ".json" || ext == ".md" || b[index].path == "scripts/"+claudePromptPowerShell) {
 			got = bytes.ReplaceAll(got, []byte("\r\n"), []byte("\n"))
 			want = bytes.ReplaceAll(want, []byte("\r\n"), []byte("\n"))
 		}

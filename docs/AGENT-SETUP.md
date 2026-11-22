@@ -366,13 +366,15 @@ On Windows with a private user-owned Claude profile on local NTFS, opt in to the
 engram setup claude-code --native-windows-prompt=enable
 ```
 
-Enable pins and checks the running Engram executable and selects a complete local variant of the existing user-scope `engram@engram` plugin. Both commands honor `CLAUDE_CONFIG_DIR`. Other lifecycle hooks still use their normal dependencies. Run ordinary Claude setup if you also need to register MCP.
+Enable pins and checks the running Engram executable and selects a complete local variant of the existing user-scope `engram@engram` plugin. Remove any Engram prompt override from Claude's user settings before enabling, including the PowerShell example below. Both commands honor `CLAUDE_CONFIG_DIR`. Run ordinary Claude setup if you also need to register MCP.
 
 To return the same managed plugin to its Bash hook, run the disable command and restart Claude Code.
 
 ```powershell
 engram setup claude-code --native-windows-prompt=disable
 ```
+
+Disable leaves user hooks and other settings in place. It can select Bash even if `jq` or `curl` is missing. The Bash hooks still need their usual dependencies to run.
 
 For Windows provisioning, run the capability check against the exact executable you intend to pin.
 

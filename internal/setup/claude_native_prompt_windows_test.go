@@ -101,24 +101,131 @@ func TestManagedClaudePromptBundlePreservesAssets(t *testing.T) {
 
 func TestManagedClaudePromptCheckoutNormalization(t *testing.T) {
 	root := t.TempDir()
-	files := claudeBundle{{path: "hook.sh", data: []byte("bash\n")}, {path: "skills.md", data: []byte("markdown\n")}}
+	files := claudeBundle{
+		{path: "hook.sh", data: []byte("bash\n")},
+		{path: "scripts/user-prompt-submit.ps1", data: []byte("Write-Output fixture\n")},
+		{path: "skills.md", data: []byte("markdown\n")},
+		{path: "unrelated.ps1", data: []byte("Write-Output unrelated\n")},
+	}
 	if err := os.WriteFile(filepath.Join(root, "hook.sh"), []byte("bash\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "skills.md"), []byte("markdown\r\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	powershell := filepath.Join(root, "scripts", claudePromptPowerShell)
+	if err := os.Mkdir(filepath.Dir(powershell), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(powershell, []byte("Write-Output fixture\r\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(root, "unrelated.ps1")
+	if err := os.WriteFile(unrelated, []byte("Write-Output unrelated\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := files.verify(root, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := files.verify(root, false); err == nil {
-		t.Fatal("staged bundle accepted changed bytes")
+	if err := os.WriteFile(filepath.Join(root, "skills.md"), []byte("markdown\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.verify(root, false); err == nil || !strings.Contains(err.Error(), "user-prompt-submit.ps1") {
+		t.Fatalf("staged bundle PowerShell byte check returned %v", err)
+	}
+	if err := os.WriteFile(powershell, []byte("Write-Output modified\r\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.verify(root, true); err == nil || !strings.Contains(err.Error(), "user-prompt-submit.ps1") {
+		t.Fatalf("GitHub bundle PowerShell content check returned %v", err)
+	}
+	if err := os.WriteFile(powershell, []byte("Write-Output fixture\r\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "hook.sh"), []byte("bash\r\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := files.verify(root, true); err == nil {
 		t.Fatal("GitHub bundle accepted changed Bash bytes")
+	}
+	if err := os.WriteFile(filepath.Join(root, "hook.sh"), []byte("bash\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unrelated, []byte("Write-Output unrelated\r\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.verify(root, true); err == nil || !strings.Contains(err.Error(), "unrelated.ps1") {
+		t.Fatalf("GitHub bundle unrelated PowerShell byte check returned %v", err)
+	}
+}
+
+func TestManagedClaudePromptFindsDecodedUserOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hook string
+		want bool
+	}{
+		{"documented PowerShell", `{"type":"command","command":"pwsh -NoProfile -ExecutionPolicy Bypass -File \"C:\\path\\to\\engram\\plugin\\claude-code\\scripts\\user-prompt-submit\u002eps1\"","timeout":10}`, true},
+		{"native exec arguments", `{"type":"command","command":"engram.exe","args":["hook","claude-windows-user-prompt-submit"]}`, true},
+		{"legacy Bash", `{"type":"command","command":"bash user-prompt-submit.sh"}`, true},
+		{"unrelated hook status text", `{"type":"command","command":"echo fixture","statusMessage":"user-prompt-submit.sh"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := t.TempDir()
+			data := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[` + tc.hook + `]}]}}`)
+			if err := os.WriteFile(filepath.Join(profile, "settings.json"), data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkClaudeUserPromptSettings(profile); (err != nil) != tc.want {
+				t.Fatalf("manual override check returned %v, want rejection %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestManagedClaudePromptDisableWithoutDependenciesOrOverrideAdmission(t *testing.T) {
+	resetSetupSeams(t)
+	profile := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", profile)
+	root := filepath.Join(profile, managedClaudeDirectory)
+	settings := filepath.Join(profile, "settings.json")
+	userSettings := []byte(`{"env":{"KEEP":"yes"},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"bash user-prompt-submit.sh"}]}]}}`)
+	if err := os.WriteFile(settings, userSettings, 0600); err != nil {
+		t.Fatal(err)
+	}
+	files, err := loadClaudeBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash, err := files.stage(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookPathFn = func(name string) (string, error) {
+		if name != "claude" {
+			return "", os.ErrNotExist
+		}
+		return "claude.exe", nil
+	}
+	runCommand = func(_ string, args ...string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "plugin marketplace list --json":
+			return json.Marshal([]claudeMarketplace{{Name: "engram", Source: "directory", Path: root}})
+		case "plugin list --json":
+			return json.Marshal([]claudeInstalledPlugin{{ID: managedClaudePlugin, Scope: "user", Enabled: true, Version: bash.version, ReadFromFolder: bash.folder}})
+		case "plugin marketplace update engram", "plugin update engram@engram --scope user":
+			return nil, nil
+		default:
+			t.Fatalf("unexpected Claude operation %v", args)
+			return nil, nil
+		}
+	}
+	if err := SetClaudeWindowsNativePrompt(false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(settings)
+	if err != nil || !bytes.Equal(got, userSettings) {
+		t.Fatalf("disable changed the user's settings: %v", err)
 	}
 }
 

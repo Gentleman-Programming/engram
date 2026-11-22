@@ -42,9 +42,11 @@ func SetClaudeWindowsNativePrompt(enable bool) error {
 	if err != nil {
 		return fmt.Errorf("find Claude CLI: %w", err)
 	}
-	for _, dependency := range []string{"jq", "curl"} {
-		if _, err := lookPathFn(dependency); err != nil {
-			return fmt.Errorf("the full Claude Code plugin requires %s in PATH: %w", dependency, err)
+	if enable {
+		for _, dependency := range []string{"jq", "curl"} {
+			if _, err := lookPathFn(dependency); err != nil {
+				return fmt.Errorf("the full Claude Code plugin requires %s in PATH: %w", dependency, err)
+			}
 		}
 	}
 	root, err := managedClaudeRoot()
@@ -81,8 +83,10 @@ func SetClaudeWindowsNativePrompt(enable bool) error {
 	if !owned && market.Name == "" && installed.ID != "" {
 		return errors.New("the installed Engram plugin has no recognized marketplace")
 	}
-	if err := checkClaudeUserPromptSettings(filepath.Dir(root)); err != nil {
-		return err
+	if enable {
+		if err := checkClaudeUserPromptSettings(filepath.Dir(root)); err != nil {
+			return err
+		}
 	}
 
 	template, err := loadClaudeBundle()
@@ -289,14 +293,33 @@ func checkClaudeUserPromptSettings(profile string) error {
 		return err
 	}
 	var settings struct {
-		Hooks map[string]json.RawMessage `json:"hooks"`
+		Hooks struct {
+			UserPromptSubmit []struct {
+				Hooks []struct {
+					Type    string   `json:"type"`
+					Command string   `json:"command"`
+					Args    []string `json:"args"`
+				} `json:"hooks"`
+			} `json:"UserPromptSubmit"`
+		} `json:"hooks"`
 	}
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		return fmt.Errorf("read Claude user settings: %w", err)
 	}
-	prompt := strings.ToLower(string(settings.Hooks["UserPromptSubmit"]))
-	if strings.Contains(prompt, "user-prompt-submit.sh") || strings.Contains(prompt, claudeNativePromptHook) {
-		return errors.New("an Engram prompt hook is already configured directly in Claude user settings")
+	for _, group := range settings.Hooks.UserPromptSubmit {
+		for _, hook := range group.Hooks {
+			if hook.Type != "command" {
+				continue
+			}
+			for _, part := range append([]string{hook.Command}, hook.Args...) {
+				part = strings.ToLower(part)
+				if strings.Contains(part, "user-prompt-submit.sh") ||
+					strings.Contains(part, claudePromptPowerShell) ||
+					strings.Contains(part, claudeNativePromptHook) {
+					return errors.New("an Engram prompt hook is already configured directly in Claude user settings")
+				}
+			}
+		}
 	}
 	return nil
 }
