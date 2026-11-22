@@ -351,10 +351,10 @@ type chunkSessionIndexer interface {
 }
 
 func (cs *CloudStore) indexChunkSessionsWith(ctx context.Context, execer chunkSessionIndexer, project string, payload []byte) error {
-	sessionIDs := collectSessionIDsFromPayload(payload)
-	if len(sessionIDs) == 0 {
-		return nil
-	}
+	return indexSessionIDs(ctx, execer, project, collectSessionIDsFromPayload(payload))
+}
+
+func indexSessionIDs(ctx context.Context, execer chunkSessionIndexer, project string, sessionIDs map[string]struct{}) error {
 	for sessionID := range sessionIDs {
 		if _, err := execer.ExecContext(ctx,
 			`INSERT INTO cloud_project_sessions (project_name, session_id) VALUES ($1, $2) ON CONFLICT (project_name, session_id) DO NOTHING`,
@@ -559,14 +559,15 @@ func (cs *CloudStore) backfillProjectSessionsFromChunks(ctx context.Context) err
 			}
 			knownByProject[project] = known
 		}
-		for sessionID := range collectSessionIDsFromPayload(payload) {
+		sessionIDs := collectSessionIDsFromPayload(payload)
+		for sessionID := range sessionIDs {
 			if sessionID != strings.TrimSpace(sessionID) {
 				if _, exists := known[sessionID]; !exists {
 					return fmt.Errorf("%w: project %q session_id %q has no exact index entry", ErrSessionIndexHistoricalResolutionRequired, project, sessionID)
 				}
 			}
 		}
-		if err := cs.indexChunkSessions(ctx, project, payload); err != nil {
+		if err := indexSessionIDs(ctx, cs.db, project, sessionIDs); err != nil {
 			return fmt.Errorf("cloudstore: backfill session index row: %w", err)
 		}
 	}
