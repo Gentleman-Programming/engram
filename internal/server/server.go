@@ -1536,8 +1536,8 @@ func contextBytesQuery(r *http.Request) int {
 	return clampContextBytes(budget)
 }
 
-var contextHistoryFormatter = func(s *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
-	return s.FormatContextWithOptions(project, scope, opts)
+var contextHistoryFormatter = func(ctx context.Context, s *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
+	return s.FormatContextWithOptionsContext(ctx, project, scope, opts)
 }
 
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
@@ -1567,7 +1567,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		OlderHistory: queryBool(r, "older_history", false),
 	}
 
-	context, err := contextHistoryFormatter(s.store, resolved.Project, scope, opts)
+	context, err := contextHistoryFormatter(r.Context(), s.store, resolved.Project, scope, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

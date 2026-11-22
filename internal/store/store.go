@@ -4168,6 +4168,10 @@ func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]
 // carries rows that identify no project, so the column is read through ifnull():
 // an unscoped listing reads every session row and must not die on one of them.
 func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, error) {
+	return s.recentSessions(context.Background(), project, limit)
+}
+
+func (s *Store) recentSessions(ctx context.Context, project string, limit int) ([]SessionSummary, error) {
 	// Normalize project filter for case-insensitive matching
 	project, _ = NormalizeProject(project)
 
@@ -4192,7 +4196,7 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 	query += " GROUP BY s.id ORDER BY MAX(datetime(COALESCE(o.created_at, s.started_at))) DESC, s.id DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := s.queryItHook(s.db, query, args...)
+	rows, err := s.queryContextSection(ctx, s.db, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -4635,14 +4639,14 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 // ContextOptions.Pinned) use the unexported pinnedObservationsLimit helper,
 // which this delegates to with limit=0 ("no LIMIT clause", i.e. unbounded).
 func (s *Store) PinnedObservations(project, scope string) ([]Observation, error) {
-	return s.pinnedObservationsLimit(project, scope, 0, false)
+	return s.pinnedObservationsLimit(context.Background(), project, scope, 0, false)
 }
 
 // pinnedObservationsLimit is the shared query behind PinnedObservations. A
 // limit <= 0 means "no LIMIT clause" (every pinned row, matching
 // PinnedObservations' historical unbounded behavior); a positive limit caps
 // the result via SQL LIMIT.
-func (s *Store) pinnedObservationsLimit(project, scope string, limit int, compact bool) ([]Observation, error) {
+func (s *Store) pinnedObservationsLimit(ctx context.Context, project, scope string, limit int, compact bool) ([]Observation, error) {
 	project, _ = NormalizeProject(project)
 
 	query := `
@@ -4666,7 +4670,7 @@ func (s *Store) pinnedObservationsLimit(project, scope string, limit int, compac
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	return s.queryContextObservations(s.db, query, args, compact)
+	return s.queryContextObservations(ctx, s.db, query, args, compact)
 }
 
 func (s *Store) PinObservation(id int64) error {
@@ -4696,7 +4700,7 @@ func (s *Store) setObservationPinned(id int64, pinned bool) error {
 	return nil
 }
 
-func (s *Store) recentUnpinnedObservations(project, scope string, limit int, compact bool) ([]Observation, error) {
+func (s *Store) recentUnpinnedObservations(ctx context.Context, project, scope string, limit int, compact bool) ([]Observation, error) {
 	project, _ = NormalizeProject(project)
 	if limit <= 0 {
 		limit = s.cfg.MaxContextResults
@@ -4718,7 +4722,7 @@ func (s *Store) recentUnpinnedObservations(project, scope string, limit int, com
 	}
 	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC LIMIT ?"
 	args = append(args, limit)
-	return s.queryContextObservations(s.db, query, args, compact)
+	return s.queryContextObservations(ctx, s.db, query, args, compact)
 }
 
 func (s *Store) compactionObservations(sessionID, project string, pinned bool, limit int) ([]Observation, error) {
@@ -5152,6 +5156,10 @@ func truncateContent(content string, max int) string {
 }
 
 func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
+	return s.recentPrompts(context.Background(), project, limit)
+}
+
+func (s *Store) recentPrompts(ctx context.Context, project string, limit int) ([]Prompt, error) {
 	// Normalize project filter for case-insensitive matching
 	project, _ = NormalizeProject(project)
 
@@ -5170,7 +5178,7 @@ func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
 	query += " ORDER BY created_at DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := s.queryItHook(s.db, query, args...)
+	rows, err := s.queryContextSection(ctx, s.db, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -6566,6 +6574,11 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 // markdown block for the given project/scope, honoring the per-section caps
 // and Compact rendering in opts. See ContextOptions for the cap convention.
 func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOptions) (string, error) {
+	return s.FormatContextWithOptionsContext(context.Background(), project, scope, opts)
+}
+
+// FormatContextWithOptionsContext honors cancellation for all reads used to build context.
+func (s *Store) FormatContextWithOptionsContext(ctx context.Context, project, scope string, opts ContextOptions) (string, error) {
 	var (
 		sessions     []SessionSummary
 		pinned       []Observation
@@ -6579,7 +6592,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		if limit == 0 {
 			limit = 5
 		}
-		if sessions, err = s.RecentSessions(project, limit); err != nil {
+		if sessions, err = s.recentSessions(ctx, project, limit); err != nil {
 			return "", err
 		}
 	}
@@ -6595,7 +6608,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 				limit = byteLimit
 			}
 		}
-		if pinned, err = s.pinnedObservationsLimit(project, scope, limit, opts.Compact); err != nil {
+		if pinned, err = s.pinnedObservationsLimit(ctx, project, scope, limit, opts.Compact); err != nil {
 			return "", err
 		}
 	}
@@ -6606,7 +6619,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		if s.contextHistoryNow != nil {
 			now = s.contextHistoryNow().UTC()
 		}
-		observations, olderGroups, err = s.contextHistory(project, scope, opts.Observations, now, opts.Compact)
+		observations, olderGroups, err = s.contextHistory(ctx, project, scope, opts.Observations, now, opts.Compact)
 		if err != nil {
 			return "", err
 		}
@@ -6618,7 +6631,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		if limit == 0 {
 			limit = s.cfg.MaxContextResults
 		}
-		if observations, err = s.recentUnpinnedObservations(project, scope, limit, opts.Compact); err != nil {
+		if observations, err = s.recentUnpinnedObservations(ctx, project, scope, limit, opts.Compact); err != nil {
 			return "", err
 		}
 	}
@@ -6628,7 +6641,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		if limit == 0 {
 			limit = 10
 		}
-		if prompts, err = s.RecentPrompts(project, limit); err != nil {
+		if prompts, err = s.recentPrompts(ctx, project, limit); err != nil {
 			return "", err
 		}
 	}

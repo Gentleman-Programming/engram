@@ -57,8 +57,8 @@ func historyPeriods(now time.Time) []historyPeriod {
 
 // The transaction pins recent membership, aggregates and bounded title reads to
 // one SQLite snapshot. Old content bodies are never selected.
-func (s *Store) contextHistory(project, scope string, limit int, now time.Time, compact bool) ([]Observation, []historyGroup, error) {
-	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+func (s *Store) contextHistory(ctx context.Context, project, scope string, limit int, now time.Time, compact bool) ([]Observation, []historyGroup, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -80,7 +80,7 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time, 
 	}
 	recentSQL := "SELECT " + contextObservationColumns(compact) + " FROM observations WHERE " + filter + " ORDER BY datetime(created_at) DESC, id DESC LIMIT ?"
 	recentArgs := append(append([]any{}, args...), limit)
-	recent, err := s.queryContextObservations(tx, recentSQL, recentArgs, compact)
+	recent, err := s.queryContextObservations(ctx, tx, recentSQL, recentArgs, compact)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -91,7 +91,7 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time, 
 	baseArgs := append(append([]any{}, recentArgs...), args...)
 	periods := historyPeriods(now)
 	aggregateSQL, queryArgs := historyAggregateSQL(base, baseArgs, periods, now)
-	rows, err := tx.Query(aggregateSQL, queryArgs...)
+	rows, err := tx.QueryContext(ctx, aggregateSQL, queryArgs...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -130,7 +130,7 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time, 
 		}
 		if p.samples > 0 {
 			sampleArgs := append(append([]any{}, baseArgs...), p.start.Format(time.RFC3339), p.end.Format(time.RFC3339), p.samples)
-			rows, err = tx.Query(historySampleSQL(base), sampleArgs...)
+			rows, err = tx.QueryContext(ctx, historySampleSQL(base), sampleArgs...)
 			if err != nil {
 				return nil, nil, err
 			}
