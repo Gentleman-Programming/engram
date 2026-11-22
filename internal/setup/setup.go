@@ -998,12 +998,16 @@ func installClaudeCode() (*Result, error) {
 		}
 	}
 
-	// Step 1: Add marketplace (idempotent — if already added, claude will say so)
-	addOut, err := runCommand(claudeBin, "plugin", "marketplace", "add", claudeCodeMarketplace)
-	addOutputStr := strings.TrimSpace(string(addOut))
+	managed, release, err := protectManagedClaudeMarketplace(claudeBin)
 	if err != nil {
-		// If marketplace is already added, that's fine
-		if !strings.Contains(addOutputStr, "already") {
+		return nil, err
+	}
+	defer release()
+	if !managed {
+		// Add marketplace (idempotent — if already added, claude will say so).
+		addOut, err := runCommand(claudeBin, "plugin", "marketplace", "add", claudeCodeMarketplace)
+		addOutputStr := strings.TrimSpace(string(addOut))
+		if err != nil && !strings.Contains(addOutputStr, "already") {
 			return nil, fmt.Errorf("marketplace add failed: %s", addOutputStr)
 		}
 	}

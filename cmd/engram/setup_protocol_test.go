@@ -41,8 +41,34 @@ func TestCmdSetupHelpAnyPositionShowsProtocolFlagAndSkipsStdin(t *testing.T) {
 		if !strings.Contains(stdout, "--protocol") {
 			t.Fatalf("args=%v: usage output missing literal --protocol: %q", args, stdout)
 		}
+		if !strings.Contains(stdout, "--native-windows-prompt=enable|disable") {
+			t.Fatalf("args=%v: usage output missing managed native Claude setup: %q", args, stdout)
+		}
 		if !strings.Contains(stdout, "plugin >= 0.1.1") {
 			t.Fatalf("args=%v: usage output missing Claude Code plugin floor: %q", args, stdout)
+		}
+	}
+}
+
+func TestCmdSetupNativePromptRejectsConflictingOptions(t *testing.T) {
+	stubRuntimeHooks(t)
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	enable := "--native-windows-prompt=enable"
+	for _, args := range [][]string{
+		{"codex", enable},
+		{"claude-code", "--native-windows-prompt"},
+		{"claude-code", "--native-windows-prompt=status"},
+		{"claude-code", enable, "--native-windows-prompt=disable"},
+		{"claude-code", enable, "--mcp-only"},
+		{"claude-code", enable, "--protocol=slim"},
+		{"claude-code", enable, "--allow-memory-writes"},
+		{"claude-code", enable, "--wrong"},
+	} {
+		withArgs(t, append([]string{"engram", "setup"}, args...)...)
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+		if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "engram setup claude-code --native-windows-prompt=enable|disable") {
+			t.Fatalf("args=%v: expected validation error, panic=%v stderr=%q", args, recovered, stderr)
 		}
 	}
 }
