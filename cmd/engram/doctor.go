@@ -14,6 +14,10 @@ import (
 )
 
 func cmdDoctor(cfg store.Config) {
+	if len(os.Args) > 2 && os.Args[2] == "host-session" {
+		cmdDoctorHostSession(cfg, os.Args[3:])
+		return
+	}
 	if len(os.Args) > 2 && os.Args[2] == "discard-empty-prompt" {
 		cmdDoctorDiscardEmptyPrompt(cfg)
 		return
@@ -122,6 +126,7 @@ func cmdDoctor(cfg store.Config) {
 }
 
 func printDoctorUsage() {
+	_, _ = fmt.Fprintln(os.Stdout, doctorHostSessionUsage)
 	_, _ = fmt.Fprintln(os.Stdout, "note: project mismatch evidence includes local aliases; repair rereads aliases to veto contradictory moves.")
 	_, _ = fmt.Fprintln(os.Stdout, discardPromptUsage)
 	fmt.Fprintln(os.Stdout, "usage: engram doctor [--json] [--project PROJECT] [--check CODE]")
