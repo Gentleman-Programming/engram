@@ -1948,7 +1948,12 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.withTx(func(tx *sql.Tx) error {
-		_, err := s.execHook(tx, `UPDATE observations SET project = CAST(project AS TEXT) WHERE typeof(project) = 'blob'`)
+		// X'' is the smallest BLOB, and SQLite sorts BLOBs after other
+		// storage classes. This bound lets the existing project index seek.
+		_, err := s.execHook(tx, `
+			UPDATE observations SET project = CAST(project AS TEXT)
+			WHERE typeof(project) = 'blob' AND project >= X''
+		`)
 		return err
 	}); err != nil {
 		return err

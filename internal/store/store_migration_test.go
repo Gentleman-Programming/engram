@@ -114,6 +114,19 @@ func TestMigrateNormalizesBlobProjectsAndPreservesFTS(t *testing.T) {
 	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope) VALUES (?, ?, ?, ?, ?, CAST(? AS BLOB), ?)`, "obs-blob-project", "s-blob-project", "bugfix", "Normalize blob project", content, project, "project"); err != nil {
 		t.Fatalf("insert blob observation: %v", err)
 	}
+	if _, err := s.db.Exec(`
+		INSERT INTO observations (sync_id, session_id, type, title, content, project, scope) VALUES
+			('blob-empty', 's-blob-project', 'note', 'Empty blob', 'fixture', X'', 'project'),
+			('blob-binary', 's-blob-project', 'note', 'Binary blob', 'fixture', X'00FF', 'project'),
+			('text-empty', 's-blob-project', 'note', 'Empty text', 'fixture', '', 'project'),
+			('text-other', 's-blob-project', 'note', 'Other text', 'fixture', 'other', 'project'),
+			('null-project', 's-blob-project', 'note', 'NULL project', 'fixture', NULL, 'project');
+		CREATE TABLE project_repair_events (sync_id TEXT);
+		CREATE TRIGGER audit_project_repair AFTER UPDATE OF project ON observations
+		BEGIN INSERT INTO project_repair_events VALUES (old.sync_id); END;
+	`); err != nil {
+		t.Fatalf("seed project storage edge cases: %v", err)
+	}
 
 	if err := s.migrate(); err != nil {
 		t.Fatalf("migrate blob project: %v", err)
@@ -128,6 +141,28 @@ func TestMigrateNormalizesBlobProjectsAndPreservesFTS(t *testing.T) {
 	}
 	if storageClass != "text" || repairedProject != project || repairedContent != content {
 		t.Fatalf("repaired row = (%q, %q, %q), want (text, %q, %q)", storageClass, repairedProject, repairedContent, project, content)
+	}
+	for _, row := range []struct{ id, storage, bytes string }{
+		{"blob-empty", "text", ""},
+		{"blob-binary", "text", "00FF"},
+		{"text-empty", "text", ""},
+		{"text-other", "text", "6F74686572"},
+		{"null-project", "null", ""},
+	} {
+		var storage, bytes string
+		if err := s.db.QueryRow(`SELECT typeof(project), hex(project) FROM observations WHERE sync_id = ?`, row.id).Scan(&storage, &bytes); err != nil {
+			t.Fatalf("read project %s: %v", row.id, err)
+		}
+		if storage != row.storage || bytes != row.bytes {
+			t.Errorf("project %s = (%s, %s), want (%s, %s)", row.id, storage, bytes, row.storage, row.bytes)
+		}
+	}
+	var updates string
+	if err := s.db.QueryRow(`SELECT group_concat(sync_id, ',') FROM (SELECT sync_id FROM project_repair_events ORDER BY sync_id)`).Scan(&updates); err != nil {
+		t.Fatalf("read project repair events: %v", err)
+	}
+	if want := "blob-binary,blob-empty,obs-blob-project"; updates != want {
+		t.Fatalf("project repair events = %q, want %q", updates, want)
 	}
 	observations, err := s.RecentObservations(project, "project", 10)
 	if err != nil || len(observations) != 1 {
