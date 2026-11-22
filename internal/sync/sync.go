@@ -20,6 +20,7 @@
 package sync
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"database/sql"
@@ -108,10 +109,12 @@ type ChunkData struct {
 	ReviewClears []string `json:"review_clears,omitempty"`
 }
 
+// plain retains the decoder's original type name in JSON error messages.
+type plain ChunkData
+
 // UnmarshalJSON validates project-owned session directories before plain string
 // decoding could turn JSON null into an apparently valid isolated directory.
 func (c *ChunkData) UnmarshalJSON(raw []byte) error {
-	type plain ChunkData
 	var fields struct {
 		Sessions []json.RawMessage `json:"sessions"`
 	}
@@ -137,6 +140,25 @@ func (c *ChunkData) UnmarshalJSON(raw []byte) error {
 	}
 	*c = ChunkData(decoded)
 	return nil
+}
+
+// DecodeHistoricalChunkMutations reads mutations from a stored chunk and
+// preserves the validation of all sections performed by ChunkData.UnmarshalJSON.
+func DecodeHistoricalChunkMutations(raw []byte) ([]store.SyncMutation, error) {
+	if !bytes.Contains(raw, []byte(store.SessionOwnershipProjectOwned)) && !bytes.Contains(raw, []byte(`\u`)) {
+		// The raw session scan above has no additional validation without
+		// project-owned sessions. Decode every typed section as usual.
+		var chunk plain
+		if err := json.Unmarshal(raw, &chunk); err == nil {
+			return chunk.Mutations, nil
+		}
+	}
+	// The full decoder preserves directory validation and error precedence.
+	var chunk ChunkData
+	if err := json.Unmarshal(raw, &chunk); err != nil {
+		return nil, err
+	}
+	return chunk.Mutations, nil
 }
 
 // SyncResult is returned after a sync operation.

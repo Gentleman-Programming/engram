@@ -1177,11 +1177,11 @@ func (cs *CloudStore) existingChunkMutationSignatures(ctx context.Context, proje
 		if err := rows.Scan(&payload); err != nil {
 			return nil, fmt.Errorf("cloudstore: scan existing chunk mutations: %w", err)
 		}
-		chunk, err := parseChunkData(payload)
+		mutations, err := engramsync.DecodeHistoricalChunkMutations(payload)
 		if err != nil {
 			return nil, fmt.Errorf("cloudstore: parse existing chunk mutations: %w", err)
 		}
-		for _, mutation := range chunk.Mutations {
+		for _, mutation := range mutations {
 			if !isChunkMaterializableMutationEntity(mutation.Entity) {
 				continue
 			}
