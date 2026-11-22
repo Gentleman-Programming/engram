@@ -10,6 +10,43 @@ import (
 	"time"
 )
 
+func TestRuntimeSessionResolveSelectsLiveOrdinalsWithoutAllocating(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestStore(t)
+	const root, project = "host%_", "fixture-project"
+	ended := []string{root, root + ":resume:2", root + ":resume:99999999999999999999"}
+	live := []string{root + ":resume:3", root + ":resume:0003", root + ":resume:3extra"}
+	for _, id := range append(ended, live...) {
+		if err := s.StartSession(id, project, dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range ended {
+		if err := s.EndSession(id, "ended fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Equal numeric ordinals keep the existing literal ordering. A nonnumeric
+	// suffix does not qualify as a continuation or affect future allocation.
+	for _, expected := range []string{root + ":resume:0003", root + ":resume:3"} {
+		id, err := s.ResolveRuntimeSessionWithOwnershipModeContext(t.Context(), root, project, dir, SessionOwnershipShared)
+		if err != nil || id != expected {
+			t.Fatalf("resolved %q, want %q: %v", id, expected, err)
+		}
+		id, err = s.EndRuntimeSessionIfCurrent(root, project, dir, SessionOwnershipShared, "ended fixture", expected)
+		if err != nil || id != expected {
+			t.Fatalf("ended %q, want %q: %v", id, expected, err)
+		}
+	}
+	if id, err := s.ResolveRuntimeSessionWithOwnershipModeContext(t.Context(), root, project, dir, SessionOwnershipShared); id != "" || !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("no live continuation: %q, %v", id, err)
+	}
+	id, err := s.ResumeSessionWithOwnershipMode(root, project, dir, SessionOwnershipShared)
+	if err != nil || id != root+":resume:100000000000000000000" {
+		t.Fatalf("resume allocation lost its full history: %q, %v", id, err)
+	}
+}
+
 func TestRuntimeSessionResolveContextCancelsConnectionWait(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(FallbackConfig(filepath.Join(root, "store")))

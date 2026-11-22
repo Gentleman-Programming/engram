@@ -3649,11 +3649,13 @@ func (s *Store) RegisterIsolatedSessionTimed(id, project string, resume bool, ti
 
 // sessions.id uses SQLite's default BINARY collation: ':' follows ASCII '9'.
 const continuationSessionsQuery = `SELECT id, ended_at FROM sessions WHERE id >= ? AND id < ? ORDER BY id`
+const liveContinuationSessionsQuery = `SELECT id, ended_at FROM sessions WHERE id >= ? AND id < ? AND ended_at IS NULL ORDER BY id`
 
 // continuationSessionTx selects the lowest numeric live continuation, or the
-// next ordinal after all numeric suffixes. Literal prefix comparison avoids SQL
-// wildcard interpretation. Arbitrary precision ordinals impose no restart cap.
-func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string, error) {
+// next ordinal after all numeric suffixes if the caller can allocate one.
+// Literal prefix comparison avoids SQL wildcard interpretation. Arbitrary
+// precision ordinals impose no restart cap.
+func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string, allocate bool) (string, error) {
 	var endedAt *string
 	err := tx.QueryRowContext(ctx, `SELECT ended_at FROM sessions WHERE id = ?`, root).Scan(&endedAt)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && endedAt == nil) {
@@ -3663,7 +3665,11 @@ func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string
 		return "", err
 	}
 	prefix := root + ":resume:"
-	rows, err := tx.QueryContext(ctx, continuationSessionsQuery, prefix+"0", prefix+":")
+	query := liveContinuationSessionsQuery
+	if allocate {
+		query = continuationSessionsQuery
+	}
+	rows, err := tx.QueryContext(ctx, query, prefix+"0", prefix+":")
 	if err != nil {
 		return "", err
 	}
@@ -3688,7 +3694,7 @@ func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string
 		if !ok {
 			continue
 		}
-		if n.Cmp(max) > 0 {
+		if allocate && n.Cmp(max) > 0 {
 			max.Set(n)
 		}
 		if ended == nil && (liveOrdinal == nil || n.Cmp(liveOrdinal) < 0) {
@@ -3702,6 +3708,9 @@ func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string
 		// The normal registration checks this selected identity's ownership;
 		// a conflict must be returned, never skipped by advancing the ordinal.
 		return liveID, nil
+	}
+	if !allocate {
+		return "", sql.ErrNoRows
 	}
 	return prefix + max.Add(max, big.NewInt(1)).String(), nil
 }
@@ -3834,7 +3843,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 					}
 				}
 			}
-			id, err = continuationSessionTx(context.Background(), tx, root)
+			id, err = continuationSessionTx(context.Background(), tx, root, true)
 			if err != nil {
 				return err
 			}
@@ -4006,7 +4015,7 @@ func runtimeSessionTxWithScopeCheck(ctx context.Context, tx *sql.Tx, root, proje
 	if err := validate(root, false); err != nil {
 		return "", err
 	}
-	id, err := continuationSessionTx(ctx, tx, root)
+	id, err := continuationSessionTx(ctx, tx, root, false)
 	if err != nil {
 		return "", err
 	}
