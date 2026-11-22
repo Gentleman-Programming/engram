@@ -1,15 +1,23 @@
 package server
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
+const currentProjectGitEchoDirectory = "ENGRAM_TEST_CURRENT_PROJECT_GIT_ECHO_DIRECTORY"
+
 func TestMain(m *testing.M) {
 	if name := filepath.Base(os.Args[0]); name == "git" || name == "git.exe" {
 		if address := os.Getenv(currentProjectGitFixture); address != "" {
-			waitForCurrentProjectGitRelease(address)
+			released := waitForCurrentProjectGitRelease(address)
+			if released && os.Getenv(currentProjectGitEchoDirectory) == "1" && len(os.Args) == 5 &&
+				os.Args[1] == "-C" && os.Args[3] == "rev-parse" && os.Args[4] == "--show-toplevel" {
+				fmt.Println(os.Args[2])
+				os.Exit(0)
+			}
 			os.Exit(1)
 		}
 	}

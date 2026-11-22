@@ -352,13 +352,16 @@ func installCurrentProjectGitFixture(t *testing.T, dir string) {
 }
 
 // waitForCurrentProjectGitRelease runs only in the copied test executable.
-func waitForCurrentProjectGitRelease(address string) {
+func waitForCurrentProjectGitRelease(address string) bool {
 	conn, err := net.DialTimeout("tcp4", address, time.Second)
 	if err != nil {
-		return
+		return false
 	}
 	defer func() { _ = conn.Close() }()
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err == nil {
-		_, _ = conn.Read(make([]byte, 1))
+		var signal [1]byte
+		n, _ := conn.Read(signal[:])
+		return n == 1 && signal[0] == 1
 	}
+	return false
 }

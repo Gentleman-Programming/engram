@@ -526,6 +526,13 @@ func RuntimeWorktreeDirectory(dir string) string {
 
 // RuntimeWorktreeDirectoryContext lets callers cancel Git checkout detection.
 func RuntimeWorktreeDirectoryContext(ctx context.Context, dir string) string {
+	resolved, _ := InspectRuntimeWorktreeDirectory(ctx, dir)
+	return resolved
+}
+
+// InspectRuntimeWorktreeDirectory reports whether Git identified the checkout
+// root. On failure, it returns the canonical input directory instead.
+func InspectRuntimeWorktreeDirectory(ctx context.Context, dir string) (string, bool) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		dir = "."
@@ -534,9 +541,9 @@ func RuntimeWorktreeDirectoryContext(ctx context.Context, dir string) string {
 		dir = absolute
 	}
 	if worktreeRoot := detectGitWorktreeDirContext(ctx, dir); worktreeRoot != "" {
-		return runtimeCanonicalizePath(worktreeRoot)
+		return runtimeCanonicalizePath(worktreeRoot), true
 	}
-	return runtimeCanonicalizePath(dir)
+	return runtimeCanonicalizePath(dir), false
 }
 
 // DirectoryIdentity compares exact directories without promoting them to a
