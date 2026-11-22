@@ -66,8 +66,10 @@ func init() {
 
 var (
 	storeNew                   = store.New
+	storeNewForLocalStartup    = store.NewWithStartupContext
 	storeDefaultConfig         = store.DefaultConfig
 	newHTTPServer              = server.New
+	listenLocalStartup         = server.ListenLocalStartup
 	startHTTP                  = (*server.Server).Start
 	serveGenerationInvalidated = (*server.Server).GenerationInvalidated
 	serveGenerationError       = (*store.Store).GenerationError
@@ -967,6 +969,17 @@ func cmdServe(cfg store.Config) error {
 // (foreground mode). It owns the store, server, autosync, and signal loop.
 func serveWith(cfg store.Config, options serveOptions) error {
 	var err error
+	readyFile, readyToken := os.Getenv("ENGRAM_RUN_READY_FILE"), os.Getenv("ENGRAM_RUN_READY_TOKEN")
+	detachedDaemon := readyFile != "" && readyToken != ""
+	var startup *server.LocalStartup
+	if !options.sessionOwned && options.socketPath == "" && options.port > 0 && !detachedDaemon {
+		// An already occupied port still takes the normal bind path, which
+		// uses the validated store identity to classify its current owner.
+		startup, _ = listenLocalStartup(options.port)
+		if startup != nil {
+			defer startup.Close()
+		}
+	}
 
 	// Owned EOF cancels startup lock waits as well as serving. Construction
 	// stays synchronous so cleanup cannot race abandoned live store work.
@@ -977,6 +990,14 @@ func serveWith(cfg store.Config, options serveOptions) error {
 	if options.sessionOwned {
 		parentEOF = watchOwnedParent(os.Stdin, cancel)
 		s, err = store.NewWithContext(ctx, cfg)
+	} else if startup != nil {
+		s, err = storeNewForLocalStartup(startup.Context(), cfg)
+		if cause := context.Cause(startup.Context()); cause != nil {
+			if s != nil {
+				_ = s.Close()
+			}
+			return fmt.Errorf("engram server stopped during initialization: %w", cause)
+		}
 	} else {
 		s, err = storeNew(cfg)
 	}
@@ -992,6 +1013,9 @@ func serveWith(cfg store.Config, options serveOptions) error {
 	}
 
 	srv := newHTTPServer(s, options.port)
+	if startup != nil {
+		srv.UseLocalStartup(startup)
+	}
 	if options.sessionOwned {
 		srv.SetSessionOwnedToken(os.Getenv("ENGRAM_TOKEN"))
 		srv.SetOnReady(func(addr net.Addr) error {
@@ -1008,7 +1032,7 @@ func serveWith(cfg store.Config, options serveOptions) error {
 	// half-started daemon never reports success. The start token is also
 	// reported on /health so pidfile owners can confirm this daemon's
 	// identity before signaling its pid.
-	if readyFile, readyToken := os.Getenv("ENGRAM_RUN_READY_FILE"), os.Getenv("ENGRAM_RUN_READY_TOKEN"); readyFile != "" && readyToken != "" && !options.sessionOwned {
+	if detachedDaemon && !options.sessionOwned {
 		dataDir := cfg.DataDir
 		srv.SetDaemonToken(readyToken)
 		srv.SetOnReady(func(addr net.Addr) error {

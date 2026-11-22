@@ -78,6 +78,7 @@ type SemanticPromptBuilder func(a, b store.ObservationSnippet) string
 
 type Server struct {
 	httpServer            *http.Server
+	startup               *LocalStartup
 	generationInvalidated chan struct{}
 	generationOnce        sync.Once
 	store                 *store.Store
@@ -304,17 +305,16 @@ func (s *Server) Start() error {
 		socketInfo os.FileInfo
 		err        error
 	)
-	if socketPath != "" {
+	if s.startup != nil {
+		ln = s.startup.listener
+	} else if socketPath != "" {
 		ln, socketInfo, err = listenSecureUnixSocket(socketPath)
 	} else {
 		ln, err = listenFn(network, addr)
 	}
 	if err != nil {
 		if s.sessionOwnedToken == "" && socketPath == "" && isAddressInUse(err) {
-			if s.instanceOwnsPort() {
-				return fmt.Errorf("engram server: listen %s: %w", addr, ErrPortOwned)
-			}
-			return fmt.Errorf("engram server: listen %s: already owned by a different or legacy instance", addr)
+			return fmt.Errorf("engram server: listen %s: %w", addr, s.portConflict())
 		}
 		return fmt.Errorf("engram server: listen %s: %w", addr, err)
 	}
@@ -350,9 +350,10 @@ func isAddressInUse(err error) bool {
 	return errors.Is(err, syscall.EADDRINUSE) || strings.Contains(message, "address already in use") || strings.Contains(message, "only one usage of each socket address")
 }
 
-func (s *Server) instanceOwnsPort() bool {
+func (s *Server) portConflict() error {
+	unknownOwner := errors.New("already owned by a different or legacy instance")
 	if s.instanceID == "" {
-		return false
+		return unknownOwner
 	}
 	client := http.Client{Timeout: 500 * time.Millisecond}
 	for attempt := 0; attempt < 5; attempt++ {
@@ -360,17 +361,25 @@ func (s *Server) instanceOwnsPort() bool {
 		if err == nil {
 			var health struct {
 				InstanceID string `json:"instance_id"`
+				Service    string `json:"service"`
+				Status     string `json:"status"`
 			}
 			err = json.NewDecoder(response.Body).Decode(&health)
 			_ = response.Body.Close()
-			if err == nil && health.InstanceID == s.instanceID {
-				return true
+			if err != nil {
+				return unknownOwner
 			}
-			return false
+			if response.StatusCode == http.StatusServiceUnavailable && health.Service == "engram" && health.Status == "starting" {
+				return errors.New("an Engram server is starting on the port")
+			}
+			if health.InstanceID == s.instanceID {
+				return ErrPortOwned
+			}
+			return unknownOwner
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return false
+	return unknownOwner
 }
 
 // Close stops the active listener and removes only the socket created by this

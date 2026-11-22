@@ -276,6 +276,9 @@ function buildInitializeEngramServerForTest({
     }
     const localEngramVersion = () => "unknown";
     const missingInstanceIdentityMessage = () => "missing identity";
+    function requireLocalHealthOwnership(health) {
+      ${extractFunctionBody("requireLocalHealthOwnership", "{\n  if (health.status")}
+    }
     const localInstanceID = resolveInstanceID;
     ${sharedModeTransportSource()}
     async function initializeEngramServer() {
@@ -477,6 +480,7 @@ function buildWaitForEngramReadinessForTest({ probeEngramHealth, pollMs = 5 }) {
     "ENGRAM_URL",
     "ENGRAM_STARTUP_POLL_MS",
     `
+    const requireLocalHealthOwnership = () => {};
     function waitCancellable(ms, signal) {
       ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
     }
@@ -502,6 +506,7 @@ function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 
     "ENGRAM_URL",
     "ENGRAM_STARTUP_POLL_MS",
     `
+    const requireLocalHealthOwnership = () => {};
     function waitCancellable(ms, signal) {
       ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
     }

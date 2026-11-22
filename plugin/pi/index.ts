@@ -883,10 +883,10 @@ async function ensureRuntimeQualification(signal?: AbortSignal, startupDeadline?
 }
 
 // "refused" means we saw proof that nothing is listening; "indeterminate" means the probe
-// told us nothing either way. Only "ready" is proof that a server is answering, so nothing
-// but "ready" may be read as "a server is already there". "foreign" is a live server owned
+// told us nothing either way. "starting" establishes a listener, and ownership is checked
+// once it is ready. "foreign" is a live server owned
 // by a different identity; "legacy" is a live server provably too old to report one.
-type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign" | "legacy" | "identity_missing";
+type EngramHealth = "ready" | "starting" | "refused" | "indeterminate" | "foreign" | "legacy" | "identity_missing";
 
 interface EngramHealthResult {
   status: EngramHealth;
@@ -1003,6 +1003,13 @@ async function probeEngramHealth(expectedID = ""): Promise<EngramHealthResult> {
       headers: transportHeaders(),
       signal: AbortSignal.timeout(500),
     });
+    if (res.status === 503 && expectedID) {
+      const health = await res.json();
+      if (health?.service === "engram" && health.status === "starting") {
+        return { ...result, status: "starting" };
+      }
+      return result;
+    }
     if (!res.ok) return result;
     if (!expectedID) return { ...result, status: "ready" };
     const health = await res.json() as { version?: unknown; instance_id?: unknown };
@@ -1200,7 +1207,9 @@ function waitCancellable(ms: number, signal: AbortSignal): Promise<void> {
 async function waitForEngramReadiness(signal: AbortSignal, deadline: number, expectedID = ""): Promise<void> {
   while (Date.now() < deadline) {
     if (signal.aborted) throw new Error(`Engram startup readiness wait for ${ENGRAM_URL} was cancelled`);
-    if ((await probeEngramHealth(expectedID)).status === "ready") return;
+    const health = await probeEngramHealth(expectedID);
+    if (health.status === "ready") return;
+    requireLocalHealthOwnership(health);
     // The probe itself can outlive the abort, so re-check before sleeping again.
     if (signal.aborted) throw new Error(`Engram startup readiness wait for ${ENGRAM_URL} was cancelled`);
     await waitCancellable(ENGRAM_STARTUP_POLL_MS, signal);
@@ -1284,7 +1293,8 @@ async function spawnEngramDaemon(deadline: number, expectedID: string): Promise<
     // contract instead of being replaced.
     await waitForEngramReadiness(readiness.signal, Math.min(deadline, Date.now() + ENGRAM_DAEMON_EXIT_GRACE_MS), expectedID);
     return true;
-  } catch {
+  } catch (error) {
+    if (error instanceof DeterministicStartupError) throw error;
     return false;
   } finally {
     readiness.abort();
@@ -1469,6 +1479,15 @@ async function startOwnedTransportOnce(): Promise<void> {
   }
 }
 
+function requireLocalHealthOwnership(health: EngramHealthResult): void {
+  if (health.status === "foreign") throw new ForeignOwnershipError({
+    localInstanceID: health.localInstanceID, remoteInstanceID: health.remoteInstanceID,
+    localVersion: localEngramVersion(), remoteVersion: health.remoteVersion,
+  });
+  if (health.status === "legacy") throw new DeterministicStartupError(legacyEngramServerMessage(health.remoteVersion));
+  if (health.status === "identity_missing") throw new DeterministicStartupError(missingInstanceIdentityMessage(health.remoteVersion));
+}
+
 async function initializeEngramServer(): Promise<void> {
   // Defense in depth: a future caller must not bypass policy via an explicit URL
   // or reach the potentially state-writing instance-id command.
@@ -1483,20 +1502,14 @@ async function initializeEngramServer(): Promise<void> {
   const instanceID = localEngramInstanceID = localInstanceID(Math.max(1, deadline - Date.now()));
   const health = await probeEngramHealth(instanceID);
   if (health.status === "ready") return;
-  // Both deterministic owner outcomes fail closed before any spawn: a server we do not own
-  // is never adopted and never terminated. Only the message and the retry cadence differ.
-  if (health.status === "foreign") throw new ForeignOwnershipError({
-    localInstanceID: health.localInstanceID, remoteInstanceID: health.remoteInstanceID,
-    localVersion: localEngramVersion(), remoteVersion: health.remoteVersion,
-  });
-  if (health.status === "legacy") throw new DeterministicStartupError(legacyEngramServerMessage(health.remoteVersion));
-  if (health.status === "identity_missing") throw new DeterministicStartupError(missingInstanceIdentityMessage(health.remoteVersion));
+  requireLocalHealthOwnership(health);
 
-  // Only "ready" proves a server is answering. Every other outcome — a definitive refusal, an
-  // aborted probe, a DNS failure, an error shape we do not recognize — means we have no
-  // server, so launch one. Reading an inconclusive probe as "a server must be starting"
-  // instead is what let a cold machine burn the whole startup budget polling a port nobody
-  // was ever going to bind.
+  if (health.status === "starting") {
+    await waitForEngramReadiness(new AbortController().signal, deadline, instanceID);
+    return;
+  }
+
+  // Refused and indeterminate probes still take the normal spawn path.
   try {
     await spawnAndWaitForEngram(deadline, instanceID);
   } catch (error) {

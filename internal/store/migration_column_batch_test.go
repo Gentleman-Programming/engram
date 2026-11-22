@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -161,7 +162,7 @@ func TestStartupSchemaBatchesReadMetadataOnce(t *testing.T) {
 		}
 		return original(db, q, args...)
 	}
-	if err := s.runStartupMigrations(); err != nil {
+	if err := s.runStartupMigrations(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
 	for _, table := range []string{"observations", "sessions", "user_prompts", "prompt_tombstones", "sync_delete_tombstones", "sync_mutations", "sync_state", "sync_chunks", "sync_apply_deferred"} {

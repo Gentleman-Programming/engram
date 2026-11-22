@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -72,7 +73,7 @@ func copyHistoricalCatalogFixture(t *testing.T, path, digest string) (string, *s
 	if _, err = db.Exec("PRAGMA user_version=1; PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0"); err != nil {
 		t.Fatal(err)
 	}
-	if err = primeConnection(db); err != nil {
+	if err = primeConnection(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := copyCatalog(db)

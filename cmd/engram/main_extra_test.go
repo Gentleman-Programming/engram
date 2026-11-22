@@ -242,6 +242,7 @@ func stubRuntimeHooks(t *testing.T) {
 	t.Helper()
 	oldStoreNew := storeNew
 	oldNewHTTPServer := newHTTPServer
+	oldListenLocalStartup := listenLocalStartup
 	oldStartHTTP := startHTTP
 	oldNewMCPServer := newMCPServer
 	oldNewMCPServerWithTools := newMCPServerWithTools
@@ -269,6 +270,7 @@ func stubRuntimeHooks(t *testing.T) {
 
 	storeNew = store.New
 	newHTTPServer = func(s *store.Store, _ int) *engramsrv.Server { return engramsrv.New(s, 0) }
+	listenLocalStartup = func(int) (*engramsrv.LocalStartup, error) { return nil, nil }
 	startHTTP = func(_ *engramsrv.Server) error { return nil }
 	newMCPServer = func(s *store.Store) *mcpserver.MCPServer {
 		return mcpserver.NewMCPServer("test", "0", mcpserver.WithRecovery())
@@ -319,6 +321,7 @@ func stubRuntimeHooks(t *testing.T) {
 	t.Cleanup(func() {
 		storeNew = oldStoreNew
 		newHTTPServer = oldNewHTTPServer
+		listenLocalStartup = oldListenLocalStartup
 		startHTTP = oldStartHTTP
 		newMCPServer = oldNewMCPServer
 		newMCPServerWithTools = oldNewMCPServerWithTools
