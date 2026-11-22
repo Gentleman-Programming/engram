@@ -2,10 +2,17 @@ package server
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
 func TestMain(m *testing.M) {
+	if name := filepath.Base(os.Args[0]); name == "git" || name == "git.exe" {
+		if address := os.Getenv(currentProjectGitFixture); address != "" {
+			waitForCurrentProjectGitRelease(address)
+			os.Exit(1)
+		}
+	}
 	if err := os.Setenv("GIT_CEILING_DIRECTORIES", composeGitCeiling(os.Getenv("GIT_CEILING_DIRECTORIES"))); err != nil {
 		panic(err)
 	}
