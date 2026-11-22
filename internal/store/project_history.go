@@ -67,15 +67,21 @@ func (s *Store) DetectProject(directory string) project.DetectionResult {
 
 // DetectProjectContext associates request cancellation with project detection and history reads.
 func (s *Store) DetectProjectContext(ctx context.Context, directory string) project.DetectionResult {
-	return project.DetectProjectFullWithOptions(directory, project.DetectionOptions{
-		Context: ctx,
-		HistoryLookup: func(path string) ([]string, error) {
-			return s.projectHistory(ctx, path)
-		},
-	})
+	return s.DetectProjectWithOptions(directory, project.DetectionOptions{Context: ctx})
 }
 
 // InspectProject cannot create a binding or elevate an unbound Git candidate.
 func (s *Store) InspectProject(directory string) project.DetectionResult {
-	return project.DetectProjectFullWithOptions(directory, project.DetectionOptions{InspectOnly: true, HistoryLookup: s.ProjectHistory})
+	return s.DetectProjectWithOptions(directory, project.DetectionOptions{InspectOnly: true})
+}
+
+// DetectProjectWithOptions resolves a local project using this store's binding history.
+func (s *Store) DetectProjectWithOptions(directory string, options project.DetectionOptions) project.DetectionResult {
+	options.HistoryLookup = s.ProjectHistory
+	if ctx := options.Context; ctx != nil {
+		options.HistoryLookup = func(path string) ([]string, error) {
+			return s.projectHistory(ctx, path)
+		}
+	}
+	return project.DetectProjectFullWithOptions(directory, options)
 }

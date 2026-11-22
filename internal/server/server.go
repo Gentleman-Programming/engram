@@ -1238,7 +1238,7 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 		jsonError(w, http.StatusBadRequest, "observation_id is required")
 		return
 	}
-	resolved, err := s.resolveRequestProjectWithDetector(r, projectpkg.ResolutionCurrent, true, s.captureProjectDetector(false))
+	resolved, err := s.resolveRequestProjectWithDetector(r, projectpkg.ResolutionCurrent, true, s.captureProjectDetector(projectpkg.DetectionOptions{}))
 	if err != nil {
 		s.writeProjectResolutionError(w, resolved, err)
 		return
@@ -1681,6 +1681,7 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 
 // handleCurrentProject returns canonical current-project detection metadata.
 func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	cwd := strings.TrimSpace(r.URL.Query().Get("cwd"))
 	if cwd == "" {
 		var cwdErr error
@@ -1693,8 +1694,11 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	res, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
 		Mode:      projectpkg.ResolutionCurrent,
 		Directory: cwd,
-		Detect:    s.captureProjectDetector(false),
+		Detect:    s.captureProjectDetector(projectpkg.DetectionOptions{Context: ctx}),
 	})
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		s.writeProjectResolutionError(w, res, err)
 		return
@@ -1702,7 +1706,10 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	// A process override chooses the project, independently of the caller's org.
 	// Inspection reads that label without establishing an implicit Git binding.
 	if res.Source == projectpkg.SourceProcessOverride {
-		res.Org = s.store.InspectProject(cwd).Org
+		res.Org = s.store.DetectProjectWithOptions(cwd, projectpkg.DetectionOptions{Context: ctx, InspectOnly: true}).Org
+		if ctx.Err() != nil {
+			return
+		}
 	}
 	jsonResponse(w, http.StatusOK, currentProjectPayload(cwd, res))
 }
@@ -1710,11 +1717,10 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 // captureProjectDetector protects context negotiation without tightening ordinary reads.
 // Inspection callers retain their no-binding contract; current-project keeps its
 // existing binding behavior after the HOME guard and history checks succeed.
-func (s *Server) captureProjectDetector(inspectOnly bool) func(string) projectpkg.DetectionResult {
+func (s *Server) captureProjectDetector(options projectpkg.DetectionOptions) func(string) projectpkg.DetectionResult {
+	options.RequireExplicitHomeProject = true
 	return func(directory string) projectpkg.DetectionResult {
-		return projectpkg.DetectProjectFullWithOptions(directory, projectpkg.DetectionOptions{
-			InspectOnly: inspectOnly, HistoryLookup: s.store.ProjectHistory, RequireExplicitHomeProject: true,
-		})
+		return s.store.DetectProjectWithOptions(directory, options)
 	}
 }
 

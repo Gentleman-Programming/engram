@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -84,5 +85,40 @@ func TestHTTPFirstBindingTransitionConflict(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, ".git", "engram-project-identity.json")); !os.IsNotExist(err) {
 			t.Fatalf("unexpected binding: %v", err)
 		}
+	}
+}
+
+func TestHTTPCurrentProjectCanceledDoesNotPublishBinding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Git integration")
+	}
+	dir := t.TempDir()
+	t.Setenv("ENGRAM_PROJECT", "")
+	t.Setenv("ENGRAM_HTTP_TOKEN", "")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(dir, "fixture.gitconfig"))
+	httpHomeGit(t, dir, "init")
+	httpHomeGit(t, dir, "remote", "add", "origin", "https://example.test/team/remote-app.git")
+	srv := New(newServerTestStore(t), 0)
+	path := "/project/current?cwd=" + url.QueryEscape(dir)
+	binding := filepath.Join(dir, ".git", "engram-project-identity.json")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, path, nil))
+	if _, err := os.Stat(binding); !os.IsNotExist(err) {
+		t.Fatalf("canceled project detection published a Git binding: %v", err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("canceled project detection returned a response: %s", rec.Body.String())
+	}
+
+	got := homeSelectionHTTP(t, srv, http.MethodGet, path, "", http.StatusOK)
+	if got["project"] != "remote-app" || got["project_source"] != "git_remote" || got["cwd"] != dir {
+		t.Fatalf("live project detection = %v", got)
+	}
+	if _, err := os.Stat(binding); err != nil {
+		t.Fatalf("live project detection did not publish the expected Git binding: %v", err)
 	}
 }
