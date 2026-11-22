@@ -37,11 +37,11 @@ var historicalChunkDecodeFixtures = []struct {
 func assertHistoricalChunkDecodeMatches(t *testing.T, payload []byte) {
 	t.Helper()
 	want, wantErr := parseChunkData(payload)
-	got, err := engramsync.DecodeHistoricalChunkMutations(payload)
-	if fmt.Sprint(err) != fmt.Sprint(wantErr) || !reflect.DeepEqual(got, want.Mutations) {
-		t.Fatalf("historical decode = %+v, %v; full decode = %+v, %v", got, err, want.Mutations, wantErr)
+	got, err := engramsync.DecodeHistoricalChunk(payload)
+	if fmt.Sprint(err) != fmt.Sprint(wantErr) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("historical decode = %+v, %v; full decode = %+v, %v", got, err, want, wantErr)
 	}
-	for i, mutation := range got {
+	for i, mutation := range got.Mutations {
 		actual, actualErr := syncMutationSignature(mutation)
 		expected, expectedErr := syncMutationSignature(want.Mutations[i])
 		if actual != expected || fmt.Sprint(actualErr) != fmt.Sprint(expectedErr) {

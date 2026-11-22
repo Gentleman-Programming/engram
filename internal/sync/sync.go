@@ -142,23 +142,23 @@ func (c *ChunkData) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
-// DecodeHistoricalChunkMutations reads mutations from a stored chunk and
+// DecodeHistoricalChunk reads a stored chunk and
 // preserves the validation of all sections performed by ChunkData.UnmarshalJSON.
-func DecodeHistoricalChunkMutations(raw []byte) ([]store.SyncMutation, error) {
+func DecodeHistoricalChunk(raw []byte) (ChunkData, error) {
 	if !bytes.Contains(raw, []byte(store.SessionOwnershipProjectOwned)) && !bytes.Contains(raw, []byte(`\u`)) {
 		// The raw session scan above has no additional validation without
 		// project-owned sessions. Decode every typed section as usual.
 		var chunk plain
 		if err := json.Unmarshal(raw, &chunk); err == nil {
-			return chunk.Mutations, nil
+			return ChunkData(chunk), nil
 		}
 	}
 	// The full decoder preserves directory validation and error precedence.
 	var chunk ChunkData
 	if err := json.Unmarshal(raw, &chunk); err != nil {
-		return nil, err
+		return ChunkData{}, err
 	}
-	return chunk.Mutations, nil
+	return chunk, nil
 }
 
 // SyncResult is returned after a sync operation.
