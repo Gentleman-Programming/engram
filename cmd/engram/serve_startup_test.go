@@ -102,7 +102,7 @@ func TestLocalServeStartupRespondsBeforeStoreReady(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		body, err := io.ReadAll(res.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -126,7 +126,7 @@ func TestLocalServeStartupRespondsBeforeStoreReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer contenderStore.Close()
+	defer func() { _ = contenderStore.Close() }()
 	if err := server.New(contenderStore, port).Start(); err == nil || !strings.Contains(err.Error(), "server is starting on the port") {
 		t.Fatalf("overlapping bind: %v", err)
 	}
