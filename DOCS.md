@@ -2036,7 +2036,7 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 
 ### Visual Features
 
-- **Catppuccin Mocha** color palette
+- **Engram Elephant** color palette
 - **`(active)` badge** — shown next to sessions and observations from active sessions, sorted to top
 - **Scroll indicators** — position in long lists (e.g. "showing 1-20 of 50")
 - **2-line items** — each observation shows title + content preview

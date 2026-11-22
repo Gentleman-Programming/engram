@@ -179,7 +179,7 @@ engram tui
   <img src="assets/tui-search.png" alt="TUI Search Results" width="400" />
 </p>
 
-Navigate with `j`/`k`, use `Enter` to drill in, `c` to copy content to the clipboard, `/` to search, and `Esc` to go back. The TUI uses the Catppuccin Mocha theme.
+Navigate with `j`/`k`, use `Enter` to drill in, `c` to copy content to the clipboard, `/` to search, and `Esc` to go back. The TUI uses the Engram Elephant color palette.
 
 **[Docs →](DOCS.md#terminal-ui-tui)**
 
