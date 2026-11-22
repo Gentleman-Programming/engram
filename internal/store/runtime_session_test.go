@@ -24,7 +24,7 @@ func TestRuntimeSessionResolveContextCancelsConnectionWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	initialWaitCount := s.db.Stats().WaitCount
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()

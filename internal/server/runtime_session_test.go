@@ -40,12 +40,12 @@ func TestRuntimeSessionResolveReadsWhileWriterIsReserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer other.Close()
+	defer func() { _ = other.Close() }()
 	writer, err := other.Conn(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	if _, err := writer.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
 	}

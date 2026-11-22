@@ -10555,7 +10555,7 @@ func (s *Store) withReadTxContext(ctx context.Context, fn func(tx *sql.Tx) error
 		return err
 	}
 	defer func() {
-		if rollbackErr := tx.Rollback(); rollbackErr != nil && !(errors.Is(rollbackErr, sql.ErrTxDone) && ctx.Err() != nil) {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && (!errors.Is(rollbackErr, sql.ErrTxDone) || ctx.Err() == nil) {
 			if err != nil {
 				err = errors.Join(err, rollbackErr)
 			} else {
