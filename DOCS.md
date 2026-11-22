@@ -1208,7 +1208,7 @@ ENGRAM_DATABASE_URL='postgres://...' engram cloud repair materialize-mutations -
 
 The backfill is project-scoped, non-destructive, and idempotent: it inserts missing compatible chunks and leaves existing `cloud_mutations` and chunks in place.
 
-`engram cloud serve` also runs this materialization repair automatically for every configured `ENGRAM_CLOUD_ALLOWED_PROJECTS` entry at startup. The explicit repair command remains available for operator verification, dry-runs, and re-running a project after an upgrade.
+`engram cloud serve` also runs this materialization repair automatically for every configured `ENGRAM_CLOUD_ALLOWED_PROJECTS` entry at startup. The command reports PostgreSQL initialization, session indexing, and per-project repair progress on stderr before it begins serving HTTP. Use [the Cloud health endpoint](#health) to check readiness. The explicit repair command remains available for operator verification, dry-runs, and re-running a project after an upgrade.
 
 ### Local Cloud Bring-Up (Docker + Postgres)
 
