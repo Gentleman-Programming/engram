@@ -13,7 +13,7 @@ import (
 // ErrNoProcess reports that the PID does not name a running process.
 var ErrNoProcess = errors.New("hostbind: no such process")
 
-// ProcessStart returns the kernel start time (clock ticks since boot) of pid.
+// ProcessStart returns the kernel start time (clock ticks since boot) of a live pid.
 func ProcessStart(pid int) (string, error) {
 	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
@@ -33,6 +33,10 @@ func ProcessStart(pid int) (string, error) {
 	fields := strings.Fields(text[idx+1:])
 	if len(fields) < 20 {
 		return "", fmt.Errorf("hostbind: unexpected /proc stat format")
+	}
+	// An exited child can keep its PID and start time until its parent reaps it.
+	if fields[0] == "Z" || fields[0] == "X" || fields[0] == "x" {
+		return "", ErrNoProcess
 	}
 	return fields[19], nil
 }

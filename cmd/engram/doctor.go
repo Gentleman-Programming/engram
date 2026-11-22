@@ -122,6 +122,7 @@ func cmdDoctor(cfg store.Config) {
 }
 
 func printDoctorUsage() {
+	_, _ = fmt.Fprintln(os.Stdout, doctorHostSessionUsage)
 	_, _ = fmt.Fprintln(os.Stdout, "note: project mismatch evidence includes local aliases; repair rereads aliases to veto contradictory moves.")
 	_, _ = fmt.Fprintln(os.Stdout, discardPromptUsage)
 	fmt.Fprintln(os.Stdout, "usage: engram doctor [--json] [--project PROJECT] [--check CODE]")

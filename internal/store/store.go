@@ -4192,7 +4192,11 @@ func (s *Store) endSessionSummaryOperation(id string, summary any) func(*sql.Tx)
 }
 
 func (s *Store) GetSession(id string) (*Session, error) {
-	row := s.db.QueryRow(
+	return s.getSessionContext(context.Background(), id)
+}
+
+func (s *Store) getSessionContext(ctx context.Context, id string) (*Session, error) {
+	row := s.db.QueryRowContext(ctx,
 		`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary, runtime_lease_expires_at FROM sessions WHERE id = ?`, id,
 	)
 	var sess Session

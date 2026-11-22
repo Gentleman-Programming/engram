@@ -6,11 +6,80 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// RuntimeSessionDiagnosticState describes a read-only sample of a bound root.
+type RuntimeSessionDiagnosticState string
+
+const (
+	RuntimeSessionDiagnosticMissing   RuntimeSessionDiagnosticState = "missing"
+	RuntimeSessionDiagnosticActive    RuntimeSessionDiagnosticState = "active"
+	RuntimeSessionDiagnosticContinued RuntimeSessionDiagnosticState = "continued"
+	RuntimeSessionDiagnosticEnded     RuntimeSessionDiagnosticState = "ended"
+)
+
+// ReadRuntimeSessionDiagnostic uses the existing store without initializing
+// it. The SQLite connection includes committed WAL state and cannot write data.
+func ReadRuntimeSessionDiagnostic(ctx context.Context, dataDir, root string) (RuntimeSessionDiagnosticState, error) {
+	if err := ValidateDataDirectory(dataDir); err != nil {
+		return "", err
+	}
+	// Use an explicit file URI so SQLite recognizes the access mode on both
+	// POSIX and Windows. A drive letter belongs in the path, not the authority.
+	dbPath := filepath.ToSlash(filepath.Join(dataDir, "engram.db"))
+	if !strings.HasPrefix(dbPath, "/") {
+		dbPath = "/" + dbPath
+	}
+	dsn := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = db.Close() }()
+	s := &Store{db: db}
+	session, err := s.getSessionContext(ctx, root)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RuntimeSessionDiagnosticMissing, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if session.EndedAt == nil {
+		return RuntimeSessionDiagnosticActive, nil
+	}
+	effective, err := s.ResolveRuntimeSessionWithOwnershipModeContext(ctx, root, session.Project, session.Directory, session.OwnershipMode)
+	if errors.Is(err, sql.ErrNoRows) {
+		// An exact-ID deletion may have removed the root during resolution.
+		current, readErr := s.getSessionContext(ctx, root)
+		switch {
+		case errors.Is(readErr, sql.ErrNoRows):
+			return RuntimeSessionDiagnosticMissing, nil
+		case readErr != nil:
+			return "", readErr
+		case current.Project != session.Project || current.Directory != session.Directory ||
+			current.OwnershipMode != session.OwnershipMode ||
+			(current.EndedAt != nil && current.StartedAt != session.StartedAt):
+			return "", errors.New("engram: runtime session changed during diagnostic read")
+		case current.EndedAt == nil:
+			return RuntimeSessionDiagnosticActive, nil
+		default:
+			return RuntimeSessionDiagnosticEnded, nil
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	if effective == root {
+		// The final snapshot can observe a newly active row with the same ID.
+		return RuntimeSessionDiagnosticActive, nil
+	}
+	return RuntimeSessionDiagnosticContinued, nil
+}
 
 // DiagnosticSessionEvidence is the read-only session projection used by
 // operational diagnostics. It intentionally avoids observation/prompt payloads.
