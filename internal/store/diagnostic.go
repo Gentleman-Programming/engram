@@ -61,11 +61,12 @@ func ReadRuntimeSessionDiagnostic(ctx context.Context, dataDir, root string) (Ru
 			return RuntimeSessionDiagnosticMissing, nil
 		case readErr != nil:
 			return "", readErr
+		case current.Project != session.Project || current.Directory != session.Directory ||
+			current.OwnershipMode != session.OwnershipMode ||
+			(current.EndedAt != nil && current.StartedAt != session.StartedAt):
+			return "", errors.New("engram: runtime session changed during diagnostic read")
 		case current.EndedAt == nil:
 			return RuntimeSessionDiagnosticActive, nil
-		case current.StartedAt != session.StartedAt || current.Project != session.Project ||
-			current.Directory != session.Directory || current.OwnershipMode != session.OwnershipMode:
-			return "", errors.New("engram: runtime session changed during diagnostic read")
 		default:
 			return RuntimeSessionDiagnosticEnded, nil
 		}
