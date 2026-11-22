@@ -560,7 +560,9 @@ func (cs *CloudStore) backfillProjectSessionsFromChunks(ctx context.Context) err
 			}
 			knownByProject[project] = known
 		}
-		sessionIDs := collectSessionIDsFromPayload(payload)
+		// Unreadable historical chunks supply no session IDs.
+		chunk, _ := engramsync.DecodeHistoricalChunk(payload)
+		sessionIDs := collectSessionIDs(chunk)
 		// KnownSessionIDs trims its project argument. Only an exact project
 		// match proves the row already exists under the stored project name.
 		exactProject := project == strings.TrimSpace(project)
@@ -1177,11 +1179,11 @@ func (cs *CloudStore) existingChunkMutationSignatures(ctx context.Context, proje
 		if err := rows.Scan(&payload); err != nil {
 			return nil, fmt.Errorf("cloudstore: scan existing chunk mutations: %w", err)
 		}
-		mutations, err := engramsync.DecodeHistoricalChunkMutations(payload)
+		chunk, err := engramsync.DecodeHistoricalChunk(payload)
 		if err != nil {
 			return nil, fmt.Errorf("cloudstore: parse existing chunk mutations: %w", err)
 		}
-		for _, mutation := range mutations {
+		for _, mutation := range chunk.Mutations {
 			if !isChunkMaterializableMutationEntity(mutation.Entity) {
 				continue
 			}
