@@ -1113,6 +1113,8 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	trace := startupTraceFrom(ctx)
+	trace.Mark("data-directory")
 	if err := ValidateDataDirectory(cfg.DataDir); err != nil {
 		return nil, err
 	}
@@ -1121,6 +1123,7 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 	}
 	var instanceID string
 	var err error
+	trace.Mark("identity")
 	if ownedStartup {
 		unlockInstance, lockErr := acquireMigrationLockContext(ctx, filepath.Join(cfg.DataDir, ".instance-id.lock"))
 		if lockErr != nil {
@@ -1143,14 +1146,17 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 		return nil, err
 	}
 
+	trace.Mark("database-file")
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
 	if err := ensureDatabaseFile(dbPath); err != nil {
 		return nil, fmt.Errorf("engram: create database file: %w", err)
 	}
+	trace.Mark("database-generation")
 	generation, err := newDatabaseGeneration(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("engram: capture database generation: %w", err)
 	}
+	trace.Mark("sqlite-open")
 	db, err := openDB(dbPath, generation)
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
@@ -1166,6 +1172,7 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	trace.Mark("sqlite-prime")
 	if err := primeConnection(ctx, db); err != nil {
 		return nil, err
 	}
@@ -1174,6 +1181,7 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 		return nil, err
 	}
 	s := &Store{db: db, cfg: cfg, instanceID: instanceID, generation: generation, hooks: defaultStoreHooks()}
+	trace.Mark("startup-migrations")
 	err = s.runStartupMigrations(ctx, ownedStartup)
 	if err != nil {
 		return nil, err
@@ -1190,6 +1198,7 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 		return nil, err
 	}
 	succeeded = true
+	trace.Mark("store-ready")
 	return s, nil
 }
 
@@ -1240,11 +1249,13 @@ var walSwitchRetryBackoffs = []time.Duration{
 func primeConnection(ctx context.Context, db *sql.DB) error {
 	var conn *sql.Conn
 	var lastErr error
+	trace := startupTraceFrom(ctx)
 	for attempt := 0; attempt <= len(walSwitchRetryBackoffs); attempt++ {
 		conn, lastErr = db.Conn(ctx)
 		if lastErr == nil {
 			break
 		}
+		trace.markSQLiteLock("sqlite-prime-lock-result", lastErr)
 		if !isRetryableSQLiteLockError(lastErr) || attempt == len(walSwitchRetryBackoffs) {
 			return fmt.Errorf("engram: open initial connection: %w", lastErr)
 		}
@@ -1319,9 +1330,13 @@ func (s *Store) runStartupMigrations(ctx context.Context, startupLockHeld bool) 
 		if needsVersionStamp {
 			migrateRunCount.Add(1)
 		}
+		trace := startupTraceFrom(ctx)
+		trace.Mark("migration-work")
 		if err := s.migrate(); err != nil {
+			trace.markSQLiteLock("sqlite-migration-lock-result", err)
 			return fmt.Errorf("engram: migration: %w", err)
 		}
+		trace.Mark("migration-work-complete")
 		if needsVersionStamp {
 			if err := s.setUserVersion(schemaVersion); err != nil {
 				return fmt.Errorf("engram: set user_version: %w", err)
@@ -10745,13 +10760,19 @@ func isRetryableSQLiteLockError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var sqliteErr *sqlite.Error
-	if errors.As(err, &sqliteErr) {
-		primaryCode := sqliteErr.Code() & 0xff
+	if primaryCode, ok := sqlitePrimaryErrorCode(err); ok {
 		return primaryCode == sqlitePrimaryBusy || primaryCode == sqlitePrimaryLocked
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "database is busy") || strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "sqlite_locked")
+}
+
+func sqlitePrimaryErrorCode(err error) (int, bool) {
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code() & 0xff, true
+	}
+	return 0, false
 }
 
 func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory, mode string) error {

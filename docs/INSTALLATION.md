@@ -321,6 +321,23 @@ Engram does not auto-repair, quarantine, checkpoint, or use rollback journaling 
 | `ENGRAM_DATA_DIR` | Engram CLI data directory. Empty or whitespace-only values use the platform default; nonblank values are used as provided. | `~/.engram` (Windows: `%USERPROFILE%\.engram`) |
 | `ENGRAM_PORT` | HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks. | `7437` |
 | `ENGRAM_SOCKET` | POSIX-only Unix-domain socket path. Run `engram serve --socket /path/to/engram.sock` (or set `ENGRAM_SOCKET`) to listen exclusively on the socket; do not combine it with an explicit TCP port. Claude Bash hooks use the same socket when the variable is exported and warn on stderr if socket transport cannot preserve memory capture. PowerShell remains TCP-only. | (unset) |
+| `ENGRAM_STARTUP_PHASES` | Set to `1` to report startup phases on stderr during a shared foreground TCP serve. | (unset) |
+
+### Diagnose a slow local server start
+
+Set `ENGRAM_STARTUP_PHASES=1` for a planned foreground `engram serve` startup.
+Each `ENGRAM_STARTUP_PHASE v1` line contains elapsed milliseconds and a fixed
+phase label. If the early listener is allocated, the trace separates advisory
+lock admission, SQLite connection setup and migration work. A
+`*-retrying` marker records an advisory lock attempt that needs another try.
+On Windows this indicates a lock conflict. A
+`sqlite-*-lock-result` marker records a lock error returned by SQLite. SQLite
+can resolve a lock wait inside the driver, so a long phase can have no lock
+marker. `http-dispatch` marks handoff to the server loop. Use `GET /health`
+to measure when the server becomes ready.
+
+When reporting an incident, share the lines starting with
+`ENGRAM_STARTUP_PHASE v1`. These contain only elapsed time and fixed labels.
 
 ---
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -32,6 +33,19 @@ func acquireMigrationLockContext(ctx context.Context, path string) (func(), erro
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	trace := startupTraceFrom(ctx)
+	var phase string
+	if trace != nil {
+		switch filepath.Base(path) {
+		case ".instance-id.lock":
+			phase = "advisory-instance-id"
+		case ".migrate.lock":
+			phase = "advisory-migration"
+		default:
+			phase = "advisory-other"
+		}
+		trace.Mark(phase + "-open")
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open migration lock file %s: %w", path, err)
@@ -39,6 +53,7 @@ func acquireMigrationLockContext(ctx context.Context, path string) (func(), erro
 
 	deadline := time.Now().Add(migrationLockTimeout)
 	backoff := 10 * time.Millisecond
+	reportedRetry := false
 	for {
 		if err := ctx.Err(); err != nil {
 			_ = f.Close()
@@ -55,12 +70,22 @@ func acquireMigrationLockContext(ctx context.Context, path string) (func(), erro
 				_ = f.Close()
 				return nil, err
 			}
+			if trace != nil {
+				trace.Mark(phase + "-acquired")
+			}
 			return func() {
 				_ = unlockMigrationFile(f)
 				_ = f.Close()
 			}, nil
 		}
+		if trace != nil && !reportedRetry {
+			trace.Mark(phase + "-retrying")
+			reportedRetry = true
+		}
 		if time.Now().After(deadline) {
+			if trace != nil {
+				trace.Mark(phase + "-timeout")
+			}
 			_ = f.Close()
 			return nil, fmt.Errorf(
 				"timed out after %s waiting for migration lock %s — another engram process appears to be holding it; check for a stuck engram process (and terminate it) before retrying",
