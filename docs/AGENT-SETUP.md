@@ -360,6 +360,24 @@ With bare MCP, add a [Surviving Compaction](#surviving-compaction-recommended) p
 
 > **Windows note:** Claude Code lifecycle adapters use bash scripts. On Windows, Claude Code runs them through Git Bash (bundled with [Git for Windows](https://gitforwindows.org/)) or WSL. For `PreToolUse` on Engram write/session MCP tools, Claude Code launches `engram.exe` from PATH with the arguments `hook` and `claude-pre-tool-use` without starting a shell. The `UserPromptSubmit` hook automatically switches to a fork-light safe path under Git Bash/MSYS2: the first-prompt ToolSearch still runs, while later save-reminder checks are skipped so prompt submission does not block. If Git Bash itself is blocked by Defender/EDR, the plugin also ships `scripts/user-prompt-submit.ps1` as a native PowerShell fallback for local override/testing. That fallback applies only to `UserPromptSubmit`; the complete plugin setup still requires `jq` and `curl` for its shared Bash hooks. **Option C (Bare MCP)** remains the no-hook fallback and works natively on Windows without any shell dependency. Windows usernames containing spaces (e.g. `C:\Users\John Doe\...`) are supported — all hook commands quote `${CLAUDE_PLUGIN_ROOT}` so the path is passed as a single argument even when it contains spaces.
 
+On Windows with a private user-owned Claude profile on local NTFS, opt in to the native first-prompt hook and restart Claude Code. The fresh and GitHub migration flows have been verified with Claude Code 2.1.326.
+
+```powershell
+engram setup claude-code --native-windows-prompt=enable
+```
+
+Enable pins and checks the running Engram executable and selects a complete local variant of the existing user-scope `engram@engram` plugin. Remove any Engram prompt override from Claude's user settings before enabling, including the PowerShell example below. Both commands honor `CLAUDE_CONFIG_DIR`. Run ordinary Claude setup if you also need to register MCP.
+
+To return the same managed plugin to its Bash hook, run the disable command and restart Claude Code.
+
+```powershell
+engram setup claude-code --native-windows-prompt=disable
+```
+
+Disable leaves user hooks and other settings in place. It can select Bash even if `jq` or `curl` is missing. The Bash hooks still need their usual dependencies to run.
+
+After updating Engram, rerun the command for your desired mode with the new executable and restart Claude Code. Use `enable` to qualify the new native executable or `disable` to refresh the managed Bash bundle from the new build. Ordinary setup keeps the current managed hook selection and pin. If a Claude command times out during managed setup, Engram stops the command and keeps the profile locked until Windows confirms its processes have exited. Windows can take longer to finish pending I/O. Once setup returns, rerun the desired command to reconcile the profile.
+
 For Windows provisioning, run the capability check against the exact executable you intend to pin.
 
 ```powershell

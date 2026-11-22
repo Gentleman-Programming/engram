@@ -41,9 +41,85 @@ func TestCmdSetupHelpAnyPositionShowsProtocolFlagAndSkipsStdin(t *testing.T) {
 		if !strings.Contains(stdout, "--protocol") {
 			t.Fatalf("args=%v: usage output missing literal --protocol: %q", args, stdout)
 		}
+		if !strings.Contains(stdout, "--native-windows-prompt=enable|disable") {
+			t.Fatalf("args=%v: usage output missing managed native Claude setup: %q", args, stdout)
+		}
 		if !strings.Contains(stdout, "plugin >= 0.1.1") {
 			t.Fatalf("args=%v: usage output missing Claude Code plugin floor: %q", args, stdout)
 		}
+	}
+}
+
+func TestCmdSetupNativePromptRejectsConflictingOptions(t *testing.T) {
+	stubRuntimeHooks(t)
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	oldSetter := setupSetClaudeWindowsNativePrompt
+	t.Cleanup(func() { setupSetClaudeWindowsNativePrompt = oldSetter })
+	calls := 0
+	setupSetClaudeWindowsNativePrompt = func(bool) error {
+		calls++
+		return nil
+	}
+	enable := "--native-windows-prompt=enable"
+	for _, args := range [][]string{
+		{"codex", enable},
+		{"claude-code", "--native-windows-prompt"},
+		{"claude-code", "--native-windows-prompt=status"},
+		{"claude-code", enable, "--native-windows-prompt=disable"},
+		{"claude-code", enable, "--mcp-only"},
+		{"claude-code", enable, "--protocol=slim"},
+		{"claude-code", enable, "--allow-memory-writes"},
+		{"claude-code", enable, "--wrong"},
+	} {
+		calls = 0
+		withArgs(t, append([]string{"engram", "setup"}, args...)...)
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+		if calls != 0 {
+			t.Fatalf("args=%v: invalid arguments reached the native prompt setter %d times", args, calls)
+		}
+		if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "engram setup claude-code --native-windows-prompt=enable|disable") {
+			t.Fatalf("args=%v: expected validation error, panic=%v stderr=%q", args, recovered, stderr)
+		}
+	}
+}
+
+func TestCmdSetupNativePromptDispatch(t *testing.T) {
+	stubRuntimeHooks(t)
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	oldSetter := setupSetClaudeWindowsNativePrompt
+	t.Cleanup(func() { setupSetClaudeWindowsNativePrompt = oldSetter })
+	for _, tc := range []struct {
+		name   string
+		mode   string
+		enable bool
+		err    error
+	}{
+		{name: "enable", mode: "enable", enable: true},
+		{name: "disable", mode: "disable", enable: false},
+		{name: "setter error", mode: "disable", err: errors.New("cannot select managed Bash")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []bool
+			setupSetClaudeWindowsNativePrompt = func(enable bool) error {
+				calls = append(calls, enable)
+				return tc.err
+			}
+			withArgs(t, "engram", "setup", "claude-code", "--native-windows-prompt="+tc.mode)
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+			if len(calls) != 1 || calls[0] != tc.enable {
+				t.Fatalf("native prompt setter calls = %v, want [%v]", calls, tc.enable)
+			}
+			if tc.err != nil {
+				if recovered != exitCode(1) || stdout != "" || !strings.Contains(stderr, tc.err.Error()) {
+					t.Fatalf("setter failure = (%q, %q, %v)", stdout, stderr, recovered)
+				}
+			} else if recovered != nil || stderr != "" ||
+				stdout != "Claude Code Windows native prompt hook "+tc.mode+"d.\n" {
+				t.Fatalf("setter success = (%q, %q, %v)", stdout, stderr, recovered)
+			}
+		})
 	}
 }
 

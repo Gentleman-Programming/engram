@@ -17,6 +17,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,6 +33,8 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
 )
 
+type claudeSetupRunner func(string, ...string) ([]byte, error)
+
 var (
 	runtimeGOOS  = runtime.GOOS
 	userHomeDir  = os.UserHomeDir
@@ -43,7 +46,8 @@ var (
 	runCommandWithContext = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return command.NewContext(ctx, name, args...).CombinedOutput()
 	}
-	openCodeReadFile = func(path string) ([]byte, error) {
+	runClaudeProfileCommand = runClaudeProfileProcess
+	openCodeReadFile        = func(path string) ([]byte, error) {
 		return openCodeFS.ReadFile(path)
 	}
 	statFn                             = os.Stat
@@ -61,7 +65,7 @@ var (
 	injectCodexMCPFn                   = injectCodexMCP
 	injectCodexMemoryConfigFn          = injectCodexMemoryConfig
 	addClaudeCodeAllowlistFn           = AddClaudeCodeAllowlist
-	writeClaudeCodeUserMCPFn           = writeClaudeCodeUserMCP
+	writeClaudeCodeUserMCPFn           = ensureClaudeCodeUserMCP
 	createClaudeCodeUserMCPFn          = createClaudeCodeUserMCP
 
 	// resolveMiseNodeVersionFn resolves the active Node version managed by mise.
@@ -998,43 +1002,48 @@ func installClaudeCode() (*Result, error) {
 		}
 	}
 
-	// Step 1: Add marketplace (idempotent — if already added, claude will say so)
-	addOut, err := runCommand(claudeBin, "plugin", "marketplace", "add", claudeCodeMarketplace)
-	addOutputStr := strings.TrimSpace(string(addOut))
+	managed, release, err := protectManagedClaudeMarketplace(claudeBin)
 	if err != nil {
-		// If marketplace is already added, that's fine
-		if !strings.Contains(addOutputStr, "already") {
-			return nil, fmt.Errorf("marketplace add failed: %s", addOutputStr)
+		return nil, err
+	}
+	defer release()
+	run := claudeOrdinarySetupRunner(managed)
+	if !managed {
+		// Add marketplace (idempotent — if already added, claude will say so).
+		addOut, err := run(claudeBin, "plugin", "marketplace", "add", claudeCodeMarketplace)
+		addOutputStr := strings.TrimSpace(string(addOut))
+		if err != nil && (errors.Is(err, context.DeadlineExceeded) || !strings.Contains(addOutputStr, "already")) {
+			return nil, claudeSetupCommandError("marketplace add failed", addOutputStr, err)
 		}
 	}
 
 	// Step 2: Install the plugin
-	installOut, err := runCommand(claudeBin, "plugin", "install", "engram")
+	installOut, err := run(claudeBin, "plugin", "install", "engram")
 	installOutputStr := strings.TrimSpace(string(installOut))
 	if err != nil {
 		// If plugin is already installed, that's fine
-		if !strings.Contains(installOutputStr, "already") {
-			return nil, fmt.Errorf("plugin install failed: %s", installOutputStr)
+		if errors.Is(err, context.DeadlineExceeded) || !strings.Contains(installOutputStr, "already") {
+			return nil, claudeSetupCommandError("plugin install failed", installOutputStr, err)
 		}
 	}
 
 	// An existing installation is not necessarily current. Refresh the catalog
 	// before updating the cached plugin, regardless of install's exit status.
 	if strings.Contains(installOutputStr, "already") {
-		updateOut, updateErr := runCommand(claudeBin, "plugin", "marketplace", "update", "engram")
+		updateOut, updateErr := run(claudeBin, "plugin", "marketplace", "update", "engram")
 		if updateErr != nil {
-			return nil, fmt.Errorf("marketplace update failed: %s", strings.TrimSpace(string(updateOut)))
+			return nil, claudeSetupCommandError("marketplace update failed", strings.TrimSpace(string(updateOut)), updateErr)
 		}
-		updateOut, updateErr = runCommand(claudeBin, "plugin", "update", "engram@engram", "--scope", "user")
+		updateOut, updateErr = run(claudeBin, "plugin", "update", "engram@engram", "--scope", "user")
 		if updateErr != nil {
-			return nil, fmt.Errorf("plugin update failed: %s", strings.TrimSpace(string(updateOut)))
+			return nil, claudeSetupCommandError("plugin update failed", strings.TrimSpace(string(updateOut)), updateErr)
 		}
 	}
 
 	// Step 3: Claude CLI owns user-scope MCP writes. Engram only reads the
 	// documented config structure to make this idempotent and verify the result.
 	mcpConfigured := false
-	if err := writeClaudeCodeUserMCPFn(); err != nil {
+	if err := writeClaudeCodeUserMCPFn(run); err != nil {
 		// Non-fatal: the plugin installs, but MCP tools remain unavailable until
 		// Claude can register the user-scope server.
 		fmt.Fprintf(os.Stderr, "warning: could not register Claude Code user MCP server (%s): %v\n", ClaudeCodeUserMCPPath(), err)
@@ -1049,6 +1058,13 @@ func installClaudeCode() (*Result, error) {
 		Destination:   claudeCodeConfigRoot(home),
 		MCPConfigured: mcpConfigured,
 	}, nil
+}
+
+func claudeSetupCommandError(label, output string, err error) error {
+	if output == "" || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	return fmt.Errorf("%s: %s", label, output)
 }
 
 // claudeCodeConfigRoot returns the Claude Code config directory: honors
@@ -1076,12 +1092,6 @@ func ClaudeCodeUserMCPPath() string {
 		return filepath.Join(home, ".claude.json")
 	}
 	return filepath.Join(claudeCodeConfigRoot(home), ".claude.json")
-}
-
-// writeClaudeCodeUserMCP is retained as the normal setup seam. It delegates all
-// registration writes to Claude CLI through EnsureClaudeCodeUserMCP.
-func writeClaudeCodeUserMCP() error {
-	return EnsureClaudeCodeUserMCP()
 }
 
 func createClaudeCodeUserMCP(string, []byte, os.FileMode) error {
@@ -1169,6 +1179,10 @@ func claudeCodeExpectedEngramCommand() (string, error) {
 // CLI, verifies it by re-reading Claude's config, and never overwrites a
 // pre-existing registration.
 func EnsureClaudeCodeUserMCP() error {
+	return ensureClaudeCodeUserMCP(runCommand)
+}
+
+func ensureClaudeCodeUserMCP(run claudeSetupRunner) error {
 	command, err := claudeCodeExpectedEngramCommand()
 	if err != nil {
 		return err
@@ -1189,7 +1203,7 @@ func EnsureClaudeCodeUserMCP() error {
 		return fmt.Errorf("locate claude CLI: %w", err)
 	}
 	addArgs := []string{"mcp", "add", "--transport", "stdio", "--scope", "user", "engram", "--", command, "mcp", "--tools=agent"}
-	if _, addErr := runCommand(claudeBin, addArgs...); addErr != nil {
+	if _, addErr := run(claudeBin, addArgs...); addErr != nil {
 		state, inspectErr := inspectClaudeCodeUserMCP(command)
 		if inspectErr != nil {
 			return fmt.Errorf("claude MCP add failed: %w; recheck failed: %v", addErr, inspectErr)
@@ -1213,7 +1227,7 @@ func EnsureClaudeCodeUserMCP() error {
 	} else if state == claudeCodeMCPConflict {
 		verification = fmt.Errorf("verify Claude Code MCP registration: registered entry conflicts with expected stdio command")
 	}
-	if _, rollbackErr := runCommand(claudeBin, "mcp", "remove", "engram", "--scope", "user"); rollbackErr != nil {
+	if _, rollbackErr := run(claudeBin, "mcp", "remove", "engram", "--scope", "user"); rollbackErr != nil {
 		return fmt.Errorf("%v; rollback Claude MCP registration: %w", verification, rollbackErr)
 	}
 	return verification

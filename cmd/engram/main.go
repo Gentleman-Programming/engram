@@ -124,6 +124,7 @@ var (
 	setupAddClaudeCodeAllowlist            = setup.AddClaudeCodeAllowlist
 	setupAddClaudeCodeMemoryWriteAllowlist = setup.AddClaudeCodeMemoryWriteAllowlist
 	setupEnsureClaudeCodeUserMCP           = setup.EnsureClaudeCodeUserMCP
+	setupSetClaudeWindowsNativePrompt      = setup.SetClaudeWindowsNativePrompt
 	setupVerifyClaudeCodeSlim              = setup.VerifyClaudeCodeSlimCapability
 	scanInputLine                          = fmt.Scanln
 
@@ -3624,6 +3625,8 @@ func cmdSetup(cfg store.Config) {
 		protocolFlag      bool
 		mcpOnly           bool
 		allowMemoryWrites bool
+		nativePrompt      string
+		nativePromptSeen  bool
 		slug              string
 		slugSeen          bool
 		extraBareSeen     bool
@@ -3655,6 +3658,10 @@ func cmdSetup(cfg store.Config) {
 			allowMemoryWrites = true
 		case token == "--mcp-only":
 			mcpOnly = true
+		case token == "--native-windows-prompt" || strings.HasPrefix(token, "--native-windows-prompt="):
+			unknownFlagSeen = unknownFlagSeen || nativePromptSeen
+			nativePromptSeen = true
+			nativePrompt = strings.TrimPrefix(token, "--native-windows-prompt=")
 		case strings.HasPrefix(token, "-"):
 			// Unrecognized hyphen-prefixed token: record it but keep
 			// scanning so a --protocol appearing later is still parsed
@@ -3673,6 +3680,22 @@ func cmdSetup(cfg store.Config) {
 	switch {
 	case helpSeen:
 		printSetupUsage()
+		return
+	case nativePromptSeen:
+		if slug != "claude-code" || mcpOnly || allowMemoryWrites || protocolFlag || extraBareSeen || unknownFlagSeen ||
+			(nativePrompt != "enable" && nativePrompt != "disable") {
+			fatal(fmt.Errorf("usage: engram setup claude-code --native-windows-prompt=enable|disable"))
+			return
+		}
+		if err := setupSetClaudeWindowsNativePrompt(nativePrompt == "enable"); err != nil {
+			fatal(err)
+			return
+		}
+		if nativePrompt == "enable" {
+			fmt.Println("Claude Code Windows native prompt hook enabled.")
+		} else {
+			fmt.Println("Claude Code Windows native prompt hook disabled.")
+		}
 		return
 	case allowMemoryWrites && (!slugSeen || slug != "claude-code" || mcpOnly || extraBareSeen || unknownFlagSeen):
 		fatal(fmt.Errorf("--allow-memory-writes requires claude-code and cannot be combined with --mcp-only, unknown flags or extra arguments"))
@@ -3802,6 +3825,9 @@ func printSetupUsage() {
 	fmt.Println("                          Bypasses prompts and auto-mode classification for these tools;")
 	fmt.Println("                          excludes mem_delete and mem_merge_projects. Session checks remain.")
 	fmt.Println("                          Cannot be combined with --mcp-only.")
+	fmt.Println("  --native-windows-prompt=enable|disable")
+	fmt.Println("                          Windows Claude Code only. Select the native prompt hook")
+	fmt.Println("                          or return to Bash in the managed user plugin.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 

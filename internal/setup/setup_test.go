@@ -49,6 +49,8 @@ func resetSetupSeams(t *testing.T) {
 	oldLookPathFn := lookPathFn
 	oldRunCommand := runCommand
 	oldRunCommandWithContext := runCommandWithContext
+	oldRunClaudeProfileCommand := runClaudeProfileCommand
+	runClaudeProfileCommand = func(_ time.Duration, name string, args ...string) ([]byte, error) { return runCommand(name, args...) }
 	oldStatFn := statFn
 	oldLstatFn := lstatFn
 	oldOpenCodeReadFile := openCodeReadFile
@@ -76,6 +78,7 @@ func resetSetupSeams(t *testing.T) {
 		lookPathFn = oldLookPathFn
 		runCommand = oldRunCommand
 		runCommandWithContext = oldRunCommandWithContext
+		runClaudeProfileCommand = oldRunClaudeProfileCommand
 		statFn = oldStatFn
 		lstatFn = oldLstatFn
 		openCodeReadFile = oldOpenCodeReadFile
@@ -1937,6 +1940,7 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 
 	t.Run("marketplace add hard failure", func(t *testing.T) {
 		resetSetupSeams(t)
+		useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
 		runCommand = func(string, ...string) ([]byte, error) {
 			return []byte("permission denied"), errors.New("exit 1")
@@ -1952,7 +1956,7 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
-		writeClaudeCodeUserMCPFn = func() error { return nil }
+		writeClaudeCodeUserMCPFn = func(claudeSetupRunner) error { return nil }
 		calls := 0
 		runCommand = func(_ string, args ...string) ([]byte, error) {
 			calls++
@@ -1991,8 +1995,9 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 
 	t.Run("install hard failure", func(t *testing.T) {
 		resetSetupSeams(t)
+		useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
-		writeClaudeCodeUserMCPFn = func() error { return nil }
+		writeClaudeCodeUserMCPFn = func(claudeSetupRunner) error { return nil }
 		calls := 0
 		runCommand = func(string, ...string) ([]byte, error) {
 			calls++
@@ -2014,7 +2019,7 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 			useTestHome(t)
 			lookPathFn = func(string) (string, error) { return "claude", nil }
 			mcpCalls := 0
-			writeClaudeCodeUserMCPFn = func() error { mcpCalls++; return nil }
+			writeClaudeCodeUserMCPFn = func(claudeSetupRunner) error { mcpCalls++; return nil }
 			var commands []string
 			runCommand = func(_ string, args ...string) ([]byte, error) {
 				commands = append(commands, strings.Join(args, " "))
@@ -2039,7 +2044,10 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 			resetSetupSeams(t)
 			useTestHome(t)
 			lookPathFn = func(string) (string, error) { return "claude", nil }
-			writeClaudeCodeUserMCPFn = func() error { t.Fatal("MCP registration must not run after update failure"); return nil }
+			writeClaudeCodeUserMCPFn = func(claudeSetupRunner) error {
+				t.Fatal("MCP registration must not run after update failure")
+				return nil
+			}
 			var commands []string
 			runCommand = func(_ string, args ...string) ([]byte, error) {
 				commands = append(commands, strings.Join(args, " "))
@@ -2071,7 +2079,7 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 		useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
 		runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
-		writeClaudeCodeUserMCPFn = func() error { return errors.New("disk full") }
+		writeClaudeCodeUserMCPFn = func(claudeSetupRunner) error { return errors.New("disk full") }
 
 		result, err := installClaudeCode()
 		if err != nil {
@@ -3354,7 +3362,7 @@ func TestInstallRoutesForOpenCodeAndClaude(t *testing.T) {
 		useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
 		runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
-		writeClaudeCodeUserMCPFn = func() error { return nil }
+		writeClaudeCodeUserMCPFn = func(claudeSetupRunner) error { return nil }
 
 		result, err := Install("claude-code")
 		if err != nil {
