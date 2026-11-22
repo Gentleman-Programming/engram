@@ -269,15 +269,17 @@ func (b *hookHealthTestBody) Close() error {
 	return nil
 }
 
-func TestHookLocalReadinessTransient500(t *testing.T) {
+func TestHookLocalReadinessRetriesTransientResponse(t *testing.T) {
 	for _, tc := range []struct {
-		name, body string
-		status     int
-		want       bool
+		name, body    string
+		status        int
+		initialStatus int
+		want          bool
 	}{
-		{"matching identity", `{"status":"ok","service":"engram","instance_id":"expected"}`, 200, true},
-		{"foreign identity", `{"status":"ok","service":"engram","instance_id":"other"}`, 200, false},
-		{"other HTTP status", `{}`, 503, false},
+		{"matching identity", `{"status":"ok","service":"engram","instance_id":"expected"}`, 200, http.StatusInternalServerError, true},
+		{"foreign identity", `{"status":"ok","service":"engram","instance_id":"other"}`, 200, http.StatusInternalServerError, false},
+		{"starting then ready", `{"status":"ok","service":"engram","instance_id":"expected"}`, http.StatusOK, http.StatusServiceUnavailable, true},
+		{"other HTTP status", `{}`, 503, http.StatusInternalServerError, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var bodies []*hookHealthTestBody
@@ -285,17 +287,21 @@ func TestHookLocalReadinessTransient500(t *testing.T) {
 				if r.Method != http.MethodGet || r.URL.Path != "/health" {
 					t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
 				}
-				status, body := 500, "temporary stats failure"
-				if len(bodies) != 0 {
+				status, body := tc.initialStatus, "temporary stats failure"
+				if status == http.StatusServiceUnavailable {
+					body = `{"status":"starting","service":"engram"}`
+				}
+				if len(bodies) > 1 {
+					t.Fatal("terminal health response was retried")
+				}
+				if len(bodies) == 1 {
 					status, body = tc.status, tc.body
 				}
 				b := &hookHealthTestBody{Reader: strings.NewReader(body)}
 				bodies = append(bodies, b)
 				return &http.Response{StatusCode: status, Body: b, Header: make(http.Header), Request: r}, nil
 			})}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			err := hookLocalServerReady(ctx, client, "http://127.0.0.1:7437", "expected")
+			err := hookLocalServerReady(context.Background(), client, "http://127.0.0.1:7437", "expected")
 			if (err == nil) != tc.want || len(bodies) != 2 {
 				t.Fatalf("readiness=%v requests=%d want success=%v requests=2", err, len(bodies), tc.want)
 			}
@@ -327,9 +333,6 @@ func TestHookLocalReadinessTransientDeadline(t *testing.T) {
 			defer cancel()
 			if err := hookLocalServerReady(ctx, client, "http://127.0.0.1:7437", "expected"); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("persistent status %d: %v", tc.status, err)
-			}
-			if len(bodies) < 2 {
-				t.Fatalf("status %d was not retried: %d requests", tc.status, len(bodies))
 			}
 			for i, body := range bodies {
 				if !body.closed {
