@@ -19,6 +19,22 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+func TestCloudRuntimeReportsStartupOnStoreFailure(t *testing.T) {
+	stdout, stderr := captureOutput(t, func() {
+		runtime, err := newCloudRuntime(cloud.Config{})
+		if runtime != nil || err == nil || !strings.Contains(err.Error(), "database dsn is required") {
+			t.Fatalf("newCloudRuntime = (%v, %v), want missing DSN error", runtime, err)
+		}
+	})
+	if stdout != "" {
+		t.Errorf("unexpected stdout during startup: %q", stdout)
+	}
+	const want = "engram cloud startup: initializing PostgreSQL store and session index\n"
+	if stderr != want {
+		t.Errorf("startup stderr = %q, want %q", stderr, want)
+	}
+}
+
 // openIsolatedCloudRuntimeSchema mirrors cloudstore's own
 // openIsolatedCloudStore test helper (a fresh Postgres schema per test, via
 // search_path) so this end-to-end runtime-wiring test can run repeatedly and

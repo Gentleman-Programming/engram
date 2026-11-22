@@ -78,10 +78,13 @@ func (r *defaultCloudRuntime) Start() error {
 }
 
 var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
+	started := time.Now()
+	fmt.Fprintln(os.Stderr, "engram cloud startup: initializing PostgreSQL store and session index")
 	cs, err := cloudstore.New(cfg)
 	if err != nil {
 		return nil, err
 	}
+	fmt.Fprintf(os.Stderr, "engram cloud startup: PostgreSQL store and session index initialized elapsed=%s\n", time.Since(started).Round(time.Millisecond))
 	allowedProjects := normalizeAllowedProjects(cfg.AllowedProjects)
 	if err := backfillAllowedProjectMutationChunks(context.Background(), cs, allowedProjects); err != nil {
 		_ = cs.Close()
@@ -186,17 +189,17 @@ func buildRuntimeAuthenticator(cfg cloud.Config, cs *cloudstore.CloudStore, allo
 }
 
 func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.CloudStore, projects []string) error {
-	for _, project := range projects {
+	for i, project := range projects {
+		started := time.Now()
+		fmt.Fprintf(os.Stderr, "engram cloud startup: checking mutation chunks for project=%q (%d/%d)\n", project, i+1, len(projects))
 		report, err := cs.BackfillMutationChunks(ctx, project, true)
 		if err != nil {
 			return fmt.Errorf("cloud repair materialize-mutations for project %q: %w", project, err)
 		}
-		if report.CandidateMutations > 0 || report.ChunksInserted > 0 {
-			fmt.Fprintf(os.Stderr,
-				"engram cloud repair materialize-mutations: project=%s candidates=%d already_materialized=%d chunks_planned=%d chunks_inserted=%d\n",
-				report.Project, report.CandidateMutations, report.AlreadyMaterialized, report.ChunksPlanned, report.ChunksInserted,
-			)
-		}
+		fmt.Fprintf(os.Stderr,
+			"engram cloud repair materialize-mutations: project=%q candidates=%d already_materialized=%d chunks_planned=%d chunks_inserted=%d elapsed=%s\n",
+			report.Project, report.CandidateMutations, report.AlreadyMaterialized, report.ChunksPlanned, report.ChunksInserted, time.Since(started).Round(time.Millisecond),
+		)
 	}
 	return nil
 }
