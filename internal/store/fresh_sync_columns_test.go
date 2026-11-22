@@ -269,6 +269,23 @@ INSERT INTO sync_delete_tombstones(entity,entity_key,deleted_at) VALUES('session
 				}
 			}
 			checkData(db)
+			if route == "partial" {
+				var indexed bool
+				if err := db.QueryRow(`SELECT EXISTS (
+					SELECT 1 FROM sqlite_schema
+					WHERE type = 'index' AND name = 'idx_sync_mutations_transport' AND tbl_name = 'sync_mutations'
+				)`).Scan(&indexed); err != nil || !indexed {
+					t.Fatalf("transport index before reopening: exists=%v err=%v", indexed, err)
+				}
+				exec(`UPDATE sync_mutations SET disposition = '' WHERE seq = 7;
+UPDATE sync_mutations SET disposition = NULL WHERE seq = 8`)
+				if got := readRow(db, "SELECT disposition FROM sync_mutations WHERE seq = 7")["disposition"]; got != "" {
+					t.Fatalf("blank disposition before reopening: got %#v", got)
+				}
+				if got := readRow(db, "SELECT disposition FROM sync_mutations WHERE seq = 8")["disposition"]; got != nil {
+					t.Fatalf("NULL disposition before reopening: got %#v", got)
+				}
+			}
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
