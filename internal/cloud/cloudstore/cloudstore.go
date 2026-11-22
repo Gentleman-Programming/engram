@@ -1372,21 +1372,35 @@ func syncMutationSignature(mutation store.SyncMutation) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.Join([]string{
+	fields := [...]string{
 		strings.TrimSpace(mutation.Project),
 		strings.TrimSpace(mutation.Entity),
 		mutationEntityKey(mutation.Entity, mutation.EntityKey),
 		strings.TrimSpace(mutation.Op),
-		normalized,
-	}, "\x00"), nil
+	}
+	size := len(fields) + len(normalized)
+	for _, field := range fields {
+		size += len(field)
+	}
+	var signature strings.Builder
+	signature.Grow(size)
+	for _, field := range fields {
+		signature.WriteString(field)
+		signature.WriteByte(0)
+	}
+	signature.Write(normalized)
+	return signature.String(), nil
 }
 
-func canonicalMutationPayload(payload []byte) (string, error) {
-	payload = normalizeJSON(payload)
-	if !json.Valid(payload) {
-		return "", fmt.Errorf("payload is not valid JSON")
+func canonicalMutationPayload(payload []byte) ([]byte, error) {
+	if normalized, ok := marshalNormalizedJSON(payload); ok {
+		return normalized, nil
 	}
-	return string(payload), nil
+	// Valid JSON numbers outside float64 range retain the original bytes.
+	if !json.Valid(payload) {
+		return nil, fmt.Errorf("payload is not valid JSON")
+	}
+	return payload, nil
 }
 
 // ListMutationsSince returns mutations with seq > sinceSeq, filtered to allowedProjects.
@@ -1485,15 +1499,19 @@ func chunkIDFromPayload(payload []byte) string {
 }
 
 func normalizeJSON(payload []byte) []byte {
+	if normalized, ok := marshalNormalizedJSON(payload); ok {
+		return normalized
+	}
+	return payload
+}
+
+func marshalNormalizedJSON(payload []byte) ([]byte, bool) {
 	var body any
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return payload
+		return nil, false
 	}
 	normalized, err := json.Marshal(body)
-	if err != nil {
-		return payload
-	}
-	return normalized
+	return normalized, err == nil
 }
 
 type chunkSummary struct {
