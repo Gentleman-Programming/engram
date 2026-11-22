@@ -76,9 +76,22 @@ func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base, pl
 	if dir == "" {
 		return &hookDenialError{message: "managed local server identity unconfirmed"}
 	}
-	expected, err := store.EnsureInstanceIDContext(ctx, dir)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
+	}
+	managedWindows := hookLocalWindowsPort(platform, base) != 0
+	var expected string
+	if managedWindows {
+		// A ready listener may share its store with a process holding the
+		// initialization lock. Read the published marker before waiting.
+		expected, _ = store.ReadPublishedInstanceID(dir)
+	}
+	if expected == "" {
+		var err error
+		expected, err = store.EnsureInstanceIDContext(ctx, dir)
+		if err != nil {
+			return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
+		}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health", nil)
 	if err != nil {
@@ -92,7 +105,7 @@ func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base, pl
 	}
 	health := readHookLocalHealth(response)
 	_ = response.Body.Close()
-	if health.Status == "starting" && hookLocalWindowsPort(platform, base) != 0 {
+	if health.Status == "starting" && managedWindows {
 		// Another hook can reach the early listener before the store is ready.
 		// Wait for its identity without launching or sending session traffic.
 		return hookLocalServerReady(ctx, client, base, expected)

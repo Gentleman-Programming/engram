@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +14,35 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/identityfile"
 )
 
+const (
+	instanceIDSize    = 16
+	instanceIDHexSize = instanceIDSize * 2
+)
+
 func EnsureInstanceID(dataDir string) (string, error) {
 	return EnsureInstanceIDContext(context.Background(), dataDir)
+}
+
+// ReadPublishedInstanceID returns a valid identity already published in dataDir.
+// An incomplete or nonstandard marker returns an empty identity. Unsupported
+// volumes and read failures return an error so callers can initialize under lock.
+func ReadPublishedInstanceID(dataDir string) (string, error) {
+	file, err := openPublishedInstanceID(dataDir)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	// Allow the hexadecimal ID and newline, with one extra byte to detect
+	// files that need the legacy reader under the initialization lock.
+	const publishedSize = instanceIDHexSize + 1
+	data, err := io.ReadAll(io.LimitReader(file, publishedSize+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > publishedSize {
+		return "", nil
+	}
+	return parseInstanceID(data), nil
 }
 
 // EnsureInstanceIDContext reuses the shared identity authority with cancellable
@@ -43,8 +71,8 @@ func ensureInstanceIDLocked(ctx context.Context, dataDir string) (string, error)
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if data, err := os.ReadFile(path); err == nil {
-			if id := strings.TrimSpace(string(data)); isValidInstanceID(id) {
+		if id, err := readInstanceID(path); err == nil {
+			if id != "" {
 				return id, nil
 			}
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -53,7 +81,7 @@ func ensureInstanceIDLocked(ctx context.Context, dataDir string) (string, error)
 		} else if !os.IsNotExist(err) {
 			return "", fmt.Errorf("engram: read instance identity: %w", err)
 		}
-		data := make([]byte, 16)
+		data := make([]byte, instanceIDSize)
 		if _, err := rand.Read(data); err != nil {
 			return "", fmt.Errorf("engram: generate instance identity: %w", err)
 		}
@@ -85,8 +113,8 @@ func ensureInstanceIDLocked(ctx context.Context, dataDir string) (string, error)
 		if !os.IsExist(err) {
 			return "", fmt.Errorf("engram: publish instance identity: %w", err)
 		}
-		if data, readErr := os.ReadFile(path); readErr == nil {
-			if winner := strings.TrimSpace(string(data)); isValidInstanceID(winner) {
+		if winner, readErr := readInstanceID(path); readErr == nil {
+			if winner != "" {
 				return winner, nil
 			}
 		} else if !os.IsNotExist(readErr) {
@@ -103,8 +131,24 @@ func ensureInstanceIDLocked(ctx context.Context, dataDir string) (string, error)
 	return "", fmt.Errorf("engram: read instance identity: concurrent initialization did not complete")
 }
 
+func readInstanceID(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return parseInstanceID(data), nil
+}
+
+func parseInstanceID(data []byte) string {
+	id := strings.TrimSpace(string(data))
+	if isValidInstanceID(id) {
+		return id
+	}
+	return ""
+}
+
 func isValidInstanceID(id string) bool {
-	if len(id) != 32 {
+	if len(id) != instanceIDHexSize {
 		return false
 	}
 	for _, char := range id {
