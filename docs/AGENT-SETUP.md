@@ -376,6 +376,8 @@ engram setup claude-code --native-windows-prompt=disable
 
 Disable leaves user hooks and other settings in place. It can select Bash even if `jq` or `curl` is missing. The Bash hooks still need their usual dependencies to run.
 
+After updating Engram, rerun the command for your desired mode with the new executable and restart Claude Code. Use `enable` to qualify the new native executable or `disable` to refresh the managed Bash bundle from the new build. Ordinary setup keeps the current managed hook selection and pin. If a Claude command times out during managed setup, rerun the desired command to reconcile the profile.
+
 For Windows provisioning, run the capability check against the exact executable you intend to pin.
 
 ```powershell

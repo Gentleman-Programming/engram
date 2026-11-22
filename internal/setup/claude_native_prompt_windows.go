@@ -263,7 +263,7 @@ func sameClaudePath(left, right string) bool {
 }
 
 func managedClaudeCommand(claude string, args ...string) error {
-	out, err := runCommand(claude, append([]string{"plugin"}, args...)...)
+	out, err := runClaudeProfileCommand(claudeLocalTimeout, claude, append([]string{"plugin"}, args...)...)
 	if err != nil {
 		return fmt.Errorf("claude plugin %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
@@ -271,7 +271,7 @@ func managedClaudeCommand(claude string, args ...string) error {
 }
 
 func readManagedClaudeJSON(claude string, value any, args ...string) error {
-	out, err := runCommand(claude, append([]string{"plugin"}, args...)...)
+	out, err := runClaudeProfileCommand(claudeInventoryTimeout, claude, append([]string{"plugin"}, args...)...)
 	if err != nil {
 		return fmt.Errorf("claude plugin %s: %w", strings.Join(args, " "), err)
 	}
