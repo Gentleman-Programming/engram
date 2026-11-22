@@ -21,7 +21,7 @@ import (
 
 func TestCloudRuntimeReportsStartupOnStoreFailure(t *testing.T) {
 	stdout, stderr := captureOutput(t, func() {
-		runtime, err := newCloudRuntime(cloud.Config{})
+		runtime, err := newCloudRuntime(context.Background(), cloud.Config{})
 		if runtime != nil || err == nil || !strings.Contains(err.Error(), "database dsn is required") {
 			t.Fatalf("newCloudRuntime = (%v, %v), want missing DSN error", runtime, err)
 		}
@@ -41,7 +41,7 @@ func TestCloudRuntimeReportsStartupProgressInRepairOrder(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
 
 	stdout, stderr := captureOutput(t, func() {
-		runtime, err := newCloudRuntime(cloud.Config{
+		runtime, err := newCloudRuntime(context.Background(), cloud.Config{
 			DSN:             dsn,
 			AllowedProjects: []string{"second", "first"},
 		})
@@ -142,7 +142,7 @@ func TestCloudRuntimeWiresManagedTokenAuthEndToEnd(t *testing.T) {
 		MaxPushBodyBytes: cloud.DefaultMaxPushBodyBytes,
 	}
 
-	rt, err := newCloudRuntime(cfg)
+	rt, err := newCloudRuntime(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("newCloudRuntime: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestCloudRuntimeWiresManagedTokenAuthEndToEnd(t *testing.T) {
 	// the server must still start and legacy auth must still work.
 	noPepperCfg := cfg
 	noPepperCfg.TokenPepper = ""
-	noPepperRT, err := newCloudRuntime(noPepperCfg)
+	noPepperRT, err := newCloudRuntime(context.Background(), noPepperCfg)
 	if err != nil {
 		t.Fatalf("newCloudRuntime with no token pepper must not fail to start: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestCloudRuntimeMutationPushAttributionUsesAuthenticatedPrincipal(t *testin
 	t.Setenv("ENGRAM_CLOUD_TOKEN", legacySyncToken)
 	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
 
-	rt, err := newCloudRuntime(cloud.Config{
+	rt, err := newCloudRuntime(context.Background(), cloud.Config{
 		DSN:              testDSN,
 		JWTSecret:        "e2e-attribution-jwt-secret-32-bytes-plus",
 		AllowedProjects:  []string{project},

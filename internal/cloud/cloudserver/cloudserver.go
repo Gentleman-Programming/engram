@@ -86,7 +86,6 @@ type CloudServer struct {
 	maxPushBodyBytes    int64
 	mux                 *http.ServeMux
 	syncStatus          dashboard.SyncStatusProvider
-	listenAndServe      func(addr string, handler http.Handler) error
 	// version is the optional running build identifier surfaced in the
 	// dashboard chrome (Layout footer + LoginPage). An empty identifier is
 	// displayed as "version unknown" on both surfaces.
@@ -224,7 +223,6 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 			ReasonCode:    constants.ReasonTransportFailed,
 			ReasonMessage: "sync status provider is unavailable",
 		}},
-		listenAndServe: http.ListenAndServe,
 	}
 	if resolver, ok := authSvc.(principalResolver); ok {
 		s.principalAuth = resolver
@@ -242,14 +240,18 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 	return s
 }
 
-func (s *CloudServer) Start() error {
-	host := strings.TrimSpace(s.host)
-	if host == "" {
-		host = defaultHost
+func (s *CloudServer) Start(startup *StartupListener) error {
+	addr := cloudListenAddress(s.host, s.port)
+	if startup.addr != addr {
+		return fmt.Errorf("cloud server address %s differs from startup listener %s (bound to %s)", addr, startup.addr, startup.Addr())
 	}
-	addr := fmt.Sprintf("%s:%d", host, s.port)
+	if err := startup.publish(s.Handler()); err != nil {
+		return err
+	}
 	log.Printf("[engram-cloud] listening on %s", addr)
-	return s.listenAndServe(addr, s.Handler())
+	ctx := startup.InitializationContext()
+	<-ctx.Done()
+	return context.Cause(ctx)
 }
 
 func (s *CloudServer) Handler() http.Handler {

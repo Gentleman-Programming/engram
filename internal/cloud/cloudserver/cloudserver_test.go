@@ -1414,35 +1414,15 @@ func TestValidateChunkSessionReferencesAcceptsDeleteMutationWithoutSession(t *te
 	}
 }
 
-func TestStartBindsConfiguredHost(t *testing.T) {
-	tests := []struct {
-		name     string
-		host     string
-		expected string
-	}{
-		{name: "loopback default", host: "", expected: "127.0.0.1:18080"},
-		{name: "container friendly", host: "0.0.0.0", expected: "0.0.0.0:18080"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv := New(&fakeStore{}, fakeAuth{}, 18080)
-			srv.host = tt.host
-
-			var gotAddr string
-			srv.listenAndServe = func(addr string, _ http.Handler) error {
-				gotAddr = addr
-				return fmt.Errorf("stop")
-			}
-
-			err := srv.Start()
-			if err == nil || err.Error() != "stop" {
-				t.Fatalf("expected sentinel error, got %v", err)
-			}
-			if gotAddr != tt.expected {
-				t.Fatalf("expected addr %q, got %q", tt.expected, gotAddr)
-			}
-		})
+func TestCloudListenAddress(t *testing.T) {
+	for _, tt := range []struct{ host, want string }{
+		{"", "127.0.0.1:18080"},
+		{" 0.0.0.0 ", "0.0.0.0:18080"},
+		{"[::1]", "[::1]:18080"},
+	} {
+		if got := cloudListenAddress(tt.host, 18080); got != tt.want {
+			t.Errorf("cloudListenAddress(%q) = %q, want %q", tt.host, got, tt.want)
+		}
 	}
 }
 

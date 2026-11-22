@@ -370,7 +370,7 @@ The Claude native PreToolUse gate omits a rewrite when the caller already suppli
 
 The Claude native PreToolUse gate verifies the local `/health` instance ID against its configured data directory before sending session or cwd data. Directory resolution uses the same home fallback as `engram serve`. An unrelated, unidentified, redirected, or unhealthy local listener denies the write with an identity error. If a healthy Engram listener reports a release that differs from the CLI, the identity denial shows both releases and asks the operator to verify the listener and restart the intended server manually. Explicit `ENGRAM_URL` selects an intentional remote endpoint and retains its existing connection contract. Local instance comparison prevents accidental cross-store routing; it does not authenticate a malicious server. Windows connection-refused recovery remains bounded by the hook confirmation deadline.
 - When a local HTTP request observes permanent database generation invalidation, its existing error response is preserved. After the handler returns, `engram serve` logs one restart diagnostic, stops autosync, drains HTTP requests for up to five seconds (then force-closes remaining connections), releases its listener, and exits nonzero after cleanup. Ordinary transient health failures remain generic `500` responses and do not stop the server. Detection is request-triggered, not a background watchdog; the database is not reopened automatically.
-- Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
+- Cloud runtime (`engram cloud serve`): `GET /health` returns `503 Service Unavailable` while startup work is underway. When ready it returns `200` with `{"status": "ok", "service": "engram-cloud"}`.
 
 ### Sessions
 
@@ -1208,7 +1208,7 @@ ENGRAM_DATABASE_URL='postgres://...' engram cloud repair materialize-mutations -
 
 The backfill is project-scoped, non-destructive, and idempotent: it inserts missing compatible chunks and leaves existing `cloud_mutations` and chunks in place.
 
-`engram cloud serve` also runs this materialization repair automatically for every configured `ENGRAM_CLOUD_ALLOWED_PROJECTS` entry at startup. The command reports PostgreSQL initialization, session indexing, and per-project repair progress on stderr before it begins serving HTTP. Use [the Cloud health endpoint](#health) to check readiness. The explicit repair command remains available for operator verification, dry-runs, and re-running a project after an upgrade.
+`engram cloud serve` also runs this materialization repair automatically for every configured `ENGRAM_CLOUD_ALLOWED_PROJECTS` entry at startup. The command reports PostgreSQL initialization, session indexing, and per-project repair progress on stderr. Once the listener is bound, HTTP routes return `503 Service Unavailable` until startup finishes and Cloud routes become available. Use [the Cloud health endpoint](#health) to check readiness. The explicit repair command remains available for operator verification, dry-runs, and re-running a project after an upgrade.
 
 ### Local Cloud Bring-Up (Docker + Postgres)
 
