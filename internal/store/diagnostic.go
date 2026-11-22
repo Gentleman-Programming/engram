@@ -40,7 +40,7 @@ func ReadRuntimeSessionDiagnostic(ctx context.Context, dataDir, root string) (Ru
 	if err != nil {
 		return "", err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	s := &Store{db: db}
 	session, err := s.getSessionContext(ctx, root)
 	if errors.Is(err, sql.ErrNoRows) {

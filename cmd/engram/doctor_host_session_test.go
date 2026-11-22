@@ -19,7 +19,11 @@ func TestDoctorHostSessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	const root = "doctor-fixture-root"
 	const project = "doctor-fixture-project"
