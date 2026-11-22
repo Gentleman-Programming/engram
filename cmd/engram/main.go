@@ -817,6 +817,11 @@ func main() {
 		return
 	}
 
+	if os.Args[1] == "doctor" && len(os.Args) > 2 && os.Args[2] == "host-session" {
+		cmdDoctorHostSession(cfg, os.Args[3:])
+		return
+	}
+
 	if usesLocalSQLite(os.Args[1:]) {
 		if err := prepareSQLiteTemp(cfg.DataDir); err != nil {
 			fatal(err)

@@ -14,10 +14,6 @@ import (
 )
 
 func cmdDoctor(cfg store.Config) {
-	if len(os.Args) > 2 && os.Args[2] == "host-session" {
-		cmdDoctorHostSession(cfg, os.Args[3:])
-		return
-	}
 	if len(os.Args) > 2 && os.Args[2] == "discard-empty-prompt" {
 		cmdDoctorDiscardEmptyPrompt(cfg)
 		return

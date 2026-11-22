@@ -6,11 +6,61 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// RuntimeSessionDiagnosticState describes a read-only sample of a bound root.
+type RuntimeSessionDiagnosticState string
+
+const (
+	RuntimeSessionDiagnosticMissing   RuntimeSessionDiagnosticState = "missing"
+	RuntimeSessionDiagnosticActive    RuntimeSessionDiagnosticState = "active"
+	RuntimeSessionDiagnosticContinued RuntimeSessionDiagnosticState = "continued"
+	RuntimeSessionDiagnosticEnded     RuntimeSessionDiagnosticState = "ended"
+)
+
+// ReadRuntimeSessionDiagnostic uses the existing store without initializing
+// it. The SQLite connection includes committed WAL state and cannot write data.
+func ReadRuntimeSessionDiagnostic(ctx context.Context, dataDir, root string) (RuntimeSessionDiagnosticState, error) {
+	if err := ValidateDataDirectory(dataDir); err != nil {
+		return "", err
+	}
+	// Use an explicit file URI so SQLite recognizes the access mode on both
+	// POSIX and Windows. A drive letter belongs in the path, not the authority.
+	dbPath := filepath.ToSlash(filepath.Join(dataDir, "engram.db"))
+	if !strings.HasPrefix(dbPath, "/") {
+		dbPath = "/" + dbPath
+	}
+	dsn := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	s := &Store{db: db}
+	session, err := s.getSessionContext(ctx, root)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RuntimeSessionDiagnosticMissing, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if session.EndedAt == nil {
+		return RuntimeSessionDiagnosticActive, nil
+	}
+	_, err = s.ResolveRuntimeSessionWithOwnershipModeContext(ctx, root, session.Project, session.Directory, session.OwnershipMode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RuntimeSessionDiagnosticEnded, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return RuntimeSessionDiagnosticContinued, nil
+}
 
 // DiagnosticSessionEvidence is the read-only session projection used by
 // operational diagnostics. It intentionally avoids observation/prompt payloads.

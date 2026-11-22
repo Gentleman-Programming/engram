@@ -29,13 +29,7 @@ func cmdDoctorHostSession(cfg store.Config, args []string) {
 		return
 	}
 
-	s, err := storeNew(cfg)
-	if err != nil {
-		fatal(err)
-		return
-	}
-	defer s.Close()
-	report := diagnostic.LiveHostSessionReport(context.Background(), s, *pid)
+	report := diagnostic.LiveHostSessionReport(context.Background(), cfg.DataDir, *pid)
 	if *jsonOut {
 		writeDoctorJSON(report)
 		return
