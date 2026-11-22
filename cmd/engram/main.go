@@ -970,6 +970,8 @@ func cmdServe(cfg store.Config) error {
 	return serveWith(cfg, options)
 }
 
+var localServeTraceEpoch = time.Now()
+
 // serveWith is the shared serving body behind `engram serve` and `engram run`
 // (foreground mode). It owns the store, server, autosync, and signal loop.
 func serveWith(cfg store.Config, options serveOptions) error {
@@ -977,12 +979,20 @@ func serveWith(cfg store.Config, options serveOptions) error {
 	readyFile, readyToken := os.Getenv("ENGRAM_RUN_READY_FILE"), os.Getenv("ENGRAM_RUN_READY_TOKEN")
 	detachedDaemon := readyFile != "" && readyToken != ""
 	var startup *server.LocalStartup
+	var trace *store.StartupTrace
 	if !options.sessionOwned && options.socketPath == "" && options.port > 0 && !detachedDaemon {
+		if os.Getenv("ENGRAM_STARTUP_PHASES") == "1" {
+			trace = store.NewStartupTrace(os.Stderr, localServeTraceEpoch)
+		}
 		// An already occupied port still takes the normal bind path, which
 		// uses the validated store identity to classify its current owner.
+		trace.Mark("early-bind")
 		startup, _ = listenLocalStartup(options.port)
+		trace.Mark("early-bind-attempted")
 		if startup != nil {
 			defer startup.Close()
+		} else {
+			trace.Mark("early-bind-unavailable")
 		}
 	}
 
@@ -996,7 +1006,8 @@ func serveWith(cfg store.Config, options serveOptions) error {
 		parentEOF = watchOwnedParent(os.Stdin, cancel)
 		s, err = store.NewWithContext(ctx, cfg)
 	} else if startup != nil {
-		s, err = storeNewForLocalStartup(startup.Context(), cfg)
+		trace.Mark("store-open")
+		s, err = storeNewForLocalStartup(trace.Context(startup.Context()), cfg)
 		if cause := context.Cause(startup.Context()); cause != nil {
 			if s != nil {
 				_ = s.Close()
@@ -1083,6 +1094,7 @@ func serveWith(cfg store.Config, options serveOptions) error {
 	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals(sigCh)
 	serveResult := make(chan error, 1)
+	trace.Mark("http-dispatch")
 	go func() { serveResult <- startHTTP(srv) }()
 	var terminal, serveErr error
 	select {
