@@ -35,6 +35,43 @@ func TestCloudRuntimeReportsStartupOnStoreFailure(t *testing.T) {
 	}
 }
 
+func TestCloudRuntimeReportsStartupProgressInRepairOrder(t *testing.T) {
+	dsn := openIsolatedCloudRuntimeSchema(t)
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
+
+	stdout, stderr := captureOutput(t, func() {
+		runtime, err := newCloudRuntime(cloud.Config{
+			DSN:             dsn,
+			AllowedProjects: []string{"second", "first"},
+		})
+		if err != nil {
+			t.Fatalf("newCloudRuntime: %v", err)
+		}
+		t.Cleanup(func() { _ = runtime.(*defaultCloudRuntime).store.Close() })
+	})
+	if stdout != "" {
+		t.Errorf("unexpected stdout during startup: %q", stdout)
+	}
+	want := []string{
+		"engram cloud startup: initializing PostgreSQL store and session index",
+		"engram cloud startup: PostgreSQL store and session index initialized elapsed=",
+		`engram cloud startup: checking mutation chunks for project="second" (1/2)`,
+		`engram cloud repair materialize-mutations: project="second" candidates=0 already_materialized=0 chunks_planned=0 chunks_inserted=0 elapsed=`,
+		`engram cloud startup: checking mutation chunks for project="first" (2/2)`,
+		`engram cloud repair materialize-mutations: project="first" candidates=0 already_materialized=0 chunks_planned=0 chunks_inserted=0 elapsed=`,
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	if len(lines) != len(want) {
+		t.Fatalf("startup stderr = %q, want %d lines", stderr, len(want))
+	}
+	for i, prefix := range want {
+		if !strings.HasPrefix(lines[i], prefix) {
+			t.Errorf("startup stderr line %d = %q, want prefix %q", i+1, lines[i], prefix)
+		}
+	}
+}
+
 // openIsolatedCloudRuntimeSchema mirrors cloudstore's own
 // openIsolatedCloudStore test helper (a fresh Postgres schema per test, via
 // search_path) so this end-to-end runtime-wiring test can run repeatedly and
