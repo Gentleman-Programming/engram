@@ -628,7 +628,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	effectiveID := body.ID
 	timings := requestWriteTimings(r)
 	var err error
-	effectiveID, err = s.store.RegisterSessionWithProjectProvenance(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode, body.Resume, body.Isolated, provenance, timings)
+	ctx := r.Context()
+	directory := projectpkg.RuntimeWorktreeDirectoryContext(ctx, body.Directory)
+	if ctx.Err() != nil {
+		return
+	}
+	effectiveID, err = s.store.RegisterSessionWithProjectProvenance(body.ID, body.Project, directory, mode, body.Resume, body.Isolated, provenance, timings)
 	if err != nil {
 		var conflict *store.SessionProjectConflictError
 		switch {

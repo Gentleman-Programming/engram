@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -10,9 +13,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 const currentProjectGitFixture = "ENGRAM_TEST_CURRENT_PROJECT_GIT_ADDRESS"
@@ -34,71 +41,139 @@ func TestHTTPCurrentProjectCancelsActiveGit(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			handler := New(newServerTestStore(t), 0).Handler()
-			done := make(chan struct{})
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				defer close(done)
-				handler.ServeHTTP(w, r)
-			}))
-			defer server.Close()
+			srv := New(newServerTestStore(t), 0)
+			cancelHTTPDuringGit(t, srv.Handler(), http.MethodGet, "/project/current?cwd="+url.QueryEscape(repo), nil)
+		})
+	}
+}
 
-			gate, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = gate.Close() }()
-			// Keep the entire assertion inside Git's ordinary two-second timeout,
-			// so a root subprocess timing out on its own cannot satisfy it.
-			deadline := time.Now().Add(1500 * time.Millisecond)
-			if err := gate.SetDeadline(deadline); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv(currentProjectGitFixture, gate.Addr().String())
+func cancelHTTPDuringGit(t *testing.T, handler http.Handler, method, path string, body io.Reader) {
+	t.Helper()
+	done := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		handler.ServeHTTP(w, r)
+	}))
+	defer server.Close()
 
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/project/current?cwd="+url.QueryEscape(repo), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			clientDone := make(chan error, 1)
-			go func() {
-				res, err := server.Client().Do(req)
-				if res != nil {
-					_ = res.Body.Close()
+	gate, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gate.Close() }()
+	// Keep the entire assertion inside Git's ordinary two-second timeout,
+	// so a root subprocess timing out on its own cannot satisfy it.
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	if err := gate.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(currentProjectGitFixture, gate.Addr().String())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, server.URL+path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientDone := make(chan error, 1)
+	go func() {
+		res, err := server.Client().Do(req)
+		if res != nil {
+			_ = res.Body.Close()
+		}
+		clientDone <- err
+	}()
+
+	// Accepting the fixture connection proves Git has started. Closing
+	// that connection would release it, so leave it open until assertions finish.
+	blockedGit, err := gate.AcceptTCP()
+	if err != nil {
+		t.Fatalf("Git fixture did not start: %v", err)
+	}
+	defer func() { _ = blockedGit.Close() }()
+	cancel()
+	timeout := time.NewTimer(time.Until(deadline))
+	defer timeout.Stop()
+	select {
+	case err := <-clientDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("HTTP client returned %v, want cancellation", err)
+		}
+	case <-timeout.C:
+		t.Fatal("HTTP client did not finish after cancellation")
+	}
+	select {
+	case <-done:
+	case <-timeout.C:
+		t.Error("HTTP handler kept waiting for Git after cancellation")
+		// Let a regressing handler finish so callers can observe late writes.
+		_ = gate.Close()
+		_ = blockedGit.Close()
+		select {
+		case <-done:
+			return
+		case <-time.After(4 * time.Second):
+			t.Fatal("HTTP handler did not finish after fixture released Git")
+		}
+	}
+	if err := blockedGit.SetReadDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	// A killed peer may give EOF or a TCP reset depending on the OS.
+	if n, err := blockedGit.Read(make([]byte, 1)); n != 0 || err == nil || os.IsTimeout(err) {
+		t.Fatalf("blocked Git process was not closed by cancellation: read %d bytes, %v", n, err)
+	}
+}
+
+func TestHTTPSessionRegistrationCancelsActiveGitBeforeWriting(t *testing.T) {
+	dir := t.TempDir()
+	installCurrentProjectGitFixture(t, dir)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ENGRAM_HTTP_TOKEN", "")
+
+	for _, existing := range []bool{false, true} {
+		name := "new session"
+		if existing {
+			name = "existing session"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo := t.TempDir()
+			st := newServerTestStore(t)
+			const id, project = "session-fixture", "project-fixture"
+			var before *store.Session
+			if existing {
+				if err := st.StartSession(id, project, repo); err != nil {
+					t.Fatal(err)
 				}
-				clientDone <- err
-			}()
-
-			// Accepting the fixture connection proves Git has started. Closing
-			// that connection would release it, so leave it open until assertions finish.
-			blockedGit, err := gate.AcceptTCP()
-			if err != nil {
-				t.Fatalf("Git fixture did not start: %v", err)
-			}
-			defer func() { _ = blockedGit.Close() }()
-			cancel()
-			timeout := time.NewTimer(time.Until(deadline))
-			defer timeout.Stop()
-			select {
-			case err := <-clientDone:
-				if !errors.Is(err, context.Canceled) {
-					t.Fatalf("HTTP client returned %v, want cancellation", err)
+				if _, err := st.DB().Exec("UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?", "2001-02-03 04:05:06", id); err != nil {
+					t.Fatal(err)
 				}
-			case <-timeout.C:
-				t.Fatal("HTTP client did not finish after cancellation")
+				var err error
+				before, err = st.GetSession(id)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
-			select {
-			case <-done:
-			case <-timeout.C:
-				t.Fatal("current-project handler kept waiting for Git after cancellation")
-			}
-			if err := blockedGit.SetReadDeadline(deadline); err != nil {
+
+			srv := New(st, 0)
+			var notified atomic.Int64
+			srv.SetOnWrite(func() { notified.Add(1) })
+			body, err := json.Marshal(map[string]string{"id": id, "project": project, "directory": repo})
+			if err != nil {
 				t.Fatal(err)
 			}
-			// A killed peer may give EOF or a TCP reset depending on the OS.
-			if n, err := blockedGit.Read(make([]byte, 1)); n != 0 || err == nil || os.IsTimeout(err) {
-				t.Fatalf("blocked Git process was not closed by cancellation: read %d bytes, %v", n, err)
+			cancelHTTPDuringGit(t, srv.Handler(), http.MethodPost, "/sessions", bytes.NewReader(body))
+
+			after, err := st.GetSession(id)
+			if existing {
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Errorf("canceled registration changed the session: before=%+v after=%+v error=%v", before, after, err)
+				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				t.Errorf("canceled registration unexpectedly created a session: %+v, %v", after, err)
+			}
+			if writes := notified.Load(); writes != 0 {
+				t.Errorf("canceled registration published %d write notifications", writes)
 			}
 		})
 	}
