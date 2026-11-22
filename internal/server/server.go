@@ -1536,14 +1536,14 @@ func contextBytesQuery(r *http.Request) int {
 	return clampContextBytes(budget)
 }
 
-var contextHistoryFormatter = func(s *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
-	return s.FormatContextWithOptions(project, scope, opts)
+var contextHistoryFormatter = func(ctx context.Context, s *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
+	return s.FormatContextWithOptionsContext(ctx, project, scope, opts)
 }
 
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
-		s.writeProjectResolutionError(w, resolved, err)
+		s.writeProjectResolutionErrorContext(r.Context(), w, resolved, err)
 		return
 	}
 	scope := r.URL.Query().Get("scope")
@@ -1567,7 +1567,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		OlderHistory: queryBool(r, "older_history", false),
 	}
 
-	context, err := contextHistoryFormatter(s.store, resolved.Project, scope, opts)
+	context, err := contextHistoryFormatter(r.Context(), s.store, resolved.Project, scope, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1744,7 +1744,9 @@ func currentProjectPayload(cwd string, res projectpkg.DetectionResult) map[strin
 // Current-project reads require known explicit/process overrides, while cwd
 // detection remains usable before a project has any stored memories.
 func (s *Server) resolveRequestProject(r *http.Request, mode projectpkg.ResolutionMode, requireKnownOverrides bool) (projectpkg.DetectionResult, error) {
-	return s.resolveRequestProjectWithDetector(r, mode, requireKnownOverrides, s.store.DetectProject)
+	return s.resolveRequestProjectWithDetector(r, mode, requireKnownOverrides, func(path string) projectpkg.DetectionResult {
+		return s.store.DetectProjectContext(r.Context(), path)
+	})
 }
 
 func (s *Server) resolveRequestProjectWithDetector(r *http.Request, mode projectpkg.ResolutionMode, requireKnownOverrides bool, detect func(string) projectpkg.DetectionResult) (projectpkg.DetectionResult, error) {
@@ -1771,10 +1773,12 @@ func (s *Server) resolveRequestProjectWithDetector(r *http.Request, mode project
 		}
 	}
 	return projectpkg.Resolve(projectpkg.ResolutionOptions{
-		Mode:                 mode,
-		Explicit:             query.Get("project"),
-		Directory:            query.Get("cwd"),
-		ProjectExists:        s.store.ProjectExists,
+		Mode:      mode,
+		Explicit:  query.Get("project"),
+		Directory: query.Get("cwd"),
+		ProjectExists: func(name string) (bool, error) {
+			return s.store.ProjectExistsContext(r.Context(), name)
+		},
 		Detect:               detect,
 		RequireKnownExplicit: requireKnownOverrides,
 		RequireKnownProcess:  requireKnownOverrides,
@@ -1782,9 +1786,13 @@ func (s *Server) resolveRequestProjectWithDetector(r *http.Request, mode project
 }
 
 func (s *Server) writeProjectResolutionError(w http.ResponseWriter, res projectpkg.DetectionResult, err error) {
+	s.writeProjectResolutionErrorContext(context.Background(), w, res, err)
+}
+
+func (s *Server) writeProjectResolutionErrorContext(ctx context.Context, w http.ResponseWriter, res projectpkg.DetectionResult, err error) {
 	var unknown *projectpkg.UnknownProjectError
 	if errors.As(err, &unknown) {
-		available, listErr := s.store.ListProjectNames()
+		available, listErr := s.store.ListProjectNamesContext(ctx)
 		if listErr != nil {
 			jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed: "+listErr.Error(), map[string]any{
 				"code": "project_resolution_failed",

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -188,7 +189,7 @@ func TestFormatContextByteBudgetMixedSections(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, groups, err := s.contextHistory("alpha", "project", 3, now, false)
+	_, groups, err := s.contextHistory(context.Background(), "alpha", "project", 3, now, false)
 	if err != nil {
 		t.Fatal(err)
 	}

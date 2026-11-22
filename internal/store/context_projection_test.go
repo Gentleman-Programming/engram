@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -132,7 +133,7 @@ func TestCompactProjectionOutputCompatibility(t *testing.T) {
 				main = strings.Join(lines, "\n")
 				var groups []historyGroup
 				if older {
-					_, groups, err = s.contextHistory(" ALPHA ", scope, 20, now, false)
+					_, groups, err = s.contextHistory(context.Background(), " ALPHA ", scope, 20, now, false)
 					if err != nil {
 						t.Fatal(err)
 					}

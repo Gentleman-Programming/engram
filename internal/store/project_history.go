@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -14,7 +15,11 @@ import (
 // history can be explicit or imported; it does not establish project ownership.
 // This query is needed only before first binding creation, not on each read.
 func (s *Store) ProjectHistory(directory string) ([]string, error) {
-	rows, err := s.queryItHook(s.db, `SELECT DISTINCT project, directory FROM sessions WHERE project IS NOT NULL AND project != '' AND directory != ''`)
+	return s.projectHistory(context.Background(), directory)
+}
+
+func (s *Store) projectHistory(ctx context.Context, directory string) ([]string, error) {
+	rows, err := s.queryContextSection(ctx, s.db, `SELECT DISTINCT project, directory FROM sessions WHERE project IS NOT NULL AND project != '' AND directory != ''`)
 	if err != nil {
 		return nil, fmt.Errorf("project directory history: %w", err)
 	}
@@ -57,7 +62,17 @@ func historicalDirectoryIdentity(directory string) string {
 
 // DetectProject applies the first-Git-binding precaution using this local store.
 func (s *Store) DetectProject(directory string) project.DetectionResult {
-	return project.DetectProjectFullWithOptions(directory, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+	return s.DetectProjectContext(context.Background(), directory)
+}
+
+// DetectProjectContext associates request cancellation with project detection and history reads.
+func (s *Store) DetectProjectContext(ctx context.Context, directory string) project.DetectionResult {
+	return project.DetectProjectFullWithOptions(directory, project.DetectionOptions{
+		Context: ctx,
+		HistoryLookup: func(path string) ([]string, error) {
+			return s.projectHistory(ctx, path)
+		},
+	})
 }
 
 // InspectProject cannot create a binding or elevate an unbound Git candidate.

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	"net/http/httptest"
@@ -86,7 +87,7 @@ func TestContextHistoryForwarding(t *testing.T) {
 	}{{"", false}, {"&older_history=false", false}, {"&older_history=true", true}, {"&older_history=invalid", false}} {
 		t.Run(tc.query, func(t *testing.T) {
 			called := false
-			contextHistoryFormatter = func(_ *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
+			contextHistoryFormatter = func(_ context.Context, _ *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
 				called = true
 				if project != "engram" || scope != "personal" || opts.OlderHistory != tc.want || opts.MaxBytes != 1024 || !opts.Compact || opts.Observations != -1 {
 					t.Errorf("forwarded %q %q %+v", project, scope, opts)

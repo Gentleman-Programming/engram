@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -267,7 +268,7 @@ func TestContextHistoryCalendarAndMembership(t *testing.T) {
 		}
 	}
 	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
-	recent, groups, err := s.contextHistory(" ALPHA ", "project", 1, now, false)
+	recent, groups, err := s.contextHistory(context.Background(), " ALPHA ", "project", 1, now, false)
 	if err != nil {
 		t.Fatal(err)
 	}
