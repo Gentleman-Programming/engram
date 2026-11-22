@@ -1225,6 +1225,10 @@ func storeDSN(dbPath string) string {
 	for _, p := range []string{
 		"busy_timeout(5000)",
 		"journal_mode(WAL)",
+		// Leave room for SQLite's default 1,000-frame checkpoint interval
+		// at the largest page size. SQLite applies the limit on safe reuse
+		// or final close, so active readers can still retain pending frames.
+		"journal_size_limit(67108864)",
 		"synchronous(NORMAL)",
 		"foreign_keys(1)",
 	} {
