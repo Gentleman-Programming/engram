@@ -600,14 +600,18 @@ func TestCollectSessionIDsIncludesChunkSessionsAndMutationSessions(t *testing.T)
 			{"entity":"session","entity_key":"s-2","op":"upsert","payload":"{\"id\":\"s-2\",\"directory\":\"/tmp/s-2\"}"},
 			{"entity":"session","entity_key":"s-3","op":"upsert","payload":"\"{\\\"id\\\":\\\"s-3\\\",\\\"directory\\\":\\\"/tmp/s-3\\\"}\""},
 			{"entity":"session","entity_key":"s-4","op":"upsert","payload":"{\"directory\":\"/tmp/s-4\"}"},
-			{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"session_id\":\"s-1\"}"}
+			{"entity":" session ","entity_key":" s-5 ","op":" ","payload":"{\"directory\":\"/tmp/s-5\"}"},
+			{"entity":"session","entity_key":"s-6","op":" upsert ","payload":"{\"directory\":\"/tmp/s-6\"}"},
+			{"entity":"session","entity_key":"ignored-delete","op":"delete","payload":"{\"id\":\"ignored-delete\"}"},
+			{"entity":"session","entity_key":"ignored-mismatch","op":"upsert","payload":"{\"id\":\"mismatched\",\"directory\":\"/tmp/mismatched\"}"},
+			{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"session_id\":\"not-a-session\"}"}
 		]
 	}`))
 
-	if len(sessionIDs) != 4 {
+	if len(sessionIDs) != 6 {
 		t.Fatalf("expected typed and mutation session IDs to dedupe, got %d: %+v", len(sessionIDs), sessionIDs)
 	}
-	for _, sessionID := range []string{"s-1", "s-2", "s-3", "s-4"} {
+	for _, sessionID := range []string{"s-1", "s-2", "s-3", "s-4", " s-5 ", "s-6"} {
 		if _, ok := sessionIDs[sessionID]; !ok {
 			t.Fatalf("expected session id %q from chunk session or mutation", sessionID)
 		}
