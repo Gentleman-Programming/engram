@@ -443,6 +443,60 @@ func TestMutationEntrySignatureMatchesCanonicalChunkMutation(t *testing.T) {
 	}
 }
 
+func TestMutationEntrySignatureMatchesLegacyRoundTrip(t *testing.T) {
+	tests := []struct {
+		name, entity, key, op, payload string
+		valid                          bool
+	}{
+		{"opaque session upsert", " session ", " scheduled session ", " upsert ", `{"id":" scheduled session ","directory":" /fixture ","project":"old"}`, true},
+		{"opaque session delete", "session", " session ", "delete", `{"id":" session ","directory":"/old","deleted_at":" 2026-05-04 "}`, true},
+		{"legacy non-UTF-8 key", "session", " session-\xff\xfe ", "upsert", "{\"id\":\" session-\xff\xfe \",\"directory\":\"/fixture\"}", true},
+		{"distinct opaque keys", "session", "session", "upsert", `{"id":" session ","directory":"/fixture"}`, false},
+		{"derived observation key", "observation", "", "upsert", `{"sync_id":" obs ","session_id":" session ","type":"decision","title":" title ","content":" content ","scope":"project","review_after":{"z":0,"a":1}}`, true},
+		{"encoded prompt", " prompt ", " prompt ", " upsert ", `"{\"sync_id\":\"prompt\",\"session_id\":\"session\",\"content\":\" content \"}"`, true},
+		{"prompt delete", "prompt", " prompt ", "delete", `{"sync_id":"prompt","hard_delete":true}`, true},
+		{"relation upsert", "relation", " relation ", "upsert", `{"sync_id":"relation","source_id":"source","target_id":"target","relation":"supports","judgment_status":"judged","marked_by_actor":" agent ","marked_by_kind":" agent ","confidence":0.875}`, true},
+		{"invalid relation operation", "relation", "relation", "delete", `{"sync_id":"relation"}`, false},
+		{"malformed payload", "prompt", "prompt", "upsert", `{"sync_id":`, false},
+		{"absent payload", "prompt", "prompt", "upsert", "", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const project = "source-project"
+			entry := MutationEntry{Project: " " + project + "\t", Entity: test.entity, EntityKey: test.key, Op: test.op, Payload: json.RawMessage(test.payload)}
+			payload := test.payload
+			if payload == "" {
+				payload = "{}"
+			}
+			doc := engramsync.ChunkData{Mutations: []store.SyncMutation{{
+				Project: project, Entity: strings.TrimSpace(test.entity),
+				EntityKey: mutationEntityKey(test.entity, test.key),
+				Op:        strings.TrimSpace(test.op), Payload: payload,
+			}}}
+			raw, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canonical, legacyErr := chunkcodec.CanonicalizeForProject(raw, project)
+			got, gotErr := mutationEntrySignature(entry)
+			if (legacyErr == nil) != test.valid || (gotErr == nil) != test.valid {
+				t.Fatalf("valid=%t, legacy error=%v, signature error=%v", test.valid, legacyErr, gotErr)
+			}
+			if !test.valid {
+				return
+			}
+			chunk, err := parseChunkData(canonical)
+			if err != nil || len(chunk.Mutations) != 1 {
+				t.Fatalf("expected a canonical mutation, got %d: %v", len(chunk.Mutations), err)
+			}
+			want, err := syncMutationSignature(chunk.Mutations[0])
+			if err != nil || want != got {
+				t.Fatalf("signature mismatch\ngot  %q\nwant %q\nerror: %v", got, want, err)
+			}
+		})
+	}
+}
+
 func TestNormalizeJSONCanonicalizesEquivalentPayloads(t *testing.T) {
 	a := []byte(`{"a":1,"b":[2,3]}`)
 	b := []byte("{\n  \"b\": [2,3], \"a\":1\n}")

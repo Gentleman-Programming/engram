@@ -323,34 +323,10 @@ func normalizeChunkMutation(raw map[string]any, project string) (map[string]any,
 		return nil, fmt.Errorf("decode mutation: %w", err)
 	}
 
-	mutation.Entity = strings.TrimSpace(mutation.Entity)
-	// Unlike generated entity keys, session identities are byte-exact.
-	if mutation.Entity != store.SyncEntitySession {
-		mutation.EntityKey = strings.TrimSpace(mutation.EntityKey)
-	}
-	mutation.Op = strings.TrimSpace(mutation.Op)
-	mutation.Payload = strings.TrimSpace(mutation.Payload)
-
-	if err := validateSupportedMutation(mutation.Entity, mutation.Op); err != nil {
-		return nil, err
-	}
-	if mutation.Payload == "" {
-		return nil, fmt.Errorf("payload is required")
-	}
-
-	normalizedPayload, expectedEntityKey, err := normalizeMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, project)
+	mutation, err = CanonicalizeMutationForProject(mutation, project)
 	if err != nil {
 		return nil, err
 	}
-	if mutation.EntityKey == "" {
-		mutation.EntityKey = expectedEntityKey
-	}
-	if mutation.EntityKey != expectedEntityKey {
-		return nil, fmt.Errorf("entity_key %q does not match payload key %q", mutation.EntityKey, expectedEntityKey)
-	}
-
-	mutation.Project = project
-	mutation.Payload = normalizedPayload
 
 	normalizedJSON, err := json.Marshal(mutation)
 	if err != nil {
@@ -362,6 +338,40 @@ func normalizeChunkMutation(raw map[string]any, project string) (map[string]any,
 		return nil, fmt.Errorf("encode mutation: %w", err)
 	}
 	return normalized, nil
+}
+
+// CanonicalizeMutationForProject normalizes an already decoded mutation for the
+// given project. Chunk canonicalization applies the same rules to each mutation.
+func CanonicalizeMutationForProject(mutation store.SyncMutation, project string) (store.SyncMutation, error) {
+	mutation.Entity = strings.TrimSpace(mutation.Entity)
+	// Unlike generated entity keys, session identities are byte-exact.
+	if mutation.Entity != store.SyncEntitySession {
+		mutation.EntityKey = strings.TrimSpace(mutation.EntityKey)
+	}
+	mutation.Op = strings.TrimSpace(mutation.Op)
+	mutation.Payload = strings.TrimSpace(mutation.Payload)
+
+	if err := validateSupportedMutation(mutation.Entity, mutation.Op); err != nil {
+		return store.SyncMutation{}, err
+	}
+	if mutation.Payload == "" {
+		return store.SyncMutation{}, fmt.Errorf("payload is required")
+	}
+
+	normalizedPayload, expectedEntityKey, err := normalizeMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, project)
+	if err != nil {
+		return store.SyncMutation{}, err
+	}
+	if mutation.EntityKey == "" {
+		mutation.EntityKey = expectedEntityKey
+	}
+	if mutation.EntityKey != expectedEntityKey {
+		return store.SyncMutation{}, fmt.Errorf("entity_key %q does not match payload key %q", mutation.EntityKey, expectedEntityKey)
+	}
+
+	mutation.Project = project
+	mutation.Payload = normalizedPayload
+	return mutation, nil
 }
 
 func validateSupportedMutation(entity, op string) error {
