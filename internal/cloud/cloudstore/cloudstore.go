@@ -603,8 +603,15 @@ func collectSessionIDs(chunk engramsync.ChunkData) map[string]struct{} {
 		}
 	}
 	for _, mutation := range chunk.Mutations {
+		if strings.TrimSpace(mutation.Entity) != store.SyncEntitySession {
+			continue
+		}
+		op := strings.TrimSpace(mutation.Op)
+		if op != "" && op != store.SyncOpUpsert {
+			continue
+		}
 		materialized, err := materializeChunkMutation("", mutation)
-		if err != nil || materialized == nil || materialized.Entity != store.SyncEntitySession || materialized.Op != store.SyncOpUpsert {
+		if err != nil || materialized == nil {
 			continue
 		}
 		session, err := sessionFromMaterializedMutation(*materialized)
