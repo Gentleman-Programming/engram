@@ -48,7 +48,7 @@ engram_render_session_handoff() {
   local effective="$1" identity=""
   identity=$(printf '%s' "$effective" | jq -esc '
     if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
-      and (.[0] | (has("error") or has("error_code")) | not)
+      and (.[0] | (has("error") or has("error_code")) | not) and .[0].project_lookup_complete != true
     then {session_id: .[0].session_id} else error("invalid identity") end
   ' 2>/dev/null) || identity=""
 

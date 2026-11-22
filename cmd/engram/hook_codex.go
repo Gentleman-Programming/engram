@@ -264,10 +264,11 @@ func codexRuntimeRequest(ctx context.Context, client *http.Client, base, host st
 }
 
 type codexLifecycleResult struct {
-	SessionID string `json:"session_id,omitempty"`
-	Project   string `json:"project,omitempty"`
-	ErrorCode string `json:"error_code,omitempty"`
-	reason    string
+	SessionID             string `json:"session_id,omitempty"`
+	Project               string `json:"project,omitempty"`
+	ProjectLookupComplete bool   `json:"project_lookup_complete,omitempty"`
+	ErrorCode             string `json:"error_code,omitempty"`
+	reason                string
 }
 
 func cmdCodexLifecycle(action string) {
@@ -277,7 +278,7 @@ func cmdCodexLifecycle(action string) {
 	}
 	result := runCodexLifecycle(action, data, codexHookURL())
 	if os.Getenv("ENGRAM_HOOK_OUTPUT") == "json" {
-		if result.SessionID != "" || result.ErrorCode != "" {
+		if result.SessionID != "" || result.Project != "" || result.ProjectLookupComplete || result.ErrorCode != "" {
 			_ = json.NewEncoder(os.Stdout).Encode(result)
 		}
 	} else if result.SessionID != "" {
@@ -300,6 +301,7 @@ func runCodexLifecycle(action string, data []byte, base string) codexLifecycleRe
 	result := runCodexLifecycleResult(ctx, action, data, base)
 	if !compaction || hookUsesClientProject() || strings.TrimSpace(os.Getenv("ENGRAM_SOCKET")) != "" {
 		result.Project = ""
+		result.ProjectLookupComplete = false
 	}
 	if compaction && result.SessionID == "" {
 		switch {
@@ -321,17 +323,15 @@ func runCodexLifecycleResult(ctx context.Context, action string, data []byte, ba
 	_, client := hookEndpointClient(base)
 	selection, ok := codexHookProject(ctx, client, base, in.SessionID, in.CWD)
 	if !ok {
-		return codexLifecycleResult{reason: failure}
+		// The adapter can skip a repeated presentation lookup after this attempt.
+		return codexLifecycleResult{reason: failure, ProjectLookupComplete: action == "codex-resolve"}
 	}
 	switch action {
 	case "codex-register":
 		return codexLifecycleResult{SessionID: codexRegisterAt(ctx, client, base, in.SessionID, in.CWD, selection)}
 	case "codex-resolve":
 		id, reason := codexRuntimeResult(ctx, client, base, in.SessionID, in.CWD, selection.name, "resolve")
-		if id == "" {
-			return codexLifecycleResult{reason: reason}
-		}
-		return codexLifecycleResult{SessionID: id, Project: selection.name}
+		return codexLifecycleResult{SessionID: id, Project: selection.name, reason: reason}
 	case "codex-session-end":
 		_ = codexRuntimeAt(ctx, client, base, in.SessionID, in.CWD, selection.name, "end")
 	}

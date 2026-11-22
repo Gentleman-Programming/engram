@@ -882,14 +882,13 @@ func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
 		t.Skip("executes native compaction and shell hook")
 	}
 	binary := buildCodexFixtureCLI(t)
-	for _, unregistered := range []bool{false, true} {
-		name := "confirmed"
-		if unregistered {
-			name = "unregistered"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, mode := range []string{"confirmed", "unregistered", "lookup rejected", "lookup deadline", "missing host"} {
+		t.Run(mode, func(t *testing.T) {
 			cwd := t.TempDir()
 			host := "host-quote\"\\ <opaque>\x00é\n"
+			if mode == "missing host" {
+				host = ""
+			}
 			const project = "authoritative + caja"
 			requests := make(chan string, 10)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -899,7 +898,14 @@ func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
 					if r.URL.Query().Get("cwd") != cwd {
 						t.Errorf("wrong project cwd: %q", r.URL.Query().Get("cwd"))
 					}
-					_ = json.NewEncoder(w).Encode(map[string]string{"project": project, "project_source": "config"})
+					switch mode {
+					case "lookup rejected":
+						_, _ = io.WriteString(w, `{"project":"untrusted-project","project_source":"ambiguous","error_hint":"fixture ambiguity"}`)
+					case "lookup deadline":
+						<-r.Context().Done()
+					default:
+						_ = json.NewEncoder(w).Encode(map[string]string{"project": project, "project_source": "config"})
+					}
 				case "/health":
 					_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
 				case "/runtime-sessions/resolve":
@@ -907,7 +913,7 @@ func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["project"] != project || body["id"] != host {
 						t.Errorf("wrong resolve request: %v, %v", body, err)
 					}
-					if unregistered {
+					if mode == "unregistered" {
 						w.WriteHeader(http.StatusNotFound)
 						_, _ = io.WriteString(w, `{"error":"sql: no rows in result set"}`)
 					} else {
@@ -937,21 +943,34 @@ func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
 			cmd.Stdin = bytes.NewReader(input)
 			var stdout, stderr strings.Builder
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			started := time.Now()
 			if err := cmd.Run(); err != nil || stderr.Len() != 0 {
 				t.Fatalf("compaction hook: %v, stderr=%q", err, stderr.String())
+			}
+			if mode == "lookup deadline" {
+				t.Logf("hook wall time with a held project response: %v", time.Since(started))
 			}
 			if _, err := os.Stat(filepath.Join(cwd, "guard-rejected")); !os.IsNotExist(err) {
 				t.Fatal("compaction attempted a forbidden executable or transport")
 			}
 			out := stdout.String()
-			if !strings.Contains(out, "retained-local-context") || strings.Contains(out, "untrusted") {
+			wantContext := mode != "lookup rejected" && mode != "lookup deadline"
+			if strings.Contains(out, "retained-local-context") != wantContext || strings.Contains(out, "untrusted") {
 				t.Fatalf("wrong local context handoff: %s", out)
 			}
-			want := "GET /project/current\nGET /health\nPOST /runtime-sessions/resolve\n"
-			if unregistered {
-				want += "GET /project/current\n"
-				if strings.Contains(out, "ACTIVE PROTOCOL") || !strings.Contains(out, "No registered runtime session was found after compaction.") {
-					t.Fatalf("unregistered compaction changed write policy: %s", out)
+			want := "GET /project/current\n"
+			if mode == "confirmed" || mode == "unregistered" {
+				want += "GET /health\nPOST /runtime-sessions/resolve\n"
+			}
+			if mode != "confirmed" {
+				if strings.Contains(out, "ACTIVE PROTOCOL") || !strings.Contains(out, "Registration was not confirmed after compaction.") {
+					t.Fatalf("unconfirmed compaction changed write policy: %s", out)
+				}
+				if mode == "unregistered" && !strings.Contains(out, "No registered runtime session was found after compaction.") {
+					t.Fatalf("unregistered compaction omitted its diagnostic: %s", out)
+				}
+				if mode == "lookup deadline" && !strings.Contains(out, "Runtime session confirmation timed out after compaction.") {
+					t.Errorf("timed out compaction omitted its diagnostic: %s", out)
 				}
 			} else {
 				if !strings.Contains(out, "ACTIVE PROTOCOL") || !strings.Contains(out, "Use project: '"+project+"'") {
@@ -972,7 +991,9 @@ func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
 					t.Fatal("missing registered identity envelope")
 				}
 			}
-			want += "GET /context\n"
+			if wantContext {
+				want += "GET /context\n"
+			}
 			var trace strings.Builder
 			for len(requests) != 0 {
 				trace.WriteString(<-requests + "\n")

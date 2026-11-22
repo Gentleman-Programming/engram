@@ -23,12 +23,11 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 if [ -z "$ENGRAM_EXTERNAL_URL" ] && [ -z "${ENGRAM_SOCKET:-}" ]; then
   RESOLUTION=$(printf '%s' "$INPUT" | ENGRAM_HOOK_CODEX_COMPACTION=1 engram_native_hook codex-resolve 2>/dev/null) || RESOLUTION=""
   PROJECT=$(printf '%s' "$RESOLUTION" | jq -ers '
-    if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
-      and (.[0] | (has("error") or has("error_code")) | not)
+    if length == 1 and .[0].project_lookup_complete != true
       and (.[0].project | type) == "string" and (.[0].project | test("\\S"))
     then .[0].project else error("missing confirmed project") end
   ' 2>/dev/null) || PROJECT=""
-  if [ -z "$PROJECT" ]; then
+  if [ -z "$PROJECT" ] && ! printf '%s' "$RESOLUTION" | jq -es 'length == 1 and .[0].project_lookup_complete == true' >/dev/null 2>&1; then
     PROJECT=$(resolve_project "$CWD") || { PROJECT=""; RESOLUTION=""; }
   fi
   SESSION_HANDOFF=$(ENGRAM_HOOK_CODEX_COMPACTION=1 engram_render_session_handoff "$RESOLUTION") && REGISTERED=1 || REGISTERED=0
