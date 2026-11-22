@@ -78,18 +78,18 @@ func testClaudeProfileCancellation(t *testing.T, withholdChild bool) {
 		output []byte
 		err    error
 	}
-	done := make(chan result, 1)
+	var finished result
+	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	probeReady := make(chan struct{})
 	permitOpen := make(chan struct{})
 	retriedAfterExit := make(chan struct{}, 1)
 	var permit sync.Once
 	allowCleanup := func() { permit.Do(func() { close(permitOpen) }) }
-	var child windows.Handle
+	var parent, child windows.Handle
 	var childPID uint32
+	original := openClaudeSetupProcess
 	if withholdChild {
-		original := openClaudeSetupProcess
-		t.Cleanup(func() { openClaudeSetupProcess = original })
 		openClaudeSetupProcess = func(access uint32, inherit bool, pid uint32) (windows.Handle, error) {
 			select {
 			case <-probeReady:
@@ -115,12 +115,12 @@ func testClaudeProfileCancellation(t *testing.T, withholdChild bool) {
 		defer close(done)
 		release, err := lockManagedClaude(root)
 		if err != nil {
-			done <- result{err: err}
+			finished.err = err
 			return
 		}
 		out, err := runClaudeJob(ctx, os.Args[0], "-test.run=^TestClaudeProfileJobWorker$", "--", "parent")
 		release()
-		done <- result{out, err}
+		finished = result{out, err}
 	}()
 	defer func() {
 		// Always wait for the fixture to exit before t.TempDir is removed.
@@ -128,15 +128,22 @@ func testClaudeProfileCancellation(t *testing.T, withholdChild bool) {
 		cancel()
 		select {
 		case <-done:
+			// The callback may observe child until the worker has returned.
+			if withholdChild {
+				openClaudeSetupProcess = original
+			}
+			for _, process := range []windows.Handle{parent, child} {
+				if process != 0 {
+					windows.CloseHandle(process)
+				}
+			}
 		case <-time.After(5 * time.Second):
-			t.Error("canceled fixture still running")
+			t.Error("canceled fixture still running; keeping its handles open")
 		}
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	child, childPID = openClaudeTestProcess(t, filepath.Join(profile, "child.pid"), deadline)
-	defer windows.CloseHandle(child)
-	parent, _ := openClaudeTestProcess(t, filepath.Join(profile, "parent.pid"), deadline)
-	defer windows.CloseHandle(parent)
+	parent, _ = openClaudeTestProcess(t, filepath.Join(profile, "parent.pid"), deadline)
 	close(probeReady)
 
 	release, err := lockManagedClaude(root)
@@ -160,9 +167,8 @@ func testClaudeProfileCancellation(t *testing.T, withholdChild bool) {
 		}
 		allowCleanup()
 	}
-	var finished result
 	select {
-	case finished = <-done:
+	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("Claude process did not finish after cancellation")
 	}

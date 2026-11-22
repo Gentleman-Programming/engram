@@ -2,6 +2,7 @@ package setup
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,7 +11,79 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestClaudeOrdinaryOwnershipProbeFallback(t *testing.T) {
+	const probe = "plugin marketplace list --json"
+	const add = "plugin marketplace add " + claudeCodeMarketplace
+	const install = "plugin install engram"
+	for _, tc := range []struct {
+		name        string
+		owned       bool
+		optIn       bool
+		probeErr    error
+		wantErr     error
+		wantBounded []string
+		wantLegacy  []string
+	}{
+		{"unregistered managed directory", false, false, errClaudeNestedJobUnavailable, nil,
+			[]string{probe, add, install}, []string{probe, add, install}},
+		{"owned managed source", true, false, errClaudeNestedJobUnavailable, errClaudeNestedJobUnavailable,
+			[]string{probe, install}, []string{probe}},
+		{"ordinary probe deadline", false, false, context.DeadlineExceeded, context.DeadlineExceeded,
+			[]string{probe}, nil},
+		{"explicit managed command", true, true, errClaudeNestedJobUnavailable, errClaudeNestedJobUnavailable,
+			[]string{probe}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			useTestHome(t)
+			t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+			root, err := managedClaudeRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			lookPathFn = func(string) (string, error) { return "claude.exe", nil }
+			writeClaudeCodeUserMCPFn = func(claudeSetupRunner) error { return nil }
+			var bounded, legacy []string
+			runClaudeProfileCommand = func(_ time.Duration, _ string, args ...string) ([]byte, error) {
+				invocation := strings.Join(args, " ")
+				bounded = append(bounded, invocation)
+				if invocation == probe {
+					return nil, tc.probeErr
+				}
+				return nil, errClaudeNestedJobUnavailable
+			}
+			runCommand = func(_ string, args ...string) ([]byte, error) {
+				invocation := strings.Join(args, " ")
+				legacy = append(legacy, invocation)
+				if invocation == probe {
+					if tc.owned {
+						return json.Marshal([]claudeMarketplace{{Name: "engram", Source: "directory", Path: root}})
+					}
+					return []byte("[]"), nil
+				}
+				return []byte("ok"), nil
+			}
+			if tc.optIn {
+				err = SetClaudeWindowsNativePrompt(false)
+			} else {
+				_, err = installClaudeCode()
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("setup error %v, want %v", err, tc.wantErr)
+			}
+			if !reflect.DeepEqual(bounded, tc.wantBounded) || !reflect.DeepEqual(legacy, tc.wantLegacy) {
+				t.Fatalf("bounded commands %v and legacy commands %v, want %v and %v",
+					bounded, legacy, tc.wantBounded, tc.wantLegacy)
+			}
+		})
+	}
+}
 
 func TestManagedClaudePromptBundlePreservesAssets(t *testing.T) {
 	files, err := loadClaudeBundle()

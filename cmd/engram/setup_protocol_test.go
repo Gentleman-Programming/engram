@@ -56,8 +56,9 @@ func TestCmdSetupNativePromptRejectsConflictingOptions(t *testing.T) {
 	cfg := testConfig(t)
 	oldSetter := setupSetClaudeWindowsNativePrompt
 	t.Cleanup(func() { setupSetClaudeWindowsNativePrompt = oldSetter })
+	calls := 0
 	setupSetClaudeWindowsNativePrompt = func(bool) error {
-		t.Fatal("invalid arguments reached the native prompt setter")
+		calls++
 		return nil
 	}
 	enable := "--native-windows-prompt=enable"
@@ -71,8 +72,12 @@ func TestCmdSetupNativePromptRejectsConflictingOptions(t *testing.T) {
 		{"claude-code", enable, "--allow-memory-writes"},
 		{"claude-code", enable, "--wrong"},
 	} {
+		calls = 0
 		withArgs(t, append([]string{"engram", "setup"}, args...)...)
 		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+		if calls != 0 {
+			t.Fatalf("args=%v: invalid arguments reached the native prompt setter %d times", args, calls)
+		}
 		if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "engram setup claude-code --native-windows-prompt=enable|disable") {
 			t.Fatalf("args=%v: expected validation error, panic=%v stderr=%q", args, recovered, stderr)
 		}
@@ -96,18 +101,15 @@ func TestCmdSetupNativePromptDispatch(t *testing.T) {
 		{name: "setter error", mode: "disable", err: errors.New("cannot select managed Bash")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			calls := 0
+			var calls []bool
 			setupSetClaudeWindowsNativePrompt = func(enable bool) error {
-				calls++
-				if enable != tc.enable {
-					t.Fatalf("setter received enable=%v, want %v", enable, tc.enable)
-				}
+				calls = append(calls, enable)
 				return tc.err
 			}
 			withArgs(t, "engram", "setup", "claude-code", "--native-windows-prompt="+tc.mode)
 			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
-			if calls != 1 {
-				t.Fatalf("native prompt setter calls = %d", calls)
+			if len(calls) != 1 || calls[0] != tc.enable {
+				t.Fatalf("native prompt setter calls = %v, want [%v]", calls, tc.enable)
 			}
 			if tc.err != nil {
 				if recovered != exitCode(1) || stdout != "" || !strings.Contains(stderr, tc.err.Error()) {

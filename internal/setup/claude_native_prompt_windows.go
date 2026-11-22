@@ -197,7 +197,15 @@ func protectManagedClaudeMarketplace(claude string) (bool, func(), error) {
 		release()
 		return false, nil, err
 	}
-	market, err := readManagedClaudeMarketplace(claude)
+	market, err := readManagedClaudeMarketplace(claude, func(name string, args ...string) ([]byte, error) {
+		out, err := runManagedClaudeInventoryCommand(name, args...)
+		if errors.Is(err, errClaudeNestedJobUnavailable) {
+			// Only this read-only ownership probe can use the legacy runner.
+			// Decide which mutation path to allow from the parsed response.
+			return runCommand(name, args...)
+		}
+		return out, err
+	})
 	if err != nil {
 		release()
 		return false, nil, err
@@ -205,9 +213,9 @@ func protectManagedClaudeMarketplace(claude string) (bool, func(), error) {
 	return market.owned(root), release, nil
 }
 
-func readManagedClaudeMarketplace(claude string) (claudeMarketplace, error) {
+func readManagedClaudeMarketplace(claude string, run claudeSetupRunner) (claudeMarketplace, error) {
 	var rows []claudeMarketplace
-	if err := readManagedClaudeJSON(claude, &rows, "marketplace", "list", "--json"); err != nil {
+	if err := readManagedClaudeJSON(run, claude, &rows, "marketplace", "list", "--json"); err != nil {
 		return claudeMarketplace{}, err
 	}
 	var market claudeMarketplace
@@ -225,12 +233,12 @@ func readManagedClaudeMarketplace(claude string) (claudeMarketplace, error) {
 
 func managedClaudeInventory(claude string) (claudeMarketplace, claudeInstalledPlugin, error) {
 	var installed claudeInstalledPlugin
-	market, err := readManagedClaudeMarketplace(claude)
+	market, err := readManagedClaudeMarketplace(claude, runManagedClaudeInventoryCommand)
 	if err != nil {
 		return market, installed, err
 	}
 	var rows []claudeInstalledPlugin
-	if err := readManagedClaudeJSON(claude, &rows, "list", "--json"); err != nil {
+	if err := readManagedClaudeJSON(runManagedClaudeInventoryCommand, claude, &rows, "list", "--json"); err != nil {
 		return market, installed, err
 	}
 	for _, row := range rows {
@@ -270,8 +278,12 @@ func managedClaudeCommand(claude string, args ...string) error {
 	return nil
 }
 
-func readManagedClaudeJSON(claude string, value any, args ...string) error {
-	out, err := runClaudeProfileCommand(claudeInventoryTimeout, claude, append([]string{"plugin"}, args...)...)
+func runManagedClaudeInventoryCommand(claude string, args ...string) ([]byte, error) {
+	return runClaudeProfileCommand(claudeInventoryTimeout, claude, args...)
+}
+
+func readManagedClaudeJSON(run claudeSetupRunner, claude string, value any, args ...string) error {
+	out, err := run(claude, append([]string{"plugin"}, args...)...)
 	if err != nil {
 		return fmt.Errorf("claude plugin %s: %w", strings.Join(args, " "), err)
 	}

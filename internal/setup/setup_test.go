@@ -1940,6 +1940,7 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 
 	t.Run("marketplace add hard failure", func(t *testing.T) {
 		resetSetupSeams(t)
+		useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
 		runCommand = func(string, ...string) ([]byte, error) {
 			return []byte("permission denied"), errors.New("exit 1")
@@ -1994,6 +1995,7 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 
 	t.Run("install hard failure", func(t *testing.T) {
 		resetSetupSeams(t)
+		useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
 		writeClaudeCodeUserMCPFn = func(claudeSetupRunner) error { return nil }
 		calls := 0
