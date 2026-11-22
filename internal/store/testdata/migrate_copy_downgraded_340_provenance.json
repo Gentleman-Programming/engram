@@ -1,0 +1,14 @@
+{
+  "baseline_commit": "c30298c122607050eac3cad1c586cfc9abbea38c",
+  "platform": "Windows amd64",
+  "released_sequence": ["v3.4.0", "v3.7.2", "v3.4.0"],
+  "official_windows_amd64_zip_sha256": {
+    "v3.4.0": "3065736ec7ff8137eb3fc607275f542ea13bb743a5157318c8a8770f11ce3289",
+    "v3.7.2": "515a716ce966202058d4b9f310626fde72583cfc64ccefbf0dcc81456260089c"
+  },
+  "raw_catalog_sha256": "21f4d581f6b8b1a1c4ce8646546143e0af261684769fb09368e4eca782752ade",
+  "normalized_full_catalog_sha256": "5b37d018b943bbcc238390f07e5c6ac96638a736da9d81f30f045664f9f9a2da",
+  "objects": {"table": 32, "index": 54, "trigger": 8},
+  "generation": "On a fresh disposable directory, v3.4.0 saved a synthetic observation, v3.7.2 opened the store with stats, then v3.4.0 opened it again with stats. The last open changed both FTS tokenizer definitions back to plain trigram. The observation ID, project and title survived. sqlite_schema was exported by object name with Kind, Table and SQL for all objects. The checked-in fixture uses sorted keys, UTF-8 and LF. No catalogue DDL was manually edited.",
+  "controls": "Official v3.7.2 admitted an untouched copy taken before the final open and rejected the final catalog. A fresh v3.7.2 synthetic store subsequently opened by v3.4.0 produced the same complete normalized digest. The normalized Go comparison against a fresh modern control showed only the observations_fts and prompts_fts definitions differed."
+}
