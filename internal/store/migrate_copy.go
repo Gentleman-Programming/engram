@@ -440,7 +440,8 @@ func copyValidateDB(db *sql.DB) error {
 	historicalDigest := fmt.Sprintf("%x", sha256.Sum256(encoded))
 	if historicalDigest == "1f217c73a6f4949a5e84e92a5e79c5096e3e18e1c4e8f97b0af9067d6d1abf95" ||
 		historicalDigest == "01b3bb3b2c114bd2ddf0ddb7ccdc40b664afb2ef4490de583739f414b3e07037" ||
-		historicalDigest == "a87cdab7fc92a46ba15f45cf985d09afc45e0f93e34fc39bf01bacd63803e811" {
+		historicalDigest == "a87cdab7fc92a46ba15f45cf985d09afc45e0f93e34fc39bf01bacd63803e811" ||
+		historicalDigest == "5b37d018b943bbcc238390f07e5c6ac96638a736da9d81f30f045664f9f9a2da" {
 		return nil
 	}
 	delete(current, "session_finalizations")
