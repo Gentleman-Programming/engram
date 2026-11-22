@@ -1810,7 +1810,12 @@ func (s *Store) migrate() error {
 	}...); err != nil {
 		return err
 	}
-	if _, err := s.execHook(s.db, `UPDATE sync_mutations SET disposition = 'pending' WHERE disposition IS NULL OR disposition = ''`); err != nil {
+	// Selecting keys inside the UPDATE lets SQLite scan the covering transport
+	// index, when present, and visit journal table rows only when repair is needed.
+	if _, err := s.execHook(s.db, `
+		UPDATE sync_mutations SET disposition = 'pending'
+		WHERE seq IN (SELECT seq FROM sync_mutations WHERE disposition IS NULL OR disposition = '')
+	`); err != nil {
 		return err
 	}
 	if err := s.addColumnsIfNotExists("sync_state",

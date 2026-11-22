@@ -54,7 +54,7 @@ CREATE TABLE sync_delete_tombstones (
 )`)
 				if route == "partial" {
 					exec(`ALTER TABLE sync_mutations ADD COLUMN project TEXT NOT NULL DEFAULT '';
-ALTER TABLE sync_mutations ADD COLUMN disposition TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE sync_mutations ADD COLUMN disposition TEXT DEFAULT 'pending';
 ALTER TABLE sync_mutations ADD COLUMN disposition_reason TEXT;
 ALTER TABLE sync_mutations ADD COLUMN disposition_evidence TEXT;
 ALTER TABLE sync_delete_tombstones ADD COLUMN superseded_by_sync_id TEXT`)
@@ -68,6 +68,9 @@ INSERT INTO sync_delete_tombstones(entity,entity_key,session_id,project,deleted_
  VALUES('observation','fixture','fixture-session','payload-project','2026-01-01',11)`)
 				if route == "partial" {
 					exec(`UPDATE sync_mutations SET project='kept-project',disposition='quarantined',disposition_reason='kept reason',disposition_evidence='kept evidence';
+INSERT INTO sync_mutations (seq, target_key, entity, entity_key, op, payload, project, disposition)
+ VALUES (7, 'cloud', 'observation', 'legacy-empty', 'delete', '{}', 'kept-project', ''),
+        (8, 'cloud', 'observation', 'legacy-null', 'delete', '{}', 'kept-project', NULL);
 UPDATE sync_delete_tombstones SET superseded_by_sync_id='kept-replacement'`)
 				}
 				if route == "fresh" {
@@ -192,6 +195,10 @@ INSERT INTO sync_delete_tombstones(entity,entity_key,deleted_at) VALUES('session
 			defaults := map[string]map[string]any{
 				"SELECT * FROM sync_mutations WHERE seq=10":                                                    {"project": "", "disposition": "pending", "disposition_reason": nil, "disposition_evidence": nil, "disposition_at": nil},
 				"SELECT * FROM sync_delete_tombstones WHERE entity='session' AND entity_key='default-fixture'": {"project": "", "superseded_by_sync_id": nil, "last_remote_mutation_seq": nil},
+			}
+			if route == "partial" {
+				defaults["SELECT * FROM sync_mutations WHERE seq=7"] = map[string]any{"entity_key": "legacy-empty", "project": "kept-project", "disposition": "pending"}
+				defaults["SELECT * FROM sync_mutations WHERE seq=8"] = map[string]any{"entity_key": "legacy-null", "project": "kept-project", "disposition": "pending"}
 			}
 			checkData := func(db *sql.DB) {
 				t.Helper()
