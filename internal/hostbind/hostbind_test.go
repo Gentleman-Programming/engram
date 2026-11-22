@@ -1,11 +1,15 @@
 package hostbind
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 func fakeProcesses(t *testing.T, starts map[int]string) {
@@ -120,5 +124,51 @@ func TestProcessStartIsStableForCurrentProcess(t *testing.T) {
 	}
 	if _, err := ProcessStart(1 << 30); !errors.Is(err, ErrNoProcess) {
 		t.Fatalf("missing pid err = %v; want ErrNoProcess (pid %s)", err, strconv.Itoa(1<<30))
+	}
+}
+
+func TestHostbindExitFixture(t *testing.T) {
+	if os.Getenv("ENGRAM_TEST_HOSTBIND_EXIT_FIXTURE") != "1" {
+		return
+	}
+	if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func startHostbindExitFixture(t *testing.T) (*exec.Cmd, io.WriteCloser) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHostbindExitFixture$")
+	cmd.Env = append(os.Environ(), "ENGRAM_TEST_HOSTBIND_EXIT_FIXTURE=1")
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = input.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = input.Close()
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	return cmd, input
+}
+
+func assertExitedHostBinding(t *testing.T, dir string, pid int) {
+	t.Helper()
+	if _, err := ProcessStart(pid); !errors.Is(err, ErrNoProcess) {
+		t.Errorf("exited process still verifies: %v", err)
+	}
+	if _, ok := Lookup(dir, pid); ok {
+		t.Error("exited process still resolves its previous session binding")
+	}
+	if err := Publish(dir, pid, "replacement"); !errors.Is(err, ErrNoProcess) {
+		t.Errorf("published a binding for an exited process: %v", err)
 	}
 }
