@@ -84,8 +84,13 @@ func cmdHook(args []string) {
 		cmdClaudeSessionContext()
 		return
 	}
+	if len(args) > 0 && args[0] == "claude-windows-user-prompt-submit" &&
+		(len(args) == 1 || (len(args) == 2 && args[1] == "--check")) {
+		cmdClaudeWindowsUserPromptSubmit(len(args) == 2)
+		return
+	}
 	if len(args) != 1 || (args[0] != "claude-pre-tool-use" && args[0] != "codex-pre-tool-use") {
-		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|claude-bind-session|claude-session-context|codex-pre-tool-use|codex-user-prompt-submit|resolve-hook-project")
+		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|claude-bind-session|claude-session-context|claude-windows-user-prompt-submit|codex-pre-tool-use|codex-user-prompt-submit|resolve-hook-project")
 		exitFunc(1)
 		return
 	}
