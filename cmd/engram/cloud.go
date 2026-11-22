@@ -64,7 +64,7 @@ func (p cloudDashboardStatusProvider) Status() dashboard.SyncStatus {
 }
 
 type cloudServerRuntime interface {
-	Start() error
+	Start(*cloudserver.StartupListener) error
 }
 
 type defaultCloudRuntime struct {
@@ -72,9 +72,9 @@ type defaultCloudRuntime struct {
 	store  *cloudstore.CloudStore
 }
 
-func (r *defaultCloudRuntime) Start() error {
+func (r *defaultCloudRuntime) Start(startup *cloudserver.StartupListener) error {
 	defer r.store.Close()
-	return r.server.Start()
+	return r.server.Start(startup)
 }
 
 var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
@@ -1019,15 +1019,25 @@ func cmdCloudServe() {
 		fatal(err)
 		return
 	}
-	runtime, err := newCloudRuntime(runtimeCfg)
+	if err := runCloudServe(runtimeCfg); err != nil {
+		fatal(err)
+	}
+}
+
+var listenCloudDuringStartup = cloudserver.ListenDuringStartup
+
+func runCloudServe(cfg cloud.Config) error {
+	startup, err := listenCloudDuringStartup(cfg.BindHost, cfg.Port)
 	if err != nil {
-		fatal(err)
-		return
+		return err
 	}
-	fmt.Printf("Starting Engram cloud server on port %d\n", runtimeCfg.Port)
-	if err := runtime.Start(); err != nil {
-		fatal(err)
+	defer startup.Close()
+	runtime, err := newCloudRuntime(cfg)
+	if err != nil {
+		return err
 	}
+	fmt.Printf("Starting Engram cloud server on port %d\n", cfg.Port)
+	return runtime.Start(startup)
 }
 
 func validateCloudServeAuthConfig() error {

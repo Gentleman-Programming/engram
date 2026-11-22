@@ -23,6 +23,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudserver"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
@@ -65,7 +66,7 @@ func (s stubManifestReader) ReadManifest(context.Context, string) (*engramsync.M
 	return &engramsync.Manifest{}, nil
 }
 
-func (s *stubCloudRuntimeServer) Start() error {
+func (s *stubCloudRuntimeServer) Start(*cloudserver.StartupListener) error {
 	s.started = true
 	return s.err
 }
@@ -2194,6 +2195,7 @@ func TestCloudDashboardDocsEnablementFlowIsExecutable(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_ADMIN", "token-abc")
 
 	var seen cloud.Config
+	stubCloudStartupPort(t)
 	runtimeStub := &stubCloudRuntimeServer{}
 	oldRuntime := newCloudRuntime
 	newCloudRuntime = func(c cloud.Config) (cloudServerRuntime, error) {
@@ -2477,6 +2479,7 @@ func TestCmdCloudServeStartsCloudRuntime(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "10485760")
 
 	var seen cloud.Config
+	stubCloudStartupPort(t)
 	runtimeStub := &stubCloudRuntimeServer{}
 	oldRuntime := newCloudRuntime
 	newCloudRuntime = func(c cloud.Config) (cloudServerRuntime, error) {
@@ -2513,6 +2516,12 @@ func TestCmdCloudServeRequiresAuthTokenByDefault(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_ALLOWED_PROJECTS", "proj-a")
 	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
 
+	originalListen := listenCloudDuringStartup
+	t.Cleanup(func() { listenCloudDuringStartup = originalListen })
+	listenCloudDuringStartup = func(string, int) (*cloudserver.StartupListener, error) {
+		t.Fatal("cloud serve attempted to listen with invalid auth configuration")
+		return nil, nil
+	}
 	withArgs(t, "engram", "cloud", "serve")
 	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
 	if _, ok := recovered.(exitCode); !ok {
@@ -2571,6 +2580,7 @@ func TestCmdCloudServeInsecureModeDoesNotRequireJWTServiceStartup(t *testing.T) 
 	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
 	t.Setenv("ENGRAM_JWT_SECRET", "short")
 
+	stubCloudStartupPort(t)
 	runtimeStub := &stubCloudRuntimeServer{}
 	oldRuntime := newCloudRuntime
 	newCloudRuntime = func(c cloud.Config) (cloudServerRuntime, error) {
