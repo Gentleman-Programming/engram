@@ -13,7 +13,7 @@ import (
 // variable (not a constant) so tests can shorten the timeout path.
 var migrationLockTimeout = 60 * time.Second
 
-// acquireMigrationLock takes an exclusive advisory lock on path and returns
+// acquireMigrationLockContext takes an exclusive advisory lock on path and returns
 // a function that releases it. It serializes whole processes around the
 // migration suite and the startup repair so that the destructive
 // check-then-act rebuilds inside migrate() can never run twice concurrently
@@ -26,13 +26,8 @@ var migrationLockTimeout = 60 * time.Second
 //
 // The lock file is deliberately left in place after unlock: unlinking it
 // would open a race where a third process re-creates the path and locks a
-// different inode/file object, defeating the exclusion.
-func acquireMigrationLock(path string) (func(), error) {
-	return acquireMigrationLockContext(context.Background(), path)
-}
-
-// acquireMigrationLockContext is synchronous: cancellation closes only this
-// waiter's descriptor, never the holder's lock or work in another goroutine.
+// different inode/file object, defeating the exclusion. Cancellation closes
+// only this waiter's descriptor.
 func acquireMigrationLockContext(ctx context.Context, path string) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

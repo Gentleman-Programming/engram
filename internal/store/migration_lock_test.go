@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -12,6 +13,10 @@ import (
 	"testing"
 	"time"
 )
+
+func acquireMigrationLock(path string) (func(), error) {
+	return acquireMigrationLockContext(context.Background(), path)
+}
 
 // Exercise the real CLI, not a test-only constructor seam. The test owns the
 // contended lock throughout EOF and shutdown; releasing it cannot mask failure.

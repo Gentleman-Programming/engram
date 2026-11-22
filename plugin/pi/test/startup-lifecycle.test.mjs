@@ -500,6 +500,12 @@ async function withFixture(options, run) {
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer(async (request, response) => {
       options.requests?.push({ method: request.method, url: request.url });
+      if (request.url === "/health" && options.nextHealth) {
+        const [status, body] = options.nextHealth();
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(body));
+        return;
+      }
       if (request.url === "/runtime-contract") { response.end(JSON.stringify(fixtureContract())); return; }
       if (request.url === "/sessions") {
         let body = "";
@@ -897,6 +903,52 @@ test("a persistently failing provider does not restart Engram on every tool call
     const spawns = await countSpawns(spawnLog);
     assert.ok(spawns >= 1, "the first call still attempts a real startup");
     assert.ok(spawns <= 2, `50 failing tool calls produced ${spawns} startup attempts, not a bounded retry`);
+  });
+});
+
+for (const foreign of [false, true]) {
+  test(`a starting local listener does not spawn before ownership is known (foreign=${foreign})`, async () => {
+    let probes = 0;
+    const requests = [];
+    await withFixture({
+      readyServer: true,
+      requests,
+      nextHealth: () => ++probes === 1
+        ? [503, { service: "engram", status: "starting" }]
+        : [200, { instance_id: (foreign ? "f" : "0").repeat(32), version: "3.7.2" }],
+    }, async ({ tools, ctx, spawnLog }) => {
+      const result = await tools.get("mem_search").execute("startup-wait", { query: "startup" }, undefined, undefined, ctx);
+      assert.doesNotMatch(await readFile(spawnLog, "utf8"), /invoke=\["(?:run|serve)"/);
+      assert.ok(probes > 1, "ready identity must be verified after the startup response");
+      if (foreign) {
+        assert.equal(result.isError, true);
+        assert.match(result.content[0].text, /ownership mismatch/);
+        assert.ok(requests.every(({ url }) => url === "/health"));
+      } else {
+        assert.notEqual(result.isError, true, JSON.stringify(result));
+        assert.ok(requests.some(({ url }) => url.startsWith("/search")));
+      }
+    });
+  });
+}
+
+test("a foreign listener appearing during daemon handoff prevents a legacy spawn", async () => {
+  let probes = 0;
+  const requests = [];
+  await withFixture({
+    readyServer: true,
+    requests,
+    nextHealth: () => ++probes === 1
+      ? [500, { error: "temporary failure" }]
+      : [200, { instance_id: "f".repeat(32), version: "3.7.2" }],
+  }, async ({ tools, ctx, spawnLog }) => {
+    const result = await tools.get("mem_search").execute("daemon-handoff", { query: "startup" }, undefined, undefined, ctx);
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /ownership mismatch/);
+    const invocations = await readFile(spawnLog, "utf8");
+    assert.match(invocations, /invoke=\["run","-d"\]/);
+    assert.doesNotMatch(invocations, /invoke=\["serve"/);
+    assert.ok(requests.every(({ url }) => url === "/health"));
   });
 });
 

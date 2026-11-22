@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -25,7 +26,7 @@ func copyQuotedChunks(t *testing.T, historical bool, space string, mutation func
 		t.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
-	if err = primeConnection(db); err != nil {
+	if err = primeConnection(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })

@@ -1094,6 +1094,12 @@ func NewWithContext(ctx context.Context, cfg Config) (*Store, error) {
 	return newStoreWithStartupContext(ctx, cfg, true)
 }
 
+// NewWithStartupContext allows cancellation of startup waits while preserving
+// the shared store's lock order. Migrations already in progress finish synchronously.
+func NewWithStartupContext(ctx context.Context, cfg Config) (*Store, error) {
+	return newStoreWithStartupContext(ctx, cfg, false)
+}
+
 // newWithoutRepair is retained as a test helper alias for New.
 func newWithoutRepair(cfg Config) (*Store, error) {
 	return newStore(cfg)
@@ -1128,7 +1134,7 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 		defer unlockMigration()
 		instanceID, err = ensureInstanceIDLocked(ctx, cfg.DataDir)
 	} else {
-		instanceID, err = EnsureInstanceID(cfg.DataDir)
+		instanceID, err = EnsureInstanceIDContext(ctx, cfg.DataDir)
 	}
 	if err != nil {
 		return nil, err
@@ -1160,7 +1166,7 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := primeConnection(db); err != nil {
+	if err := primeConnection(ctx, db); err != nil {
 		return nil, err
 	}
 
@@ -1168,11 +1174,7 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 		return nil, err
 	}
 	s := &Store{db: db, cfg: cfg, instanceID: instanceID, generation: generation, hooks: defaultStoreHooks()}
-	if ownedStartup {
-		err = s.runStartupMigrationsWithLock(true)
-	} else {
-		err = s.runStartupMigrations()
-	}
+	err = s.runStartupMigrations(ctx, ownedStartup)
 	if err != nil {
 		return nil, err
 	}
@@ -1235,8 +1237,7 @@ var walSwitchRetryBackoffs = []time.Duration{
 
 // primeConnection opens the first physical connection with a bounded retry
 // while concurrent cold starts race the rollback-journal-to-WAL conversion.
-func primeConnection(db *sql.DB) error {
-	ctx := context.Background()
+func primeConnection(ctx context.Context, db *sql.DB) error {
 	var conn *sql.Conn
 	var lastErr error
 	for attempt := 0; attempt <= len(walSwitchRetryBackoffs); attempt++ {
@@ -1247,7 +1248,13 @@ func primeConnection(db *sql.DB) error {
 		if !isRetryableSQLiteLockError(lastErr) || attempt == len(walSwitchRetryBackoffs) {
 			return fmt.Errorf("engram: open initial connection: %w", lastErr)
 		}
-		time.Sleep(walSwitchRetryBackoffs[attempt])
+		timer := time.NewTimer(walSwitchRetryBackoffs[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	defer conn.Close()
 
@@ -1270,15 +1277,11 @@ func primeConnection(db *sql.DB) error {
 const schemaVersion = 1
 
 var migrateRunCount atomic.Int64
-var acquireStartupMigrationLock = acquireMigrationLock
+var acquireStartupMigrationLock = acquireMigrationLockContext
 
 // runStartupMigrations serializes migrations and the every-open repair. It
 // never writes a database with a schema version newer than this binary.
-func (s *Store) runStartupMigrations() error {
-	return s.runStartupMigrationsWithLock(false)
-}
-
-func (s *Store) runStartupMigrationsWithLock(startupLockHeld bool) error {
+func (s *Store) runStartupMigrations(ctx context.Context, startupLockHeld bool) error {
 	return s.generation.withStartupChecks(func() error {
 		current, err := s.readUserVersion()
 		if err != nil {
@@ -1288,7 +1291,7 @@ func (s *Store) runStartupMigrationsWithLock(startupLockHeld bool) error {
 			return nil
 		}
 		if !startupLockHeld {
-			unlock, err := acquireStartupMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
+			unlock, err := acquireStartupMigrationLock(ctx, filepath.Join(s.cfg.DataDir, ".migrate.lock"))
 			if err != nil {
 				return fmt.Errorf("engram: acquire migration lock: %w", err)
 			}
@@ -1307,6 +1310,9 @@ func (s *Store) runStartupMigrationsWithLock(startupLockHeld bool) error {
 		}
 		if isFutureSchemaVersion(current) {
 			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
 		needsVersionStamp := current < schemaVersion

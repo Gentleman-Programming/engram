@@ -315,7 +315,7 @@ func TestStartupMigrationBatchAvoidsRedundantGenerationProbes(t *testing.T) {
 	}
 	t.Cleanup(func() { statFile = originalStatFile })
 
-	if err := s.runStartupMigrations(); err != nil {
+	if err := s.runStartupMigrations(context.Background(), false); err != nil {
 		t.Fatalf("runStartupMigrations: %v", err)
 	}
 	if want := 1000; probes >= want {
@@ -343,7 +343,7 @@ func TestStartupMigrationBatchAvoidsRedundantGenerationProbes(t *testing.T) {
 			}
 			return originalStatFile(path)
 		}
-		acquireStartupMigrationLock = func(string) (func(), error) {
+		acquireStartupMigrationLock = func(context.Context, string) (func(), error) {
 			changed = true
 			return func() {}, nil
 		}
@@ -352,11 +352,55 @@ func TestStartupMigrationBatchAvoidsRedundantGenerationProbes(t *testing.T) {
 			writes++
 			return originalExec(db, query, args...)
 		}
-		assertGenerationChanged(t, s.runStartupMigrations())
+		assertGenerationChanged(t, s.runStartupMigrations(context.Background(), false))
 		if writes != 0 {
 			t.Fatalf("startup writes after generation change = %d, want 0", writes)
 		}
 	})
+}
+
+func TestSharedStartupCancelsMigrationLockWait(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	unlock, err := acquireMigrationLock(filepath.Join(cfg.DataDir, ".migrate.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	waiting := make(chan struct{})
+	originalLock := acquireStartupMigrationLock
+	acquireStartupMigrationLock = func(ctx context.Context, path string) (func(), error) {
+		close(waiting)
+		return originalLock(ctx, path)
+	}
+	t.Cleanup(func() { acquireStartupMigrationLock = originalLock })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		s, err := NewWithStartupContext(ctx, cfg)
+		if s != nil {
+			_ = s.Close()
+		}
+		done <- err
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("startup did not reach the migration lock")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("startup error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup did not cancel the migration lock wait")
+	}
 }
 
 func TestNewerSchemaVersionIsLeftUntouched(t *testing.T) {
