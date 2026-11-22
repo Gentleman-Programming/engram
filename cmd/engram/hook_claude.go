@@ -563,14 +563,14 @@ func guardCodexPreToolUse(input []byte) []byte {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationBudget())
 	defer cancel()
-	effective, reason := runCodexLifecycleResult(ctx, "codex-resolve", input, codexHookURL())
-	if effective == "" {
+	resolved := runCodexLifecycleResult(ctx, "codex-resolve", input, codexHookURL())
+	if resolved.SessionID == "" {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return hookSessionConfirmationDeny("Codex", ctx.Err())
 		}
-		return claudePreToolUseDeny(reason)
+		return claudePreToolUseDeny(resolved.reason)
 	}
-	payload["session_id"], _ = json.Marshal(effective)
+	payload["session_id"], _ = json.Marshal(resolved.SessionID)
 	bound, _ := json.Marshal(payload)
 	return transformCodexPreToolUse(bound)
 }

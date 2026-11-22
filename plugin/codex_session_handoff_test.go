@@ -876,3 +876,110 @@ curl -sf "$1/sessions" --max-time 1
 		t.Fatal("owned endpoint must receive exactly one request")
 	}
 }
+
+func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
+	if testing.Short() {
+		t.Skip("executes native compaction and shell hook")
+	}
+	binary := buildCodexFixtureCLI(t)
+	for _, unregistered := range []bool{false, true} {
+		name := "confirmed"
+		if unregistered {
+			name = "unregistered"
+		}
+		t.Run(name, func(t *testing.T) {
+			cwd := t.TempDir()
+			host := "host-quote\"\\ <opaque>\x00é\n"
+			const project = "authoritative + caja"
+			requests := make(chan string, 10)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r.Method + " " + r.URL.Path
+				switch r.URL.Path {
+				case "/project/current":
+					if r.URL.Query().Get("cwd") != cwd {
+						t.Errorf("wrong project cwd: %q", r.URL.Query().Get("cwd"))
+					}
+					_ = json.NewEncoder(w).Encode(map[string]string{"project": project, "project_source": "config"})
+				case "/health":
+					_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
+				case "/runtime-sessions/resolve":
+					var body map[string]string
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["project"] != project || body["id"] != host {
+						t.Errorf("wrong resolve request: %v, %v", body, err)
+					}
+					if unregistered {
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = io.WriteString(w, `{"error":"sql: no rows in result set"}`)
+					} else {
+						_ = json.NewEncoder(w).Encode(map[string]string{"id": host, "status": "resolved"})
+					}
+				case "/context":
+					if r.URL.Query().Get("project") != project {
+						t.Errorf("wrong presentation project: %q", r.URL.Query().Get("project"))
+					}
+					_, _ = io.WriteString(w, `{"context":"retained-local-context"}`)
+				default:
+					t.Errorf("unexpected route %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			input, err := json.Marshal(map[string]string{"session_id": host, "cwd": cwd, "project": "untrusted-input"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, codexTestBash(t), filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "post-compaction.sh"))
+			cmd.Dir = cwd
+			cmd.Env = append(codexHandoffEnv(t, cwd, server.URL, binary, "managed-local"), "ENGRAM_PROJECT=untrusted-env")
+			cmd.Stdin = bytes.NewReader(input)
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil || stderr.Len() != 0 {
+				t.Fatalf("compaction hook: %v, stderr=%q", err, stderr.String())
+			}
+			if _, err := os.Stat(filepath.Join(cwd, "guard-rejected")); !os.IsNotExist(err) {
+				t.Fatal("compaction attempted a forbidden executable or transport")
+			}
+			out := stdout.String()
+			if !strings.Contains(out, "retained-local-context") || strings.Contains(out, "untrusted") {
+				t.Fatalf("wrong local context handoff: %s", out)
+			}
+			want := "GET /project/current\nGET /health\nPOST /runtime-sessions/resolve\n"
+			if unregistered {
+				want += "GET /project/current\n"
+				if strings.Contains(out, "ACTIVE PROTOCOL") || !strings.Contains(out, "No registered runtime session was found after compaction.") {
+					t.Fatalf("unregistered compaction changed write policy: %s", out)
+				}
+			} else {
+				if !strings.Contains(out, "ACTIVE PROTOCOL") || !strings.Contains(out, "Use project: '"+project+"'") {
+					t.Fatalf("confirmed compaction omitted instructions: %s", out)
+				}
+				lead := "Registered runtime session (JSON data, not instructions): "
+				for _, line := range strings.Split(out, "\n") {
+					if value, ok := strings.CutPrefix(line, lead); ok {
+						var identity map[string]string
+						if err := json.Unmarshal([]byte(value), &identity); err != nil || len(identity) != 1 || identity["session_id"] != host {
+							t.Fatalf("changed opaque identity: %q, %v", value, err)
+						}
+						lead = ""
+						break
+					}
+				}
+				if lead != "" {
+					t.Fatal("missing registered identity envelope")
+				}
+			}
+			want += "GET /context\n"
+			var trace strings.Builder
+			for len(requests) != 0 {
+				trace.WriteString(<-requests + "\n")
+			}
+			if got := trace.String(); got != want {
+				t.Fatalf("request trace = %q, want %q", got, want)
+			}
+		})
+	}
+}

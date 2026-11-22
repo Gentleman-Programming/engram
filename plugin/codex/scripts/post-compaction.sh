@@ -18,10 +18,24 @@ source "${SCRIPT_DIR}/_helpers.sh"
 # Read hook input from stdin
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-PROJECT=$(resolve_project "$CWD") || PROJECT=""
-
-# Register and retain only the server-confirmed runtime identity.
-SESSION_HANDOFF=$(ENGRAM_HOOK_CODEX_COMPACTION=1 engram_session_handoff "$INPUT" "$PROJECT" "$CWD" codex-resolve) && REGISTERED=1 || REGISTERED=0
+# The implicit local TCP resolver already asks the server for the cwd project.
+# Explicit URLs and sockets retain their existing presentation lookup.
+if [ -z "$ENGRAM_EXTERNAL_URL" ] && [ -z "${ENGRAM_SOCKET:-}" ]; then
+  RESOLUTION=$(printf '%s' "$INPUT" | ENGRAM_HOOK_CODEX_COMPACTION=1 engram_native_hook codex-resolve 2>/dev/null) || RESOLUTION=""
+  PROJECT=$(printf '%s' "$RESOLUTION" | jq -ers '
+    if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
+      and (.[0] | (has("error") or has("error_code")) | not)
+      and (.[0].project | type) == "string" and (.[0].project | test("\\S"))
+    then .[0].project else error("missing confirmed project") end
+  ' 2>/dev/null) || PROJECT=""
+  if [ -z "$PROJECT" ]; then
+    PROJECT=$(resolve_project "$CWD") || { PROJECT=""; RESOLUTION=""; }
+  fi
+  SESSION_HANDOFF=$(ENGRAM_HOOK_CODEX_COMPACTION=1 engram_render_session_handoff "$RESOLUTION") && REGISTERED=1 || REGISTERED=0
+else
+  PROJECT=$(resolve_project "$CWD") || PROJECT=""
+  SESSION_HANDOFF=$(ENGRAM_HOOK_CODEX_COMPACTION=1 engram_session_handoff "$INPUT" "$PROJECT" "$CWD" codex-resolve) && REGISTERED=1 || REGISTERED=0
+fi
 
 # Fetch context from previous sessions
 CONTEXT=""

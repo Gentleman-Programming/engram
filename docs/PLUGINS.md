@@ -47,6 +47,9 @@ the ten-second host hook. Prompt submission keeps its short budget. If the core
 reports a resolution timeout or missing registration, the hook explains that
 failure while retaining prior context and withholding agent-attributed writes
 until the session can be confirmed.
+On implicit local TCP, a successful native resolution supplies the project for
+the compaction instructions and context. An older CLI result or an unconfirmed
+resolution still uses the usual project lookup to fetch context.
 
 ### Codex Bash passive capture
 

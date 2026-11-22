@@ -52,6 +52,10 @@ func TestCodexShellNativeURLIntent(t *testing.T) {
 					t.Fatal("unexpected ownership preflight or HTTP command count")
 				}
 				trace := "curl /project/current\nhook " + action + "\ncurl /context\n"
+				// The fixture CLI predates the optional compaction project field.
+				if script == "post-compaction.sh" && want == "" {
+					trace = "hook " + action + "\ncurl /project/current\ncurl /context\n"
+				}
 				if healthCalls != 0 {
 					trace = "instance-id\ncurl /health\ncurl /health\n" + trace
 				}
