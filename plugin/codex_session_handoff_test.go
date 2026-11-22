@@ -707,7 +707,10 @@ if [ "${FIXTURE_LOCAL:-}" = 1 ] && [ "$#" = 2 ] && [ "$1" = protocol-mode ] && [
   [ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$ENGRAM_URL" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
   exec `+quote(posix[binary[0]])+` "$@"
 fi
-[ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$#" -eq 2 ] && [ "$1" = hook ] && [ "${ENGRAM_URL:-http://127.0.0.1:$ENGRAM_PORT}" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
+[ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$1" = hook ] && [ "${ENGRAM_URL:-http://127.0.0.1:$ENGRAM_PORT}" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
+if [ "$#" -ne 2 ]; then
+  [ "$#" -eq 3 ] && [ "$2" = codex-resolve ] && [ "$3" = --local-compaction ] && [ "${FIXTURE_LOCAL:-}" = 1 ] || { `+reject+`; }
+fi
 case "$2" in
   codex-register|codex-resolve) [ "$ENGRAM_HOOK_OUTPUT" = json ] || { `+reject+`; } ;;
   codex-session-end) ;;
@@ -882,7 +885,7 @@ func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
 		t.Skip("executes native compaction and shell hook")
 	}
 	binary := buildCodexFixtureCLI(t)
-	for _, mode := range []string{"confirmed", "unregistered", "lookup rejected", "lookup deadline", "missing host"} {
+	for _, mode := range []string{"confirmed", "unregistered", "lookup rejected", "lookup deadline", "redirected lookup", "missing host"} {
 		t.Run(mode, func(t *testing.T) {
 			cwd := t.TempDir()
 			host := "host-quote\"\\ <opaque>\x00é\n"
@@ -891,6 +894,16 @@ func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
 			}
 			const project = "authoritative + caja"
 			requests := make(chan string, 10)
+			redirects := make(chan struct{}, 4)
+			var redirectURL string
+			if mode == "redirected lookup" {
+				destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					redirects <- struct{}{}
+					_, _ = io.WriteString(w, `{"project":"untrusted-redirect","project_source":"config"}`)
+				}))
+				defer destination.Close()
+				redirectURL = destination.URL
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests <- r.Method + " " + r.URL.Path
 				switch r.URL.Path {
@@ -903,6 +916,9 @@ func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
 						_, _ = io.WriteString(w, `{"project":"untrusted-project","project_source":"ambiguous","error_hint":"fixture ambiguity"}`)
 					case "lookup deadline":
 						<-r.Context().Done()
+					case "redirected lookup":
+						w.Header().Set("Location", redirectURL+"/project/current")
+						w.WriteHeader(http.StatusFound)
 					default:
 						_ = json.NewEncoder(w).Encode(map[string]string{"project": project, "project_source": "config"})
 					}
@@ -954,7 +970,10 @@ func TestCodexLocalCompactionReusesConfirmedProject(t *testing.T) {
 				t.Fatal("compaction attempted a forbidden executable or transport")
 			}
 			out := stdout.String()
-			wantContext := mode != "lookup rejected" && mode != "lookup deadline"
+			if len(redirects) != 0 {
+				t.Fatal("native lookup reached the redirected authority")
+			}
+			wantContext := mode != "lookup rejected" && mode != "lookup deadline" && mode != "redirected lookup"
 			if strings.Contains(out, "retained-local-context") != wantContext || strings.Contains(out, "untrusted") {
 				t.Fatalf("wrong local context handoff: %s", out)
 			}

@@ -18,22 +18,36 @@ source "${SCRIPT_DIR}/_helpers.sh"
 # Read hook input from stdin
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-# The implicit local TCP resolver already asks the server for the cwd project.
-# Explicit URLs and sockets retain their existing presentation lookup.
+# Negotiate local compaction with the same process that resolves the session.
+# An older CLI rejects the option with usage before contacting the daemon.
+LEGACY=1
+NATIVE_COMPLETED=0
 if [ -z "$ENGRAM_EXTERNAL_URL" ] && [ -z "${ENGRAM_SOCKET:-}" ]; then
-  RESOLUTION=$(printf '%s' "$INPUT" | ENGRAM_HOOK_CODEX_COMPACTION=1 engram_native_hook codex-resolve 2>/dev/null) || RESOLUTION=""
-  PROJECT=$(printf '%s' "$RESOLUTION" | jq -ers '
-    if length == 1 and .[0].project_lookup_complete != true
-      and (.[0].project | type) == "string" and (.[0].project | test("\\S"))
-    then .[0].project else error("missing confirmed project") end
-  ' 2>/dev/null) || PROJECT=""
-  if [ -z "$PROJECT" ] && ! printf '%s' "$RESOLUTION" | jq -es 'length == 1 and .[0].project_lookup_complete == true' >/dev/null 2>&1; then
-    PROJECT=$(resolve_project "$CWD") || { PROJECT=""; RESOLUTION=""; }
+  if RESOLUTION=$(printf '%s' "$INPUT" | engram_native_hook codex-resolve --local-compaction 2>&1); then
+    LEGACY=0
+    NATIVE_COMPLETED=1
+  elif [ "$?" -ne 1 ] || [[ "$RESOLUTION" != 'usage: engram hook '* || "$RESOLUTION" == *$'\n'* ]]; then
+    LEGACY=0
+    RESOLUTION=""
   fi
-  SESSION_HANDOFF=$(ENGRAM_HOOK_CODEX_COMPACTION=1 engram_render_session_handoff "$RESOLUTION") && REGISTERED=1 || REGISTERED=0
-else
+fi
+
+if [ "$LEGACY" -eq 1 ]; then
   PROJECT=$(resolve_project "$CWD") || PROJECT=""
   SESSION_HANDOFF=$(ENGRAM_HOOK_CODEX_COMPACTION=1 engram_session_handoff "$INPUT" "$PROJECT" "$CWD" codex-resolve) && REGISTERED=1 || REGISTERED=0
+else
+  PROJECT=""
+  if [ "$NATIVE_COMPLETED" -eq 1 ]; then
+    PROJECT=$(printf '%s' "$RESOLUTION" | jq -ers '
+      if length == 1 and .[0].project_lookup_complete != true
+        and (.[0].project | type) == "string" and (.[0].project | test("\\S"))
+      then .[0].project else error("missing confirmed project") end
+    ' 2>/dev/null) || PROJECT=""
+    if [ -z "$PROJECT" ] && ! printf '%s' "$RESOLUTION" | jq -es 'length == 1 and .[0].project_lookup_complete == true' >/dev/null 2>&1; then
+      PROJECT=$(resolve_project "$CWD") || { PROJECT=""; RESOLUTION=""; }
+    fi
+  fi
+  SESSION_HANDOFF=$(ENGRAM_HOOK_CODEX_COMPACTION=1 engram_render_session_handoff "$RESOLUTION") && REGISTERED=1 || REGISTERED=0
 fi
 
 # Fetch context from previous sessions

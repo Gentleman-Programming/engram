@@ -54,7 +54,7 @@ func TestCodexShellNativeURLIntent(t *testing.T) {
 				trace := "curl /project/current\nhook " + action + "\ncurl /context\n"
 				// The fixture CLI predates the optional compaction project field.
 				if script == "post-compaction.sh" && want == "" {
-					trace = "hook " + action + "\ncurl /project/current\ncurl /context\n"
+					trace = "unsupported local compaction\n" + trace
 				}
 				if healthCalls != 0 {
 					trace = "instance-id\ncurl /health\ncurl /health\n" + trace
@@ -64,6 +64,21 @@ func TestCodexShellNativeURLIntent(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCodexShellLocalCompactionUnexpectedFailureDoesNotRetry(t *testing.T) {
+	f := newCodexIntentFixture(t)
+	if err := os.WriteFile(filepath.Join(f.root, "unexpected-native-failure"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := f.run(t, "hook", "post-compaction.sh", "unset")
+	calls, err := os.ReadFile(filepath.Join(f.root, "calls"))
+	if err != nil || string(calls) != "failed local compaction\n" {
+		t.Fatalf("unexpected native failure retried: %q, %v", calls, err)
+	}
+	if strings.Contains(out, "ACTIVE PROTOCOL") || !strings.Contains(out, "Registration was not confirmed after compaction.") {
+		t.Fatalf("unexpected failure activated the write protocol: %q", out)
 	}
 }
 
@@ -269,6 +284,16 @@ printf '#!%s -p\n%s\n' "$bash_alias" '
 reject() { printf "engram\n" >> "$INTENT_REJECTED"; exit 97; }
 case "$*" in
  instance-id) [ "$#" = 1 ] || reject; printf "instance-id\n" >> "$INTENT_CALLS"; printf "fixture-instance\n" ;;
+ "hook codex-resolve --local-compaction")
+  [ "$#" = 3 ] && [ "${ENGRAM_HOOK_OUTPUT:-}" = json ] && [ -z "${ENGRAM_URL:-}" ] || reject
+  if [ -f "${INTENT_CALLS%/*}/unexpected-native-failure" ]; then
+    printf "failed local compaction\n" >> "$INTENT_CALLS"
+    printf "unexpected core failure\n" >&2
+    exit 1
+  fi
+  printf "unsupported local compaction\n" >> "$INTENT_CALLS"
+  printf "usage: engram hook codex-pre-tool-use|codex-user-prompt-submit\n" >&2
+  exit 1 ;;
  "hook codex-register"|"hook codex-resolve")
   [ "$#" = 2 ] && [ "${ENGRAM_HOOK_OUTPUT:-}" = json ] || reject
   jq -es --arg cwd "$INTENT_RAW_CWD" '\''length == 1 and (.[0] | type == "object" and .session_id == "intent-host" and .cwd == $cwd and keys == ["cwd","session_id"])'\'' >/dev/null || reject

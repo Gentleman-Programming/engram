@@ -271,12 +271,12 @@ type codexLifecycleResult struct {
 	reason                string
 }
 
-func cmdCodexLifecycle(action string) {
+func cmdCodexLifecycle(action string, localCompaction bool) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return
 	}
-	result := runCodexLifecycle(action, data, codexHookURL())
+	result := runCodexLifecycle(action, data, codexHookURL(), localCompaction)
 	if os.Getenv("ENGRAM_HOOK_OUTPUT") == "json" {
 		if result.SessionID != "" || result.Project != "" || result.ProjectLookupComplete || result.ErrorCode != "" {
 			_ = json.NewEncoder(os.Stdout).Encode(result)
@@ -287,10 +287,10 @@ func cmdCodexLifecycle(action string) {
 }
 
 // Runtime identity belongs to the core, not a second platform-specific cache.
-func runCodexLifecycle(action string, data []byte, base string) codexLifecycleResult {
+func runCodexLifecycle(action string, data []byte, base string, localCompaction bool) codexLifecycleResult {
 	// A process-scoped flag from the adapter allows older cores to continue
 	// handling codex-resolve with their existing budget.
-	compaction := action == "codex-resolve" && os.Getenv("ENGRAM_HOOK_CODEX_COMPACTION") == "1"
+	compaction := action == "codex-resolve" && (localCompaction || os.Getenv("ENGRAM_HOOK_CODEX_COMPACTION") == "1")
 	budget := codexUserPromptDeadline
 	if compaction {
 		budget = codexCompactionResolveDeadline
@@ -298,8 +298,8 @@ func runCodexLifecycle(action string, data []byte, base string) codexLifecycleRe
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	result := runCodexLifecycleResult(ctx, action, data, base)
-	if !compaction || hookUsesClientProject() || strings.TrimSpace(os.Getenv("ENGRAM_SOCKET")) != "" {
+	result := runCodexLifecycleResult(ctx, action, data, base, localCompaction)
+	if !localCompaction {
 		result.Project = ""
 		result.ProjectLookupComplete = false
 	}
@@ -314,17 +314,25 @@ func runCodexLifecycle(action string, data []byte, base string) codexLifecycleRe
 	return result
 }
 
-func runCodexLifecycleResult(ctx context.Context, action string, data []byte, base string) codexLifecycleResult {
+func runCodexLifecycleResult(ctx context.Context, action string, data []byte, base string, localCompaction bool) codexLifecycleResult {
 	const failure = "Codex host session resolution could not be confirmed"
 	var in codexPromptInput
 	if json.Unmarshal(data, &in) != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.CWD) == "" || base == "" {
 		return codexLifecycleResult{reason: failure}
 	}
 	_, client := hookEndpointClient(base)
-	selection, ok := codexHookProject(ctx, client, base, in.SessionID, in.CWD)
+	projectClient := client
+	if localCompaction {
+		// The old adapter required a project response from the configured origin.
+		// A redirect must not select the authority on this standalone path.
+		direct := *client
+		direct.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		projectClient = &direct
+	}
+	selection, ok := codexHookProject(ctx, projectClient, base, in.SessionID, in.CWD)
 	if !ok {
 		// The adapter can skip a repeated presentation lookup after this attempt.
-		return codexLifecycleResult{reason: failure, ProjectLookupComplete: action == "codex-resolve"}
+		return codexLifecycleResult{reason: failure, ProjectLookupComplete: localCompaction}
 	}
 	switch action {
 	case "codex-register":
