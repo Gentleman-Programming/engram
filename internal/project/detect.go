@@ -521,6 +521,11 @@ func canonicalizePath(path string) string {
 // their individual checkout roots while their project identity may remain
 // shared with the primary checkout.
 func RuntimeWorktreeDirectory(dir string) string {
+	return RuntimeWorktreeDirectoryContext(context.Background(), dir)
+}
+
+// RuntimeWorktreeDirectoryContext lets callers cancel Git checkout detection.
+func RuntimeWorktreeDirectoryContext(ctx context.Context, dir string) string {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		dir = "."
@@ -528,7 +533,7 @@ func RuntimeWorktreeDirectory(dir string) string {
 	if absolute, err := filepath.Abs(dir); err == nil {
 		dir = absolute
 	}
-	if worktreeRoot := detectGitWorktreeDir(dir); worktreeRoot != "" {
+	if worktreeRoot := detectGitWorktreeDirContext(ctx, dir); worktreeRoot != "" {
 		return runtimeCanonicalizePath(worktreeRoot)
 	}
 	return runtimeCanonicalizePath(dir)
@@ -625,12 +630,8 @@ func repositoryRootFromCommonDir(commonDir string) string {
 	return strings.TrimSuffix(commonDir, ".git")
 }
 
-// detectGitWorktreeDir returns the current checkout root for dir. Config files
+// detectGitWorktreeDirContext returns the current checkout root for dir. Config files
 // are scoped to that checkout rather than the shared repository identity root.
-func detectGitWorktreeDir(dir string) string {
-	return detectGitWorktreeDirContext(context.Background(), dir)
-}
-
 func detectGitWorktreeDirContext(parent context.Context, dir string) string {
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()

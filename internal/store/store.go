@@ -3637,9 +3637,9 @@ const continuationSessionsQuery = `SELECT id, ended_at FROM sessions WHERE id >=
 // continuationSessionTx selects the lowest numeric live continuation, or the
 // next ordinal after all numeric suffixes. Literal prefix comparison avoids SQL
 // wildcard interpretation. Arbitrary precision ordinals impose no restart cap.
-func continuationSessionTx(tx *sql.Tx, root string) (string, error) {
+func continuationSessionTx(ctx context.Context, tx *sql.Tx, root string) (string, error) {
 	var endedAt *string
-	err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, root).Scan(&endedAt)
+	err := tx.QueryRowContext(ctx, `SELECT ended_at FROM sessions WHERE id = ?`, root).Scan(&endedAt)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && endedAt == nil) {
 		return root, nil
 	}
@@ -3647,7 +3647,7 @@ func continuationSessionTx(tx *sql.Tx, root string) (string, error) {
 		return "", err
 	}
 	prefix := root + ":resume:"
-	rows, err := tx.Query(continuationSessionsQuery, prefix+"0", prefix+":")
+	rows, err := tx.QueryContext(ctx, continuationSessionsQuery, prefix+"0", prefix+":")
 	if err != nil {
 		return "", err
 	}
@@ -3776,7 +3776,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 					}
 				}
 			}
-			id, err = continuationSessionTx(tx, root)
+			id, err = continuationSessionTx(context.Background(), tx, root)
 			if err != nil {
 				return err
 			}
@@ -3900,7 +3900,7 @@ var ErrRuntimeSessionScopeConflict = errors.New("runtime session scope conflict"
 // ErrRuntimeSessionEffectiveIDMismatch means the live session differs from the caller's expectation.
 var ErrRuntimeSessionEffectiveIDMismatch = errors.New("runtime session effective ID mismatch")
 
-func runtimeSessionTx(tx *sql.Tx, root, project, directory, mode string) (string, error) {
+func runtimeSessionTx(ctx context.Context, tx *sql.Tx, root, project, directory, mode string) (string, error) {
 	if err := validateSessionID(root); err != nil {
 		return "", err
 	}
@@ -3914,12 +3914,19 @@ func runtimeSessionTx(tx *sql.Tx, root, project, directory, mode string) (string
 	validate := func(id string, live bool) error {
 		var owner, ownership, scope string
 		var ended *string
-		if err := tx.QueryRow(`SELECT ifnull(project, ''), ifnull(ownership_mode, ''), ifnull(directory, ''), ended_at FROM sessions WHERE id = ?`, id).Scan(&owner, &ownership, &scope, &ended); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT ifnull(project, ''), ifnull(ownership_mode, ''), ifnull(directory, ''), ended_at FROM sessions WHERE id = ?`, id).Scan(&owner, &ownership, &scope, &ended); err != nil {
 			return err
 		}
 		owner, _ = NormalizeProject(strings.TrimSpace(owner))
 		ownership = strings.TrimSpace(ownership)
-		if sessionRegistrationProjectError(id, owner, ownership, project, mode) != nil || ownership != mode || strings.TrimSpace(directory) == "" || strings.TrimSpace(scope) == "" || projectpkg.RuntimeWorktreeDirectory(scope) != projectpkg.RuntimeWorktreeDirectory(directory) {
+		if sessionRegistrationProjectError(id, owner, ownership, project, mode) != nil || ownership != mode || strings.TrimSpace(directory) == "" || strings.TrimSpace(scope) == "" {
+			return ErrRuntimeSessionScopeConflict
+		}
+		scopeMatches := projectpkg.RuntimeWorktreeDirectoryContext(ctx, scope) == projectpkg.RuntimeWorktreeDirectoryContext(ctx, directory)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !scopeMatches {
 			return ErrRuntimeSessionScopeConflict
 		}
 		if live && ended != nil {
@@ -3930,7 +3937,7 @@ func runtimeSessionTx(tx *sql.Tx, root, project, directory, mode string) (string
 	if err := validate(root, false); err != nil {
 		return "", err
 	}
-	id, err := continuationSessionTx(tx, root)
+	id, err := continuationSessionTx(ctx, tx, root)
 	if err != nil {
 		return "", err
 	}
@@ -3946,9 +3953,24 @@ func (s *Store) ResolveRuntimeSessionWithOwnershipMode(root, project, directory,
 	var id string
 	err := s.withTx(func(tx *sql.Tx) error {
 		var err error
-		id, err = runtimeSessionTx(tx, root, project, directory, mode)
+		id, err = runtimeSessionTx(context.Background(), tx, root, project, directory, mode)
 		return err
 	})
+	return id, err
+}
+
+// ResolveRuntimeSessionWithOwnershipModeContext reads one cancellable snapshot
+// of the root and its effective identity without reserving the WAL writer.
+func (s *Store) ResolveRuntimeSessionWithOwnershipModeContext(ctx context.Context, root, project, directory, mode string) (string, error) {
+	var id string
+	err := s.withReadTxContext(ctx, func(tx *sql.Tx) error {
+		var err error
+		id, err = runtimeSessionTx(ctx, tx, root, project, directory, mode)
+		return err
+	})
+	if cancellation := ctx.Err(); cancellation != nil {
+		return "", cancellation
+	}
 	return id, err
 }
 
@@ -3969,7 +3991,7 @@ func (s *Store) EndRuntimeSessionIfCurrent(root, project, directory, mode, summa
 func (s *Store) endRuntimeSession(root, project, directory, mode, summary, expectedID string) (string, error) {
 	var id string
 	err := s.withTx(func(tx *sql.Tx) error {
-		currentID, err := runtimeSessionTx(tx, root, project, directory, mode)
+		currentID, err := runtimeSessionTx(context.Background(), tx, root, project, directory, mode)
 		if err != nil {
 			return err
 		}
@@ -10523,13 +10545,17 @@ func (s *Store) withWriteTimings(timings *WriteTimings, fn func(tx *sql.Tx) erro
 // modernc.org/sqlite v1.45.0 maps ReadOnly to deferred BEGIN, overriding
 // storeDSN's _txlock=immediate. Read-only planners therefore do not reserve a
 // writer lock; writable paths continue to use withTx.
-func (s *Store) withReadTx(fn func(tx *sql.Tx) error) (err error) {
-	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+func (s *Store) withReadTx(fn func(tx *sql.Tx) error) error {
+	return s.withReadTxContext(context.Background(), fn)
+}
+
+func (s *Store) withReadTxContext(ctx context.Context, fn func(tx *sql.Tx) error) (err error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !(errors.Is(rollbackErr, sql.ErrTxDone) && ctx.Err() != nil) {
 			if err != nil {
 				err = errors.Join(err, rollbackErr)
 			} else {
