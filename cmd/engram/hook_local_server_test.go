@@ -26,14 +26,24 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 		name, platform                                  string
 		ended, launchFailure, retryFailure, expireRetry bool
 		initialFailure                                  bool
+		starting, foreignReady                          bool
+		startingBody                                    string
+		wantSuccess                                     bool
 	}{
-		{name: "live session"},
+		{name: "live session", wantSuccess: true},
 		{name: "ended session", ended: true},
 		{name: "recovery failure", launchFailure: true},
 		{name: "retry lookup failure", retryFailure: true},
 		{name: "context expiry after recovery", expireRetry: true},
 		{name: "initial HTTP failure never launches", initialFailure: true},
 		{name: "non-Windows never launches", platform: "linux"},
+		{name: "launched server starts before ready", starting: true, wantSuccess: true},
+		{name: "existing server starts before ready", initialFailure: true, starting: true, wantSuccess: true},
+		{name: "started server announces other owner", initialFailure: true, starting: true, foreignReady: true},
+		{name: "non-Windows does not wait for an existing server", platform: "linux", initialFailure: true, starting: true},
+		{name: "foreign startup response is denied", initialFailure: true, starting: true, startingBody: `{"status":"starting","service":"other"}`},
+		{name: "malformed startup response is denied", initialFailure: true, starting: true, startingBody: `{"status":"starting","service":"engram"}junk`},
+		{name: "startup response cannot assert identity", initialFailure: true, starting: true, startingBody: `{"status":"starting","service":"engram","instance_id":"foreign"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			platform := tc.platform
@@ -60,11 +70,23 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.URL.Path == "/health":
-					health.Add(1)
-					_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "engram", "instance_id": expected})
+					if health.Add(1) == 1 && tc.starting {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						body := tc.startingBody
+						if body == "" {
+							body = `{"status":"starting","service":"engram"}`
+						}
+						_, _ = io.WriteString(w, body)
+						return
+					}
+					instance := expected
+					if tc.foreignReady {
+						instance = "foreign-instance"
+					}
+					_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "engram", "instance_id": instance})
 				case r.URL.Path == "/sessions/host":
 					owners.Add(1)
-					if tc.initialFailure || tc.retryFailure {
+					if (tc.initialFailure && !tc.starting) || tc.retryFailure {
 						w.WriteHeader(http.StatusInternalServerError)
 						return
 					}
@@ -117,7 +139,7 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 				}
 			}
 			effective, err := confirmHookSessionForPlatform("host", "untrusted-cwd", true, platform)
-			wantSuccess := tc.name == "live session"
+			wantSuccess := tc.wantSuccess
 			if (err == nil) != wantSuccess || (wantSuccess && effective != "host") || (!wantSuccess && effective != "") {
 				t.Fatalf("confirmation: effective=%q error=%v want success=%v", effective, err, wantSuccess)
 			}
@@ -136,6 +158,15 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 			}
 			if platform != "windows" {
 				wantOwners = 0
+			}
+			if tc.starting {
+				wantOwners = 0
+				if platform == "windows" && tc.startingBody == "" {
+					wantHealth = 2
+					if !tc.foreignReady {
+						wantOwners = 1
+					}
+				}
 			}
 			if wantSuccess {
 				wantRegistrations = 1
@@ -238,15 +269,17 @@ func (b *hookHealthTestBody) Close() error {
 	return nil
 }
 
-func TestHookLocalReadinessTransient500(t *testing.T) {
+func TestHookLocalReadinessRetriesTransientResponse(t *testing.T) {
 	for _, tc := range []struct {
-		name, body string
-		status     int
-		want       bool
+		name, body    string
+		status        int
+		initialStatus int
+		want          bool
 	}{
-		{"matching identity", `{"status":"ok","service":"engram","instance_id":"expected"}`, 200, true},
-		{"foreign identity", `{"status":"ok","service":"engram","instance_id":"other"}`, 200, false},
-		{"other HTTP status", `{}`, 503, false},
+		{"matching identity", `{"status":"ok","service":"engram","instance_id":"expected"}`, 200, http.StatusInternalServerError, true},
+		{"foreign identity", `{"status":"ok","service":"engram","instance_id":"other"}`, 200, http.StatusInternalServerError, false},
+		{"starting then ready", `{"status":"ok","service":"engram","instance_id":"expected"}`, http.StatusOK, http.StatusServiceUnavailable, true},
+		{"other HTTP status", `{}`, 503, http.StatusInternalServerError, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var bodies []*hookHealthTestBody
@@ -254,17 +287,21 @@ func TestHookLocalReadinessTransient500(t *testing.T) {
 				if r.Method != http.MethodGet || r.URL.Path != "/health" {
 					t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
 				}
-				status, body := 500, "temporary stats failure"
-				if len(bodies) != 0 {
+				status, body := tc.initialStatus, "temporary stats failure"
+				if status == http.StatusServiceUnavailable {
+					body = `{"status":"starting","service":"engram"}`
+				}
+				if len(bodies) > 1 {
+					t.Fatal("terminal health response was retried")
+				}
+				if len(bodies) == 1 {
 					status, body = tc.status, tc.body
 				}
 				b := &hookHealthTestBody{Reader: strings.NewReader(body)}
 				bodies = append(bodies, b)
 				return &http.Response{StatusCode: status, Body: b, Header: make(http.Header), Request: r}, nil
 			})}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			err := hookLocalServerReady(ctx, client, "http://127.0.0.1:7437", "expected")
+			err := hookLocalServerReady(context.Background(), client, "http://127.0.0.1:7437", "expected")
 			if (err == nil) != tc.want || len(bodies) != 2 {
 				t.Fatalf("readiness=%v requests=%d want success=%v requests=2", err, len(bodies), tc.want)
 			}
@@ -277,25 +314,32 @@ func TestHookLocalReadinessTransient500(t *testing.T) {
 	}
 }
 
-func TestHookLocalReadinessPersistent500Deadline(t *testing.T) {
-	var bodies []*hookHealthTestBody
-	client := &http.Client{Transport: codexRoundTripper(func(r *http.Request) (*http.Response, error) {
-		b := &hookHealthTestBody{Reader: strings.NewReader("temporary stats failure")}
-		bodies = append(bodies, b)
-		return &http.Response{StatusCode: 500, Body: b, Header: make(http.Header), Request: r}, nil
-	})}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	if err := hookLocalServerReady(ctx, client, "http://127.0.0.1:7437", "expected"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("persistent 500: %v", err)
-	}
-	if len(bodies) < 2 {
-		t.Fatalf("500 was not retried: %d requests", len(bodies))
-	}
-	for i, body := range bodies {
-		if !body.closed {
-			t.Errorf("response %d not closed", i)
-		}
+func TestHookLocalReadinessTransientDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{
+		{http.StatusInternalServerError, "temporary stats failure"},
+		{http.StatusServiceUnavailable, `{"status":"starting","service":"engram"}`},
+	} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			var bodies []*hookHealthTestBody
+			client := &http.Client{Transport: codexRoundTripper(func(r *http.Request) (*http.Response, error) {
+				b := &hookHealthTestBody{Reader: strings.NewReader(tc.body)}
+				bodies = append(bodies, b)
+				return &http.Response{StatusCode: tc.status, Body: b, Header: make(http.Header), Request: r}, nil
+			})}
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			if err := hookLocalServerReady(ctx, client, "http://127.0.0.1:7437", "expected"); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("persistent status %d: %v", tc.status, err)
+			}
+			for i, body := range bodies {
+				if !body.closed {
+					t.Errorf("response %d not closed", i)
+				}
+			}
+		})
 	}
 }
 

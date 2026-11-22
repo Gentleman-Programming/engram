@@ -18,18 +18,26 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
-// Eligibility describes the original lookup only; readiness is never an excuse
-// to recover from a received HTTP response or a redirected request.
-func hookLocalRecoveryEligible(platform, base, endpoint string, err error) bool {
+func hookLocalWindowsPort(platform, base string) int {
 	if platform != "windows" || strings.TrimSpace(os.Getenv("ENGRAM_URL")) != "" || strings.TrimSpace(os.Getenv("ENGRAM_SOCKET")) != "" || base != codexHookURL() {
-		return false
+		return 0
 	}
 	u, parseErr := url.Parse(base)
 	if parseErr != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Path != "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return false
+		return 0
 	}
 	port, parseErr := strconv.Atoi(u.Port())
 	if parseErr != nil || port < 1 || port > 65535 {
+		return 0
+	}
+	return port
+}
+
+// Eligibility describes the original lookup only; readiness is never an excuse
+// to recover from a received HTTP response or a redirected request.
+func hookLocalRecoveryEligible(platform, base, endpoint string, err error) bool {
+	port := hookLocalWindowsPort(platform, base)
+	if port == 0 {
 		return false
 	}
 	var denial *hookDenialError
@@ -63,7 +71,7 @@ func hookLocalDataDir() string {
 
 // A reachable loopback listener may belong to another data directory or OS
 // account. Confirm identity before disclosing any session or cwd to it.
-func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base string) error {
+func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base, platform string) error {
 	dir := hookLocalDataDir()
 	if dir == "" {
 		return &hookDenialError{message: "managed local server identity unconfirmed"}
@@ -82,11 +90,15 @@ func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base str
 	if err != nil {
 		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
 	}
-	defer func() { _ = response.Body.Close() }()
 	health := readHookLocalHealth(response)
+	_ = response.Body.Close()
+	if health.Status == "starting" && hookLocalWindowsPort(platform, base) != 0 {
+		// Another hook can reach the early listener before the store is ready.
+		// Wait for its identity without launching or sending session traffic.
+		return hookLocalServerReady(ctx, client, base, expected)
+	}
 	if !health.matches(expected) {
-		const denial = "managed local server identity unconfirmed: expected current data directory instance"
-		return &hookDenialError{message: denial + health.releaseSkewGuidance(version)}
+		return hookLocalIdentityMismatch(health)
 	}
 	return nil
 }
@@ -133,17 +145,18 @@ func hookLocalServerReady(ctx context.Context, client *http.Client, base, expect
 			return err
 		}
 		response, err := healthClient.Do(request)
-		if err == nil && response.StatusCode == http.StatusInternalServerError {
-			// Startup stats can fail transiently; this is readiness polling,
-			// never permission to launch again or accept an unknown identity.
+		if err == nil {
+			health := readHookLocalHealth(response)
 			_ = response.Body.Close()
-		} else if err == nil {
-			matches := readHookLocalHealth(response).matches(expected)
-			_ = response.Body.Close()
-			if !matches {
-				return errors.New("managed local server identity unconfirmed")
+			switch {
+			case health.Status == "starting", response.StatusCode == http.StatusInternalServerError:
+				// The early listener and transient startup stats are readiness
+				// signals only. Neither establishes the instance's identity.
+			case health.matches(expected):
+				return ctx.Err()
+			default:
+				return hookLocalIdentityMismatch(health)
 			}
-			return ctx.Err()
 		}
 		timer := time.NewTimer(25 * time.Millisecond)
 		select {
@@ -162,9 +175,14 @@ type hookLocalHealth struct {
 	Version    json.RawMessage `json:"version"`
 }
 
+func hookLocalIdentityMismatch(health hookLocalHealth) error {
+	const denial = "managed local server identity unconfirmed: expected current data directory instance"
+	return &hookDenialError{message: denial + health.releaseSkewGuidance(version)}
+}
+
 // Initial admission and managed recovery share the same bounded health reader.
 func readHookLocalHealth(response *http.Response) hookLocalHealth {
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable {
 		return hookLocalHealth{}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, hookDenialBodyLimit+1))
@@ -172,10 +190,16 @@ func readHookLocalHealth(response *http.Response) hookLocalHealth {
 		return hookLocalHealth{}
 	}
 	var health hookLocalHealth
-	if json.Unmarshal(body, &health) != nil || health.Status != "ok" || health.Service != "engram" {
+	if json.Unmarshal(body, &health) != nil || health.Service != "engram" {
 		return hookLocalHealth{}
 	}
-	return health
+	if response.StatusCode == http.StatusOK && health.Status == "ok" {
+		return health
+	}
+	if response.StatusCode == http.StatusServiceUnavailable && health.Status == "starting" && health.InstanceID == "" {
+		return hookLocalHealth{Status: "starting"}
+	}
+	return hookLocalHealth{}
 }
 
 func (health hookLocalHealth) matches(expected string) bool {
