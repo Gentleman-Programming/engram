@@ -564,7 +564,7 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if err := checkServerReadiness(s.store); err != nil {
+	if err := checkServerReadiness(s.store, r.Context()); err != nil {
 		jsonError(w, http.StatusInternalServerError, "health check failed")
 		return
 	}

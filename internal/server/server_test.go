@@ -41,7 +41,7 @@ func TestGenerationInvalidationRequestsOneShutdown(t *testing.T) {
 				observedGenerationError, loadServerStats, checkServerReadiness = oldObserved, oldStats, oldReadiness
 			})
 			observedGenerationError = func(*store.Store) error { return store.ErrDatabaseGenerationChanged }
-			checkServerReadiness = func(*store.Store) error { return store.ErrDatabaseGenerationChanged }
+			checkServerReadiness = func(*store.Store, context.Context) error { return store.ErrDatabaseGenerationChanged }
 			loadServerStats = func(*store.Store) (*store.Stats, error) { return nil, store.ErrDatabaseGenerationChanged }
 			var requests sync.WaitGroup
 			for i := 0; i < 32; i++ {
@@ -83,7 +83,7 @@ func TestTransientHealthFailureDoesNotRequestShutdown(t *testing.T) {
 	}
 	old := checkServerReadiness
 	t.Cleanup(func() { checkServerReadiness = old })
-	checkServerReadiness = func(*store.Store) error { return errors.New("transient") }
+	checkServerReadiness = func(*store.Store, context.Context) error { return errors.New("transient") }
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
 	if rec.Code != 500 || strings.Contains(rec.Body.String(), "transient") {

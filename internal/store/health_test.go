@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -30,7 +31,7 @@ func TestCheckReadinessCoreSchema(t *testing.T) {
 				}
 			}
 			_, statsErr := s.Stats()
-			err := s.CheckReadiness()
+			err := s.CheckReadiness(context.Background())
 			if (err != nil) != (statsErr != nil) || (err != nil) != (broken != "") {
 				t.Fatalf("schema%q readiness=%v stats=%v", broken, err, statsErr)
 			}
@@ -44,19 +45,19 @@ func TestCheckReadinessPopulatedAndTombstoned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CheckReadiness(); err != nil {
+	if err := s.CheckReadiness(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(`UPDATE observations SET deleted_at='2026-01-01'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CheckReadiness(); err != nil {
+	if err := s.CheckReadiness(context.Background()); err != nil {
 		t.Fatal("all tombstones remain a readable store", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CheckReadiness(); err == nil {
+	if err := s.CheckReadiness(context.Background()); err == nil {
 		t.Fatal("closed store accepted")
 	}
 }
@@ -70,7 +71,7 @@ func TestCheckReadinessGenerationFence(t *testing.T) {
 			if err := s.CreateSession("health", "alpha", ""); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.CheckReadiness(); err != nil {
+			if err := s.CheckReadiness(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			original := statFile
@@ -104,7 +105,7 @@ func TestCheckReadinessGenerationFence(t *testing.T) {
 				}
 				return original(name)
 			}
-			err = s.CheckReadiness()
+			err = s.CheckReadiness(context.Background())
 			if kind == "transient" {
 				if !errors.Is(err, transient) {
 					t.Fatalf("transient error=%v", err)
@@ -117,7 +118,7 @@ func TestCheckReadinessGenerationFence(t *testing.T) {
 				assertGenerationChanged(t, s.GenerationError())
 			}
 			statFile = original
-			err = s.CheckReadiness()
+			err = s.CheckReadiness(context.Background())
 			if kind == "transient" {
 				if err != nil {
 					t.Fatal("transient failure did not recover", err)

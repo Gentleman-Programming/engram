@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func TestHealthDoesNotCalculateStatistics(t *testing.T) {
@@ -52,9 +54,9 @@ func BenchmarkHealthReadiness(b *testing.B) {
 			b.Cleanup(func() { checkServerReadiness = original })
 			for _, tc := range []struct {
 				name  string
-				probe func(*store.Store) error
+				probe func(*store.Store, context.Context) error
 			}{
-				{"stats-baseline", func(st *store.Store) error { _, err := st.Stats(); return err }},
+				{"stats-baseline", func(st *store.Store, _ context.Context) error { _, err := st.Stats(); return err }},
 				{"bounded", (*store.Store).CheckReadiness},
 			} {
 				b.Run(tc.name, func(b *testing.B) {
