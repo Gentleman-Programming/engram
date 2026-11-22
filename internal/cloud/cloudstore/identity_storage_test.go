@@ -48,6 +48,55 @@ func openIsolatedCloudStore(t *testing.T) *CloudStore {
 	return cs
 }
 
+func TestStartupSessionIndexSkipsExistingExactProjectRows(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+	if _, err := cs.db.ExecContext(ctx, `
+		INSERT INTO cloud_project_sessions (project_name, session_id)
+		VALUES ('alpha', 'existing'), ('alpha', ' padded ');
+		INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload)
+		VALUES ('alpha', 'primary', 'fixture', '{"sessions":[{"id":"existing"},{"id":" padded "},{"id":"missing"}]}'),
+		       (' alpha ', 'legacy', 'fixture', '{"sessions":[{"id":"existing"}]}');
+		CREATE FUNCTION reject_existing_session_index_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.project_name = 'alpha' AND NEW.session_id IN ('existing', ' padded ') THEN
+				RAISE EXCEPTION 'duplicate index insert attempted';
+			END IF;
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER reject_existing_session_index_insert
+			BEFORE INSERT ON cloud_project_sessions
+			FOR EACH ROW EXECUTE FUNCTION reject_existing_session_index_insert();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.backfillProjectSessionsFromChunks(ctx); err != nil {
+		t.Fatalf("backfill project sessions: %v", err)
+	}
+
+	var count int
+	if err := cs.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM cloud_project_sessions
+		WHERE (project_name, session_id) IN (
+			('alpha', 'existing'), ('alpha', ' padded '), ('alpha', 'missing'), (' alpha ', 'existing')
+		)`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 4 {
+		t.Fatalf("expected four exact index entries, got %d", count)
+	}
+
+	if _, err := cs.db.ExecContext(ctx, `
+		INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload)
+		VALUES ('other', 'opaque', 'fixture', '{"sessions":[{"id":" padded "}]}');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.backfillProjectSessionsFromChunks(ctx); !errors.Is(err, ErrSessionIndexHistoricalResolutionRequired) {
+		t.Fatalf("expected the missing exact opaque session guard, got %v", err)
+	}
+}
+
 func TestAuthFoundationMigrationsAreAdditive(t *testing.T) {
 	ctx := context.Background()
 	cs := openIsolatedCloudStore(t)

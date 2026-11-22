@@ -561,11 +561,16 @@ func (cs *CloudStore) backfillProjectSessionsFromChunks(ctx context.Context) err
 			knownByProject[project] = known
 		}
 		sessionIDs := collectSessionIDsFromPayload(payload)
+		// KnownSessionIDs trims its project argument. Only an exact project
+		// match proves the row already exists under the stored project name.
+		exactProject := project == strings.TrimSpace(project)
 		for sessionID := range sessionIDs {
-			if sessionID != strings.TrimSpace(sessionID) {
-				if _, exists := known[sessionID]; !exists {
-					return fmt.Errorf("%w: project %q session_id %q has no exact index entry", ErrSessionIndexHistoricalResolutionRequired, project, sessionID)
-				}
+			_, indexed := known[sessionID]
+			if !indexed && sessionID != strings.TrimSpace(sessionID) {
+				return fmt.Errorf("%w: project %q session_id %q has no exact index entry", ErrSessionIndexHistoricalResolutionRequired, project, sessionID)
+			}
+			if indexed && exactProject {
+				delete(sessionIDs, sessionID)
 			}
 		}
 		if err := indexSessionIDs(ctx, cs.db, project, sessionIDs); err != nil {
