@@ -497,6 +497,39 @@ func TestMutationEntrySignatureMatchesLegacyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSyncMutationSignaturePreservesCanonicalBytes(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{"normalize keys", `{"b":3, "a":1, "b":2}`, `{"a":1,"b":2}`},
+		{"valid number outside float64", `{"z":1e500, "a":2}`, `{"z":1e500, "a":2}`},
+		{"invalid JSON", `{"z":`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := syncMutationSignature(store.SyncMutation{
+				Project:   " fixture ",
+				Entity:    " session ",
+				EntityKey: " padded ",
+				Op:        " upsert ",
+				Payload:   tc.payload,
+			})
+			if tc.want == "" {
+				if err == nil || err.Error() != "payload is not valid JSON" || got != "" {
+					t.Fatalf("signature = %q, %v, want invalid JSON", got, err)
+				}
+				return
+			}
+			want := strings.Join([]string{"fixture", "session", " padded ", "upsert", tc.want}, "\x00")
+			if err != nil || got != want {
+				t.Fatalf("signature = %q, %v, want %q", got, err, want)
+			}
+		})
+	}
+}
+
 func TestNormalizeJSONCanonicalizesEquivalentPayloads(t *testing.T) {
 	a := []byte(`{"a":1,"b":[2,3]}`)
 	b := []byte("{\n  \"b\": [2,3], \"a\":1\n}")
