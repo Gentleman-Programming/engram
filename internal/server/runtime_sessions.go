@@ -52,15 +52,22 @@ func (s *Server) handleRuntimeSession(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "expected_effective_id is only accepted when ending a runtime session")
 		return
 	}
-	directory := projectpkg.RuntimeWorktreeDirectory(body.Directory)
 	var id string
 	var err error
-	if body.ExpectedEffectiveID != "" {
-		id, err = s.store.EndRuntimeSessionIfCurrent(body.ID, body.Project, directory, body.OwnershipMode, body.Summary, string(body.ExpectedEffectiveID))
-	} else if end {
-		id, err = s.store.EndRuntimeSession(body.ID, body.Project, directory, body.OwnershipMode, body.Summary)
+	if end {
+		directory := projectpkg.RuntimeWorktreeDirectory(body.Directory)
+		if body.ExpectedEffectiveID != "" {
+			id, err = s.store.EndRuntimeSessionIfCurrent(body.ID, body.Project, directory, body.OwnershipMode, body.Summary, string(body.ExpectedEffectiveID))
+		} else {
+			id, err = s.store.EndRuntimeSession(body.ID, body.Project, directory, body.OwnershipMode, body.Summary)
+		}
 	} else {
-		id, err = s.store.ResolveRuntimeSessionWithOwnershipMode(body.ID, body.Project, directory, body.OwnershipMode)
+		ctx := r.Context()
+		directory := projectpkg.RuntimeWorktreeDirectoryContext(ctx, body.Directory)
+		id, err = s.store.ResolveRuntimeSessionWithOwnershipModeContext(ctx, body.ID, body.Project, directory, body.OwnershipMode)
+		if ctx.Err() != nil {
+			return
+		}
 	}
 	if err != nil {
 		status := http.StatusInternalServerError

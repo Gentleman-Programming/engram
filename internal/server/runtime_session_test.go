@@ -2,15 +2,93 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
+
+func TestRuntimeSessionResolveReadsWhileWriterIsReserved(t *testing.T) {
+	directory := t.TempDir()
+	cfg := store.FallbackConfig(filepath.Join(directory, "store"))
+	db, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const root, project = "codex-host", "project"
+	const mode = store.SessionOwnershipProjectOwned
+	if err := db.CreateSessionWithOwnershipMode(root, project, directory, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession(root, "root summary"); err != nil {
+		t.Fatal(err)
+	}
+	effective, err := db.ResumeSessionWithOwnershipMode(root, project, directory, mode)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	other, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Close() }()
+	writer, err := other.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	if _, err := writer.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = writer.ExecContext(context.Background(), "ROLLBACK") }()
+
+	body, err := json.Marshal(map[string]string{"id": root, "project": project, "directory": directory, "ownership_mode": mode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(db, 0).Handler()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/runtime-sessions/resolve", bytes.NewReader(body)))
+		done <- w
+	}()
+	select {
+	case w := <-done:
+		var ack map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil || w.Code != http.StatusOK ||
+			ack["id"] != effective || ack["resumed_from"] != root || ack["status"] != "resolved" {
+			t.Fatalf("resolve = %d %s, %v", w.Code, w.Body, err)
+		}
+	case <-time.After(3 * time.Second):
+		if _, err := writer.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("resolve did not finish after writer release")
+		}
+		t.Fatal("read-only resolution waited for the other connection's writer reservation")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	canceled := httptest.NewRecorder()
+	handler.ServeHTTP(canceled, httptest.NewRequestWithContext(ctx, http.MethodPost, "/runtime-sessions/resolve", bytes.NewReader(body)))
+	if canceled.Body.Len() != 0 {
+		t.Fatalf("canceled resolve returned a response: %s", canceled.Body)
+	}
+}
 
 func TestRuntimeSessionEndRequiresExpectedEffectiveIDWhenProvided(t *testing.T) {
 	db := newServerTestStore(t)

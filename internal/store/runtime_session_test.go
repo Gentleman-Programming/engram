@@ -1,12 +1,59 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
+
+func TestRuntimeSessionResolveContextCancelsConnectionWait(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.CreateSession("host", "project", root); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := s.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	initialWaitCount := s.db.Stats().WaitCount
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ResolveRuntimeSessionWithOwnershipModeContext(ctx, "host", "project", root, SessionOwnershipShared)
+		done <- err
+	}()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for s.db.Stats().WaitCount == initialWaitCount {
+		select {
+		case <-done:
+			t.Fatal("resolution stopped before waiting for the only connection")
+		case <-ctx.Done():
+			t.Fatal("resolution did not wait for the connection")
+		case <-tick.C:
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("resolve = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled resolution did not release its connection wait")
+	}
+}
 
 func TestRuntimeSessionScopeAndConcurrency(t *testing.T) {
 	root := t.TempDir()
