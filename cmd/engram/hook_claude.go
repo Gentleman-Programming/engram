@@ -220,7 +220,7 @@ func confirmHookSessionWithin(id, cwd string, projectOwned bool, platform string
 		cancel()
 	}()
 	if strings.TrimSpace(os.Getenv("ENGRAM_URL")) == "" {
-		identityErr := confirmHookLocalIdentity(ctx, client, base)
+		identityErr := confirmHookLocalIdentity(ctx, client, base, platform)
 		if identityErr != nil && hookLocalRecoveryEligible(platform, base, base+"/health", identityErr) {
 			if recovered := recoverHookLocalServer(ctx, client, base); recovered != nil {
 				return "", identityErr

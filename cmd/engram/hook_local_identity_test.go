@@ -112,7 +112,7 @@ func TestHookLocalIdentityMatchesServeHomeFallback(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "engram", "instance_id": expected})
 			}))
 			defer server.Close()
-			err = confirmHookLocalIdentity(context.Background(), server.Client(), server.URL)
+			err = confirmHookLocalIdentity(context.Background(), server.Client(), server.URL, "windows")
 			if (err == nil) != (mode != "unavailable") {
 				t.Fatalf("identity confirmation in %s: %v", mode, err)
 			}
