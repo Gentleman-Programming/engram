@@ -6608,21 +6608,31 @@ func buildPromptLIKEQuery(query, project string, limit int) (string, []any) {
 // ─── Stats ───────────────────────────────────────────────────────────────────
 
 func (s *Store) Stats() (*Stats, error) {
-	return s.statsForProject("")
+	return s.StatsContext(context.Background())
+}
+
+// StatsContext returns aggregate counts and project names with cancellation.
+func (s *Store) StatsContext(ctx context.Context) (*Stats, error) {
+	return s.statsForProject(ctx, "")
 }
 
 // StatsProject returns aggregate counts restricted to one project. Selection
 // policy belongs to callers; this method only applies the supplied scope.
 func (s *Store) StatsProject(project string) (*Stats, error) {
+	return s.StatsProjectContext(context.Background(), project)
+}
+
+// StatsProjectContext returns aggregate counts for one project with cancellation.
+func (s *Store) StatsProjectContext(ctx context.Context, project string) (*Stats, error) {
 	project, _ = NormalizeProject(project)
 	if strings.TrimSpace(project) == "" {
 		return nil, fmt.Errorf("project is required")
 	}
-	return s.statsForProject(project)
+	return s.statsForProject(ctx, project)
 }
 
-func (s *Store) statsForProject(project string) (*Stats, error) {
-	stats, _, err := s.statsForProjectLimit(project, 0)
+func (s *Store) statsForProject(ctx context.Context, project string) (*Stats, error) {
+	stats, _, err := s.statsForProjectLimit(ctx, project, 0)
 	return stats, err
 }
 
@@ -6638,10 +6648,10 @@ func (s *Store) ContextStats(project string, maxProjects int) (*Stats, int, erro
 			return nil, 0, fmt.Errorf("project is required")
 		}
 	}
-	return s.statsForProjectLimit(project, maxProjects)
+	return s.statsForProjectLimit(context.Background(), project, maxProjects)
 }
 
-func (s *Store) statsForProjectLimit(project string, maxProjects int) (*Stats, int, error) {
+func (s *Store) statsForProjectLimit(ctx context.Context, project string, maxProjects int) (*Stats, int, error) {
 	stats := &Stats{}
 	args := []any{}
 	where := ""
@@ -6649,17 +6659,17 @@ func (s *Store) statsForProjectLimit(project string, maxProjects int) (*Stats, i
 		where = " WHERE LOWER(project) = ?"
 		args = append(args, project)
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions); err != nil {
 		return nil, 0, err
 	}
 	observationsFilter := ""
 	if project != "" {
 		observationsFilter = " AND LOWER(project) = ?"
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+observationsFilter, args...).Scan(&stats.TotalObservations); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+observationsFilter, args...).Scan(&stats.TotalObservations); err != nil {
 		return nil, 0, err
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts); err != nil {
 		return nil, 0, err
 	}
 
@@ -6680,7 +6690,7 @@ func (s *Store) statsForProjectLimit(project string, maxProjects int) (*Stats, i
 		projectsQuery = "SELECT project, COUNT(*) OVER () FROM (" + projectsQuery + ") ORDER BY latest_created_at DESC LIMIT ?"
 		args = append(args, maxProjects)
 	}
-	rows, err := s.queryItHook(s.db, projectsQuery, args...)
+	rows, err := s.queryContextSection(ctx, s.db, projectsQuery, args...)
 	if err != nil {
 		return nil, 0, err
 	}

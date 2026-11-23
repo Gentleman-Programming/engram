@@ -34,9 +34,7 @@ var observedGenerationError = (*store.Store).GenerationError
 
 var checkServerReadiness = (*store.Store).CheckReadiness
 
-var loadServerStats = func(s *store.Store) (*store.Stats, error) {
-	return s.Stats()
-}
+var loadServerStats = (*store.Store).StatsContext
 
 // ErrPortOwned reports that another live serve process of the same engram
 // instance already owns the TCP port. Start returns it instead of exiting
@@ -1645,7 +1643,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		var unknown *projectpkg.UnknownProjectError
 		if errors.As(err, &unknown) {
 			// The available-project lookup can fail independently of resolution.
-			available, listErr := s.store.ListProjectNames()
+			available, listErr := s.store.ListProjectNamesContext(r.Context())
 			if listErr != nil {
 				jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed", map[string]any{"code": "project_resolution_failed"})
 				return
@@ -1665,9 +1663,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	var stats *store.Stats
 	if resolved.Project != "" {
-		stats, err = s.store.StatsProject(resolved.Project)
+		stats, err = s.store.StatsProjectContext(r.Context(), resolved.Project)
 	} else {
-		stats, err = loadServerStats(s.store)
+		stats, err = loadServerStats(s.store, r.Context())
 	}
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "stats unavailable")

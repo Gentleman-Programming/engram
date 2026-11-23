@@ -42,7 +42,9 @@ func TestGenerationInvalidationRequestsOneShutdown(t *testing.T) {
 			})
 			observedGenerationError = func(*store.Store) error { return store.ErrDatabaseGenerationChanged }
 			checkServerReadiness = func(*store.Store, context.Context) error { return store.ErrDatabaseGenerationChanged }
-			loadServerStats = func(*store.Store) (*store.Stats, error) { return nil, store.ErrDatabaseGenerationChanged }
+			loadServerStats = func(*store.Store, context.Context) (*store.Stats, error) {
+				return nil, store.ErrDatabaseGenerationChanged
+			}
 			var requests sync.WaitGroup
 			for i := 0; i < 32; i++ {
 				requests.Add(1)
@@ -2774,7 +2776,7 @@ func TestStatsRejectsFailedStore(t *testing.T) {
 
 func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	prev := loadServerStats
-	loadServerStats = func(s *store.Store) (*store.Stats, error) {
+	loadServerStats = func(*store.Store, context.Context) (*store.Stats, error) {
 		return nil, errors.New("stats unavailable")
 	}
 	t.Cleanup(func() {
@@ -2798,7 +2800,7 @@ func TestHandleStatsProjectScopeSkipsGlobalLoader(t *testing.T) {
 		t.Fatalf("create alpha session: %v", err)
 	}
 	previous := loadServerStats
-	loadServerStats = func(*store.Store) (*store.Stats, error) {
+	loadServerStats = func(*store.Store, context.Context) (*store.Stats, error) {
 		return nil, errors.New("global stats should not run")
 	}
 	t.Cleanup(func() { loadServerStats = previous })

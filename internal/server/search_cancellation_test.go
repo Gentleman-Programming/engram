@@ -111,6 +111,7 @@ func TestReadCancellationWhileWaitingForConnection(t *testing.T) {
 		"context-prompts":       {"/context?all_projects=true&sessions=-1&pinned=-1&observations=-1", canceledRead},
 		"context-older-history": {"/context?all_projects=true&sessions=-1&pinned=-1&prompts=-1&older_history=true", canceledRead},
 		"compaction-context":    {"/context/compaction?session_id=fixture", canceledRead},
+		"stats-unscoped":        {"/stats?all_projects=true", "{\"error\":\"stats unavailable\"}\n"},
 		"context-project":       {"/context?project=fixture", canceledProjectLookup},
 		"search-project":        {"/search?q=synthetic&project=fixture", canceledProjectLookup},
 	}
