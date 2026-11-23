@@ -192,9 +192,10 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 	if err != nil || sameLabProtectedReceipt(healthy, advanced) || len(events) != 3 {
 		t.Fatalf("healthy real PG event append must advance: %+v (%v)", events, err)
 	}
-	if _, events, err := tryProtectedDelta(ctx, cs.db, advanced); err != nil || len(events) != 0 {
+	if next, events, err := tryProtectedDelta(ctx, cs.db, advanced); err != nil || len(events) != 0 || !sameLabProtectedReceipt(next, advanced) {
 		t.Fatalf("advanced receipt must accept zero events: %+v (%v)", events, err)
 	}
+	testLabProtectedWitness(t, ctx, cs.db, healthy, advanced)
 	t.Log("healthy append accepted three actual events, then zero after receipt advance")
 
 	missing := baseline("missing")
@@ -291,6 +292,51 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 	t.Log("out-of-scope chunk event rejected, and ordinary exact opaque-index guard applies")
 }
 
+func testLabProtectedWitness(t *testing.T, ctx context.Context, db *sql.DB, old, current protectedReceipt) {
+	t.Helper()
+	for _, command := range []string{
+		`DELETE FROM receipt_audit.witnesses WHERE false`,
+		`UPDATE receipt_audit.witnesses SET snapshot='1:1:' WHERE false`,
+		`INSERT INTO receipt_audit.witnesses SELECT * FROM receipt_audit.witnesses WHERE false`,
+	} {
+		_, err := db.ExecContext(ctx, command)
+		var denied *pgconn.PgError
+		if !errors.As(err, &denied) || denied.Code != "42501" {
+			t.Fatalf("runtime could bypass the witness function: %q: %v", command, err)
+		}
+	}
+	tx, err := startupSnapshot(ctx, db, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var token string
+	if err := tx.QueryRowContext(ctx, `SELECT receipt_audit.save_witness($1)::text`, current.scopeKey()).Scan(&token); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		witness string
+		scope   []string
+	}{
+		{"rolled-back witness", token, current.projects},
+		{"witness from another snapshot", old.witness, current.projects},
+		{"missing witness", "00000000-0000-0000-0000-000000000000", current.projects},
+		{"witness from another project scope", current.witness, []string{"another-project"}},
+	} {
+		invalid := current
+		invalid.witness = test.witness
+		invalid.projects = test.scope
+		next, events, err := tryProtectedDelta(ctx, db, invalid)
+		if !errors.Is(err, errReceiptAppendUnproven) || !sameLabProtectedReceipt(next, invalid) || len(events) != 0 {
+			t.Fatalf("%s admitted a receipt: events=%+v (%v)", test.name, events, err)
+		}
+	}
+}
+
 func testLabConcurrentRetentionQuery(t *testing.T, ctx context.Context, cs *CloudStore, prior protectedReceipt, seq int64) {
 	t.Helper()
 	dsn, err := url.Parse(os.Getenv("CLOUDSTORE_TEST_PROTECTED_DELTA_DSN"))
@@ -303,7 +349,13 @@ func testLabConcurrentRetentionQuery(t *testing.T, ctx context.Context, cs *Clou
 		t.Fatal(err)
 	}
 	defer func() { _ = operator.Close() }()
-	for _, command := range []string{`DELETE FROM receipt_audit.events`, `TRUNCATE receipt_audit.events`, `UPDATE receipt_audit.enrollment SET retained_from='0'`} {
+	for _, command := range []string{
+		`DELETE FROM receipt_audit.events`,
+		`TRUNCATE receipt_audit.events`,
+		`UPDATE receipt_audit.enrollment SET retained_from='0'`,
+		`DELETE FROM receipt_audit.witnesses WHERE false`,
+		`SELECT receipt_audit.save_witness(repeat('0',64))`,
+	} {
 		_, err := operator.ExecContext(ctx, command)
 		var denied *pgconn.PgError
 		if !errors.As(err, &denied) || denied.Code != "42501" {
