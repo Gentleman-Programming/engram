@@ -7,13 +7,88 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
+
+func TestRuntimeSessionResolveReusesExactStoredDirectory(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("Git is required to observe worktree lookups")
+	}
+	directory := t.TempDir()
+	subdirectory := filepath.Join(directory, "nested")
+	if err := os.Mkdir(subdirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.CommandContext(t.Context(), git, "-C", directory, "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("initialize fixture checkout: %v\n%s", err, output)
+	}
+	if runtime.GOOS == "windows" {
+		directory = strings.ToLower(directory)
+	}
+
+	db := newServerTestStore(t)
+	const root, project, mode = "registered-root", "fixture-project", store.SessionOwnershipProjectOwned
+	if err := db.CreateSessionWithOwnershipMode(root, project, directory, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession(root, "terminal fixture"); err != nil {
+		t.Fatal(err)
+	}
+	effective, err := db.ResumeSessionWithOwnershipMode(root, project, directory, mode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(t.TempDir(), "git-trace.json")
+	t.Setenv("GIT_TRACE2_EVENT", trace)
+	handler := New(db, 0).Handler()
+	call := func(owner, requested, expected string, status int) {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"id": root, "project": owner, "directory": requested, "ownership_mode": mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/runtime-sessions/resolve", bytes.NewReader(body)))
+		if w.Code != status {
+			t.Fatalf("resolve %q = %d %s, want %d", requested, w.Code, w.Body, status)
+		}
+		if expected != "" {
+			var ack map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil || ack["id"] != expected ||
+				ack["resumed_from"] != root || ack["status"] != "resolved" {
+				t.Fatalf("resolve ack = %s, %v", w.Body, err)
+			}
+		}
+	}
+	call(project, directory, effective, http.StatusOK)
+	call("other-project", directory, "", http.StatusConflict)
+	if _, err := os.Stat(trace); !os.IsNotExist(err) {
+		t.Fatalf("an exact persisted scope started Git: %v", err)
+	}
+
+	call(project, subdirectory, effective, http.StatusOK)
+	if records, err := os.ReadFile(trace); err != nil || !strings.Contains(string(records), "--show-toplevel") {
+		t.Fatalf("the worktree alias did not consult Git: %v\n%s", err, records)
+	}
+	if runtime.GOOS == "windows" {
+		call(project, strings.ToUpper(directory), effective, http.StatusOK)
+	}
+	// A new binding for the live continuation cannot reuse a prior result.
+	if _, err := db.DB().Exec("UPDATE sessions SET directory = ? WHERE id = ?", t.TempDir(), effective); err != nil {
+		t.Fatal(err)
+	}
+	call(project, directory, "", http.StatusConflict)
+}
 
 func TestRuntimeSessionResolveReadsWhileWriterIsReserved(t *testing.T) {
 	directory := t.TempDir()

@@ -4084,6 +4084,25 @@ func (s *Store) ResolveRuntimeSessionWithOwnershipMode(root, project, directory,
 	return id, err
 }
 
+// TryResolveRuntimeSessionByDirectory resolves sessions whose stored directory
+// matches the request for both the root and live session in one read snapshot.
+// A false result leaves directory aliases to normal worktree verification.
+func (s *Store) TryResolveRuntimeSessionByDirectory(ctx context.Context, root, project, directory, mode string) (string, bool, error) {
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || strings.TrimSpace(directory) != directory {
+		return "", false, ctx.Err()
+	}
+	id, err := s.readRuntimeSessionSnapshot(ctx, root, project, directory, mode, func(scope string, _ bool) error {
+		if scope != directory {
+			return errRuntimeSessionNeedsWorktree
+		}
+		return nil
+	})
+	if err == errRuntimeSessionNeedsWorktree {
+		return "", false, ctx.Err()
+	}
+	return id, true, err
+}
+
 // ResolveRuntimeSessionWithOwnershipModeContext verifies filesystem scopes
 // outside SQLite and returns the live binding from the final read snapshot.
 func (s *Store) ResolveRuntimeSessionWithOwnershipModeContext(ctx context.Context, root, project, directory, mode string) (string, error) {

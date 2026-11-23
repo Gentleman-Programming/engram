@@ -63,8 +63,12 @@ func (s *Server) handleRuntimeSession(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		ctx := r.Context()
-		directory := projectpkg.RuntimeWorktreeDirectoryContext(ctx, body.Directory)
-		id, err = s.store.ResolveRuntimeSessionWithOwnershipModeContext(ctx, body.ID, body.Project, directory, body.OwnershipMode)
+		var exact bool
+		id, exact, err = s.store.TryResolveRuntimeSessionByDirectory(ctx, body.ID, body.Project, body.Directory, body.OwnershipMode)
+		if !exact && err == nil {
+			directory := projectpkg.RuntimeWorktreeDirectoryContext(ctx, body.Directory)
+			id, err = s.store.ResolveRuntimeSessionWithOwnershipModeContext(ctx, body.ID, body.Project, directory, body.OwnershipMode)
+		}
 		if ctx.Err() != nil {
 			return
 		}
