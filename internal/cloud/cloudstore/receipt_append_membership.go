@@ -107,7 +107,7 @@ func readAppendChunkMembership(ctx context.Context, tx *sql.Tx, chunks []receipt
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	i := 0
 	for rows.Next() {
 		var project, id string
@@ -170,7 +170,7 @@ func checkAppendJournal(ctx context.Context, tx *sql.Tx, journal []receiptAppend
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	i := 0
 	for rows.Next() {
 		var seq int64
@@ -218,7 +218,7 @@ func checkAppendIndex(ctx context.Context, tx *sql.Tx, indexKeys map[receiptAppe
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	i := 0
 	for rows.Next() {
 		var project, id string

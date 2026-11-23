@@ -148,7 +148,7 @@ func readProtectedAppendEvents(ctx context.Context, tx *sql.Tx, snapshot string)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var events []receiptAppendEvent
 	for rows.Next() {
 		var event receiptAppendEvent

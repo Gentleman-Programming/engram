@@ -1172,7 +1172,7 @@ func readMutationChunkBackfillCandidates(ctx context.Context, query mutationChun
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: query mutation chunk backfill candidates: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	missing := make([]MutationEntry, 0)
 	var scanned int

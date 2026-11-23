@@ -42,7 +42,7 @@ func verifySessionIndex(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var project string
 		var payload []byte
@@ -68,7 +68,7 @@ func readSessionIndex(ctx context.Context, tx *sql.Tx) (map[string]map[string]st
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	known := make(map[string]map[string]struct{})
 	for rows.Next() {
 		var project, id string
