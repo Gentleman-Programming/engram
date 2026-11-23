@@ -29,6 +29,17 @@ CREATE TABLE IF NOT EXISTS managed_runtime_writes (
 	FOREIGN KEY (root) REFERENCES sessions(id) ON DELETE CASCADE,
 	FOREIGN KEY (effective_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS managed_runtime_hosts (
+	root TEXT NOT NULL,
+	effective_id TEXT NOT NULL,
+	pid INTEGER NOT NULL CHECK (pid > 1),
+	start TEXT NOT NULL,
+	domain TEXT NOT NULL,
+	retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),
+	PRIMARY KEY (root, effective_id, pid, start, domain),
+	FOREIGN KEY (root) REFERENCES sessions(id) ON DELETE CASCADE,
+	FOREIGN KEY (effective_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS idx_managed_runtime_generation_root ON managed_runtime_generations(root, generation);
 CREATE INDEX IF NOT EXISTS idx_managed_runtime_effective ON managed_runtime_generations(effective_id, root, closed);
 CREATE INDEX IF NOT EXISTS idx_managed_runtime_pending ON managed_runtime_writes(root, effective_id, confirmed);
@@ -37,6 +48,8 @@ CREATE INDEX IF NOT EXISTS idx_managed_runtime_pending ON managed_runtime_writes
 var (
 	ErrManagedRuntimeGeneration       = errors.New("managed runtime generation is not current")
 	ErrManagedRuntimeWriteUnresolved  = errors.New("managed runtime has an unresolved observation write")
+	ErrManagedRuntimeHostsRemain      = errors.New("managed runtime hosts have not been retired")
+	ErrManagedRuntimeHostIdentity     = errors.New("invalid managed runtime host identity")
 	errManagedRuntimeSchemaIncomplete = errors.New("managed runtime schema is incomplete")
 )
 
@@ -93,7 +106,10 @@ func (scope ManagedRuntimeScope) verifyLive(tx *sql.Tx) error {
 // AdmitManagedRuntime advances the generation for a verified live binding.
 // The owned supervisor is responsible for authorizing each admission and for
 // retaining the current generation across changes to its set of live hosts.
-func (s *Store) AdmitManagedRuntime(scope ManagedRuntimeScope) (int64, error) {
+func (s *Store) AdmitManagedRuntime(scope ManagedRuntimeScope, host ManagedRuntimeHost) (int64, error) {
+	if !host.valid() {
+		return 0, ErrManagedRuntimeHostIdentity
+	}
 	scope, err := scope.normalized()
 	if err != nil {
 		return 0, err
@@ -105,7 +121,7 @@ func (s *Store) AdmitManagedRuntime(scope ManagedRuntimeScope) (int64, error) {
 		}
 		var tables int
 		if err := tx.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table'
-			AND name IN ('managed_runtime_generations', 'managed_runtime_writes')`).Scan(&tables); err != nil {
+			AND name IN ('managed_runtime_generations', 'managed_runtime_writes', 'managed_runtime_hosts')`).Scan(&tables); err != nil {
 			return err
 		}
 		switch tables {
@@ -113,7 +129,8 @@ func (s *Store) AdmitManagedRuntime(scope ManagedRuntimeScope) (int64, error) {
 			if _, err := s.execHook(tx, managedRuntimeSchema); err != nil {
 				return err
 			}
-		case 1:
+		case 3:
+		default:
 			return errManagedRuntimeSchemaIncomplete
 		}
 		var otherRoot bool
@@ -124,6 +141,23 @@ func (s *Store) AdmitManagedRuntime(scope ManagedRuntimeScope) (int64, error) {
 		}
 		if otherRoot {
 			return ErrRuntimeSessionScopeConflict
+		}
+		var retired bool
+		err := tx.QueryRow(`SELECT retired FROM managed_runtime_hosts
+			WHERE root=? AND effective_id=? AND pid=? AND start=? AND domain=?`,
+			scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain).Scan(&retired)
+		if err == nil {
+			if retired {
+				return ErrManagedRuntimeGeneration
+			}
+			return scope.latestOpenGeneration(tx, &generation)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if _, err := s.execHook(tx, `INSERT INTO managed_runtime_hosts(root,effective_id,pid,start,domain)
+			VALUES (?,?,?,?,?)`, scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain); err != nil {
+			return err
 		}
 		return tx.QueryRow(`
 INSERT INTO managed_runtime_generations(root, project, directory, mode, effective_id)
@@ -164,6 +198,14 @@ func (s *Store) RecordManagedRuntimeWrite(scope ManagedRuntimeScope, generation 
 		}
 		if err := scope.verifyLive(tx); err != nil {
 			return err
+		}
+		var enrolled bool
+		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM managed_runtime_hosts
+			WHERE root=? AND effective_id=? AND retired=0)`, scope.Root, scope.EffectiveID).Scan(&enrolled); err != nil {
+			return err
+		}
+		if !enrolled {
+			return ErrManagedRuntimeHostIdentity
 		}
 		result, err := s.execHook(tx, `
 INSERT INTO managed_runtime_writes(operation_id,root,effective_id)
@@ -238,6 +280,14 @@ func (s *Store) CloseManagedRuntime(scope ManagedRuntimeScope, generation int64)
 		}
 		if err := scope.verifyLive(tx); err != nil {
 			return err
+		}
+		var hostsRemain bool
+		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM managed_runtime_hosts
+			WHERE root=? AND effective_id=? AND retired=0)`, scope.Root, scope.EffectiveID).Scan(&hostsRemain); err != nil {
+			return err
+		}
+		if hostsRemain {
+			return ErrManagedRuntimeHostsRemain
 		}
 		var pending bool
 		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM managed_runtime_writes WHERE root=? AND effective_id=? AND confirmed=0)`,

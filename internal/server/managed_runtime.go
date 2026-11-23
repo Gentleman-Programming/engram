@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Gentleman-Programming/engram/v3/internal/hostbind"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
@@ -27,6 +28,7 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		Generation  int64                       `json:"generation"`
 		OperationID string                      `json:"operation_id"`
 		Observation *store.AddObservationParams `json:"observation"`
+		Host        *store.ManagedRuntimeHost   `json:"host"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
 	decoder.DisallowUnknownFields()
@@ -44,13 +46,47 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "observation is only accepted when saving")
 		return
 	}
+	var hosts []store.ManagedRuntimeHost
+	if body.Host != nil && r.URL.Path != "/internal/managed-runtime/admit" && r.URL.Path != "/internal/managed-runtime/retire" {
+		jsonError(w, http.StatusBadRequest, "host is only accepted for admission and retirement")
+		return
+	}
 	switch r.URL.Path {
 	case "/internal/managed-runtime/admit":
-		if body.Generation != 0 || body.OperationID != "" {
-			jsonError(w, http.StatusBadRequest, "admission takes only a runtime scope")
+		if body.Generation != 0 || body.OperationID != "" || body.Host == nil ||
+			body.Host.PID <= 1 || strings.TrimSpace(body.Host.Start) == "" || body.Host.Domain != "" {
+			jsonError(w, http.StatusBadRequest, "admission requires a host PID and start token")
 			return
 		}
-		body.Generation, err = s.store.AdmitManagedRuntime(scope)
+		body.Host.Domain, err = hostbind.ProcessDomain()
+		if err != nil {
+			jsonError(w, http.StatusServiceUnavailable, "process domain unavailable")
+			return
+		}
+		start, inspectErr := hostbind.ProcessStart(body.Host.PID)
+		if inspectErr != nil || start != body.Host.Start {
+			jsonError(w, http.StatusConflict, "host identity is not current")
+			return
+		}
+		body.Generation, err = s.store.AdmitManagedRuntime(scope, *body.Host)
+	case "/internal/managed-runtime/hosts":
+		if body.Generation != 0 || body.OperationID != "" {
+			jsonError(w, http.StatusBadRequest, "host lookup takes only a runtime scope")
+			return
+		}
+		body.Generation, hosts, err = s.store.ListManagedRuntimeHosts(scope)
+	case "/internal/managed-runtime/retire":
+		if body.Generation <= 0 || body.OperationID != "" || body.Host == nil ||
+			body.Host.PID <= 1 || strings.TrimSpace(body.Host.Start) == "" || strings.TrimSpace(body.Host.Domain) == "" {
+			jsonError(w, http.StatusBadRequest, "retirement requires a generation and complete host identity")
+			return
+		}
+		exited, inspectErr := hostbind.ProcessTerminated(body.Host.PID, body.Host.Start, body.Host.Domain)
+		if inspectErr != nil || !exited {
+			jsonError(w, http.StatusConflict, "host exit cannot be verified")
+			return
+		}
+		err = s.store.RetireManagedRuntimeHost(scope, body.Generation, *body.Host)
 	case "/internal/managed-runtime/write-intent":
 		if body.Generation <= 0 || strings.TrimSpace(body.OperationID) == "" {
 			jsonError(w, http.StatusBadRequest, "write intent requires a generation and an operation ID")
@@ -81,6 +117,10 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		switch {
+		case errors.Is(err, store.ErrManagedRuntimeHostIdentity):
+			jsonError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, store.ErrManagedRuntimeHostsRemain):
+			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "managed_runtime_hosts_remain"})
 		case errors.Is(err, store.ErrManagedRuntimeWriteUnresolved):
 			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "managed_runtime_write_unresolved"})
 		case errors.Is(err, store.ErrManagedRuntimeGeneration), errors.Is(err, store.ErrRuntimeSessionEffectiveIDMismatch), errors.Is(err, store.ErrRuntimeSessionScopeConflict):
@@ -100,5 +140,9 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusCreated, map[string]any{"id": observation.ID, "status": "saved"})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"effective_id": scope.EffectiveID, "generation": body.Generation})
+	response := map[string]any{"effective_id": scope.EffectiveID, "generation": body.Generation}
+	if r.URL.Path == "/internal/managed-runtime/hosts" {
+		response["hosts"] = hosts
+	}
+	jsonResponse(w, http.StatusOK, response)
 }

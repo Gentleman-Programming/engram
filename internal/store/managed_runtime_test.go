@@ -8,6 +8,9 @@ import (
 	"testing"
 )
 
+var managedTestHostA = ManagedRuntimeHost{PID: 20, Start: "birth-a", Domain: "local-domain"}
+var managedTestHostB = ManagedRuntimeHost{PID: 21, Start: "birth-b", Domain: "local-domain"}
+
 func TestManagedRuntimeWriteAndClosureRollback(t *testing.T) {
 	st := newTestStore(t)
 	dir := t.TempDir()
@@ -26,24 +29,32 @@ func TestManagedRuntimeWriteAndClosureRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope.EffectiveID = effective
-	first, err := st.AdmitManagedRuntime(scope)
+	first, err := st.AdmitManagedRuntime(scope, managedTestHostA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	alias := scope
 	alias.Root = scope.EffectiveID
-	if _, err := st.AdmitManagedRuntime(alias); !errors.Is(err, ErrRuntimeSessionScopeConflict) {
+	if _, err := st.AdmitManagedRuntime(alias, managedTestHostB); !errors.Is(err, ErrRuntimeSessionScopeConflict) {
 		t.Fatalf("effective session admitted as a competing root: %v", err)
 	}
 	if err := st.RecordManagedRuntimeWrite(scope, first, "save"); err != nil {
 		t.Fatal(err)
 	}
-	second, err := st.AdmitManagedRuntime(scope)
+	second, err := st.AdmitManagedRuntime(scope, managedTestHostB)
 	if err != nil || second != first+1 {
 		t.Fatalf("generation was not advanced: %d %v", second, err)
 	}
 	if _, err := st.CloseManagedRuntime(scope, first); !errors.Is(err, ErrManagedRuntimeGeneration) {
 		t.Fatalf("stale close: %v", err)
+	}
+	if _, err := st.CloseManagedRuntime(scope, second); !errors.Is(err, ErrManagedRuntimeHostsRemain) {
+		t.Fatalf("live cohort was not preserved: %v", err)
+	}
+	for _, host := range []ManagedRuntimeHost{managedTestHostA, managedTestHostB} {
+		if err := st.RetireManagedRuntimeHost(scope, second, host); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := st.CloseManagedRuntime(scope, second); !errors.Is(err, ErrManagedRuntimeWriteUnresolved) {
 		t.Fatalf("receipt absent: %v", err)
@@ -135,8 +146,11 @@ func TestMigrateCopyManagedRuntimeReceipts(t *testing.T) {
 	if err := st.CreateSessionWithOwnershipMode(scope.Root, scope.Project, scope.Directory, scope.Mode); err != nil {
 		t.Fatal(err)
 	}
-	generation, err := st.AdmitManagedRuntime(scope)
+	generation, err := st.AdmitManagedRuntime(scope, managedTestHostA)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, generation, managedTestHostA); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.CloseManagedRuntime(scope, generation); err != nil {
@@ -165,7 +179,7 @@ func TestMigrateCopyManagedRuntimeReceipts(t *testing.T) {
 	if err := reopened.CreateSessionWithOwnershipMode(scope.Root, scope.Project, scope.Directory, scope.Mode); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reopened.AdmitManagedRuntime(scope); !errors.Is(err, errManagedRuntimeSchemaIncomplete) {
+	if _, err := reopened.AdmitManagedRuntime(scope, managedTestHostA); !errors.Is(err, errManagedRuntimeSchemaIncomplete) {
 		t.Fatalf("partial managed schema was repaired silently: %v", err)
 	}
 	if err := reopened.Close(); err != nil {
@@ -186,7 +200,7 @@ func TestManagedRuntimeInvalidatesDeletedGeneration(t *testing.T) {
 		}
 	}
 	create()
-	old, err := st.AdmitManagedRuntime(scope)
+	old, err := st.AdmitManagedRuntime(scope, managedTestHostA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +208,7 @@ func TestManagedRuntimeInvalidatesDeletedGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	create()
-	next, err := st.AdmitManagedRuntime(scope)
+	next, err := st.AdmitManagedRuntime(scope, managedTestHostA)
 	if err != nil || next <= old {
 		t.Fatalf("new admission reused a generation: %d %v", next, err)
 	}
@@ -213,7 +227,7 @@ func TestManagedRuntimeRejectsGenericOperationReplay(t *testing.T) {
 	if err := st.CreateSessionWithOwnershipMode(scope.Root, scope.Project, scope.Directory, scope.Mode); err != nil {
 		t.Fatal(err)
 	}
-	generation, err := st.AdmitManagedRuntime(scope)
+	generation, err := st.AdmitManagedRuntime(scope, managedTestHostA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +242,58 @@ func TestManagedRuntimeRejectsGenericOperationReplay(t *testing.T) {
 	if _, err := st.SaveManagedRuntimeObservation(scope, generation, params); !errors.Is(err, ErrObservationOperationConflict) {
 		t.Fatalf("ordinary save was accepted as a managed replay: %v", err)
 	}
+	if err := st.RetireManagedRuntimeHost(scope, generation, managedTestHostA); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.CloseManagedRuntime(scope, generation); !errors.Is(err, ErrManagedRuntimeWriteUnresolved) {
 		t.Fatalf("ordinary save cleared the managed write gate: %v", err)
+	}
+}
+
+func TestManagedRuntimeRecoversHostsAfterReopen(t *testing.T) {
+	cfg := FallbackConfig(t.TempDir())
+	st, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	scope := ManagedRuntimeScope{Root: "cohort", EffectiveID: "cohort", Project: "project", Directory: t.TempDir(), Mode: SessionOwnershipProjectOwned}
+	if err := st.CreateSessionWithOwnershipMode(scope.Root, scope.Project, scope.Directory, scope.Mode); err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.AdmitManagedRuntime(scope, managedTestHostA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.AdmitManagedRuntime(scope, managedTestHostB)
+	if err != nil || second <= first {
+		t.Fatalf("second generation=%d: %v", second, err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, hosts, err := st.ListManagedRuntimeHosts(scope)
+	if err != nil || generation != second || len(hosts) != 2 || hosts[0] != managedTestHostA || hosts[1] != managedTestHostB {
+		t.Fatalf("after reopen, generation=%d, hosts=%+v: %v", generation, hosts, err)
+	}
+	retry, err := st.AdmitManagedRuntime(scope, managedTestHostA)
+	if err != nil || retry != second {
+		t.Fatalf("admission replay changed generation: %d %v", retry, err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, second, managedTestHostB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CloseManagedRuntime(scope, second); !errors.Is(err, ErrManagedRuntimeHostsRemain) {
+		t.Fatalf("outstanding oldest host did not fence close: %v", err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, second, managedTestHostA); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := st.CloseManagedRuntime(scope, second); err != nil || !applied {
+		t.Fatalf("terminal close: %v %v", applied, err)
 	}
 }

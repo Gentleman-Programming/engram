@@ -395,11 +395,13 @@ The Claude native PreToolUse gate verifies the local `/health` instance ID again
   - Both return `200` with `{id, status}` (`resolved` or `ended`) and `resumed_from` when the effective ID differs from the root.
   - Both validate root and selected identity using existing project-sharing policy, exact ownership mode and canonical worktree. Shared sessions permit cross-project use without changing ownership; foreign project-owned contexts reject. Blank stored directories or incompatible scopes return `409`; no live identity returns `404`. Malformed/unknown/trailing input returns `400`.
   - Neither operation creates, repairs, advances or reopens sessions. Generic exact-ID ending remains unchanged.
-- Session-owned Core exposes private owner routes `POST /internal/managed-runtime/admit`, `/internal/managed-runtime/write-intent`, `/internal/managed-runtime/save` and `/internal/managed-runtime/close`.
+- Session-owned Core exposes private owner routes under `/internal/managed-runtime/`.
   Each accepts `root`, `effective_id`, `project`, `directory` and `ownership_mode`.
-  Admission returns the exact `effective_id` and a new `generation` for an already live binding. Write intent takes the current generation and a fresh `operation_id` before dispatch. Managed save takes the same generation and operation ID plus an `observation` object. The save and its intent confirmation commit together. Close takes the current generation after the supervisor has verified terminality.
-  Recorded writes require matching committed observations. An unresolved write returns `409` and `managed_runtime_write_unresolved`. After a successful close, the same scoped generation can retrieve the committed result by repeating the close request.
-  The supervisor owns the bearer and controls participation, write dispatch and host liveness. These routes are private to a session-owned listener. Normal hooks still use their existing endpoints.
+  On Linux, `POST /internal/managed-runtime/admit` also accepts `host` with `pid` and `start`. The Core verifies the live identity in its own PID namespace and returns a generation. Recovery uses `POST /internal/managed-runtime/hosts` to read the durable cohort and current generation.
+  The supervisor submits the recorded host object and generation to `POST /internal/managed-runtime/retire`. Core verifies exit in the same boot and PID namespace before retiring the record. A live or unverified host continues to fence closure.
+  Write intent takes the current generation and a fresh `operation_id` before dispatch. Managed save takes the same generation and operation ID plus an `observation` object. The save and its intent confirmation commit together. Close takes the current generation after retirement of all recorded hosts.
+  An outstanding host returns `409` with `managed_runtime_hosts_remain`. An unresolved write returns `409` with `managed_runtime_write_unresolved`. A successful close returns the existing result on a retry with the same scoped generation.
+  The supervisor owns the bearer and controls participation and write dispatch. Normal hooks still use their existing endpoints.
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
   - No-result responses return `200` with `[]` (never `null`)
 - `GET /sessions/{id}` — Get single session by ID

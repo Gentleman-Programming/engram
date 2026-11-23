@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/Gentleman-Programming/engram/v3/internal/hostbind"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
@@ -39,7 +42,35 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	owned.SetSessionOwnedToken(token)
 	call(shared, token, prefix+"admit", body, 404)
 	call(owned, "invalid", prefix+"admit", body, 401)
+	if runtime.GOOS != "linux" {
+		body["host"] = map[string]any{"pid": 10, "start": "fixture"}
+		call(owned, token, prefix+"admit", body, 503)
+		return
+	}
+	// Spawn a child that stays live until the fixture explicitly stops it.
+	host := exec.Command("sh", "-c", "exec sleep 120")
+	if err := host.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if host.ProcessState == nil {
+			_ = host.Process.Kill()
+			_ = host.Wait()
+		}
+	}()
+	start, err := hostbind.ProcessStart(host.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body["host"] = store.ManagedRuntimeHost{PID: host.Process.Pid, Start: start}
 	resp := call(owned, token, prefix+"admit", body, 200)
+	delete(body, "host")
+	roster := call(owned, token, prefix+"hosts", body, 200)
+	var stored struct{ Hosts []store.ManagedRuntimeHost }
+	if err := json.Unmarshal(roster.Body.Bytes(), &stored); err != nil || len(stored.Hosts) != 1 ||
+		stored.Hosts[0].PID != host.Process.Pid || stored.Hosts[0].Domain == "" {
+		t.Fatalf("invalid managed host roster: %s", roster.Body)
+	}
 	var admitted struct {
 		Generation int64 `json:"generation"`
 	}
@@ -47,10 +78,29 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 		t.Fatalf("bad admission: %s", resp.Body)
 	}
 	body["generation"] = admitted.Generation
+	openHost := call(owned, token, prefix+"close", body, 409)
+	if !strings.Contains(openHost.Body.String(), "managed_runtime_hosts_remain") {
+		t.Fatal(openHost.Body)
+	}
+	body["host"] = stored.Hosts[0]
+	call(owned, token, prefix+"retire", body, 409)
+	delete(body, "host")
+
 	call(owned, token, prefix+"write-intent", body, 400)
 	body["operation_id"] = "managed-save"
 	call(owned, token, prefix+"write-intent", body, 200)
 	delete(body, "operation_id")
+	if err := host.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = host.Wait()
+	wrongDomain := stored.Hosts[0]
+	wrongDomain.Domain = "not-the-same-process-domain"
+	body["host"] = wrongDomain
+	call(owned, token, prefix+"retire", body, 409)
+	body["host"] = stored.Hosts[0]
+	call(owned, token, prefix+"retire", body, 200)
+	delete(body, "host")
 	pending := call(owned, token, prefix+"close", body, 409)
 	if !strings.Contains(pending.Body.String(), "managed_runtime_write_unresolved") {
 		t.Fatal(pending.Body)
