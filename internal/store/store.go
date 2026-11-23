@@ -1181,7 +1181,17 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, cfg: cfg, instanceID: instanceID, generation: generation, hooks: defaultStoreHooks()}
+	readinessDB, err := openGenerationDB(readinessDSN(dbPath), generation, true)
+	if err != nil {
+		return nil, fmt.Errorf("engram: create readiness pool: %w", err)
+	}
+	readinessDB.SetMaxOpenConns(1)
+	defer func() {
+		if !succeeded {
+			_ = readinessDB.Close()
+		}
+	}()
+	s := &Store{db: db, cfg: cfg, instanceID: instanceID, generation: generation, readinessDB: readinessDB, hooks: defaultStoreHooks()}
 	trace.Mark("startup-migrations")
 	err = s.runStartupMigrations(ctx, ownedStartup)
 	if err != nil {
@@ -1198,14 +1208,6 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// The Store owns both pools for its entire lifetime. The readiness pool
-	// opens its single physical connection only when it receives a query.
-	readinessDB, err := openGenerationDB(readinessDSN(dbPath), generation, true)
-	if err != nil {
-		return nil, fmt.Errorf("engram: create readiness pool: %w", err)
-	}
-	readinessDB.SetMaxOpenConns(1)
-	s.readinessDB = readinessDB
 	succeeded = true
 	trace.Mark("store-ready")
 	return s, nil
@@ -1319,6 +1321,13 @@ func (s *Store) runStartupMigrations(ctx context.Context, startupLockHeld bool) 
 		if isFutureSchemaVersion(current) {
 			return nil
 		}
+		var checked *observationNormalizationCheck
+		if !startupLockHeld && current == schemaVersion {
+			checked = s.checkObservationNormalization(ctx)
+			if checked != nil {
+				defer func(conn *sql.Conn) { _ = conn.Close() }(checked.conn)
+			}
+		}
 		if !startupLockHeld {
 			unlock, err := acquireStartupMigrationLock(ctx, filepath.Join(s.cfg.DataDir, ".migrate.lock"))
 			if err != nil {
@@ -1347,10 +1356,11 @@ func (s *Store) runStartupMigrations(ctx context.Context, startupLockHeld bool) 
 		needsVersionStamp := current < schemaVersion
 		if needsVersionStamp {
 			migrateRunCount.Add(1)
+			checked = nil
 		}
 		trace := startupTraceFrom(ctx)
 		trace.Mark("migration-work")
-		if err := s.migrate(); err != nil {
+		if err := s.migrateWithObservationCheck(ctx, checked); err != nil {
 			trace.markSQLiteLock("sqlite-migration-lock-result", err)
 			return fmt.Errorf("engram: migration: %w", err)
 		}
@@ -1497,6 +1507,10 @@ func (s *Store) backfillLegacySyncMutationProjects() error {
 }
 
 func (s *Store) migrate() error {
+	return s.migrateWithObservationCheck(context.Background(), nil)
+}
+
+func (s *Store) migrateWithObservationCheck(ctx context.Context, checked *observationNormalizationCheck) error {
 	// Existing and partially migrated schemas can have triggers that need FTS
 	// before the legacy data migrations run. Only an empty schema can defer
 	// creation to migrateFTS, which installs tables and triggers together.
@@ -1945,8 +1959,10 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	if err := s.normalizeLegacyObservations(); err != nil {
-		return err
+	if !checked.unchanged(ctx, s.generation) {
+		if err := s.normalizeLegacyObservations(); err != nil {
+			return err
+		}
 	}
 
 	if _, err := s.execHook(s.db, `UPDATE user_prompts SET project = '' WHERE project IS NULL`); err != nil {
@@ -2128,15 +2144,7 @@ func (s *Store) migrate() error {
 // to the repairs below; do not cache the result between migration runs.
 func (s *Store) normalizeLegacyObservations() error {
 	var needsNormalization bool
-	if err := s.db.QueryRow(`SELECT EXISTS (
-		SELECT 1 FROM observations
-		WHERE scope IS NULL OR scope = ''
-			OR topic_key = ''
-			OR revision_count IS NULL OR revision_count < 1
-			OR duplicate_count IS NULL OR duplicate_count < 1
-			OR updated_at IS NULL OR updated_at = ''
-			OR sync_id IS NULL OR sync_id = ''
-	)`).Scan(&needsNormalization); err != nil {
+	if err := s.db.QueryRow(observationNormalizationNeeded).Scan(&needsNormalization); err != nil {
 		return fmt.Errorf("inspect legacy observations: %w", err)
 	}
 	if !needsNormalization {
