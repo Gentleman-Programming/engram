@@ -6,7 +6,7 @@ WITH attainable AS (
   SELECT oid,nspowner FROM pg_catalog.pg_namespace WHERE nspname='receipt_audit'
 ), tables AS (
   SELECT c.oid,c.relname,c.relowner FROM pg_catalog.pg_class c JOIN audit ON audit.oid=c.relnamespace
-  WHERE c.relname IN ('events','enrollment') AND c.relkind='r'
+  WHERE c.relname IN ('events','enrollment','witnesses') AND c.relkind='r'
 ), routines AS (
   SELECT p.oid,p.proname,p.proowner,p.pronargs,p.proargtypes,p.prorettype,p.prolang,p.prosecdef,p.proconfig,p.prosrc
   FROM pg_catalog.pg_proc p JOIN audit ON audit.oid=p.pronamespace
@@ -25,10 +25,13 @@ WITH attainable AS (
 ), protected AS (
   SELECT (SELECT oid FROM tables WHERE relname='events') AS events,
          (SELECT oid FROM tables WHERE relname='enrollment') AS enrollment,
+         (SELECT oid FROM tables WHERE relname='witnesses') AS witnesses,
          (SELECT oid FROM routines WHERE proname='reset_log' AND pronargs=0) AS reset,
          (SELECT oid FROM routines WHERE proname='prune_prefix' AND pronargs=1 AND proargtypes[0]='pg_catalog.xid8'::pg_catalog.regtype) AS prune,
          (SELECT oid FROM routines WHERE proname='identity' AND pronargs=0) AS identity,
          (SELECT oid FROM routines WHERE proname='catalog' AND pronargs=0) AS catalog,
+         (SELECT oid FROM routines WHERE proname='save_witness' AND pronargs=1
+            AND proargtypes[0]='pg_catalog.text'::pg_catalog.regtype) AS save_witness,
          (SELECT oid FROM audit) AS ns
 ), protected_owners(owner) AS (
   SELECT datdba FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()
@@ -43,8 +46,10 @@ WITH attainable AS (
      OR pg_catalog.has_schema_privilege(a.oid,p.ns,'CREATE')
      OR pg_catalog.has_table_privilege(a.oid,p.events,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
      OR pg_catalog.has_table_privilege(a.oid,p.enrollment,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
+     OR pg_catalog.has_table_privilege(a.oid,p.witnesses,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
      OR pg_catalog.has_any_column_privilege(a.oid,p.events,'INSERT,UPDATE')
      OR pg_catalog.has_any_column_privilege(a.oid,p.enrollment,'INSERT,UPDATE')
+     OR pg_catalog.has_any_column_privilege(a.oid,p.witnesses,'INSERT,UPDATE')
      OR pg_catalog.has_function_privilege(a.oid,p.reset,'EXECUTE') OR pg_catalog.has_function_privilege(a.oid,p.prune,'EXECUTE')
      OR pg_catalog.pg_has_role(a.oid,'pg_write_server_files','USAGE') OR pg_catalog.pg_has_role(a.oid,'pg_execute_server_program','USAGE')
      OR EXISTS (SELECT FROM pg_catalog.pg_settings s WHERE name IN ('session_replication_role','event_triggers')
@@ -56,5 +61,7 @@ SELECT coalesce(
     AND reset IS NOT NULL AND prune IS NOT NULL
     AND pg_catalog.has_schema_privilege(current_user,ns,'USAGE')
     AND pg_catalog.has_table_privilege(current_user,events,'SELECT') AND pg_catalog.has_table_privilege(current_user,enrollment,'SELECT')
+    AND pg_catalog.has_table_privilege(current_user,witnesses,'SELECT')
+    AND pg_catalog.has_function_privilege(current_user,save_witness,'EXECUTE')
     AND pg_catalog.has_function_privilege(current_user,identity,'EXECUTE') AND pg_catalog.has_function_privilege(current_user,catalog,'EXECUTE'),false)
 FROM protected;

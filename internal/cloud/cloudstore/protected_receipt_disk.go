@@ -9,16 +9,15 @@ import (
 	"io"
 	"os"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
-const protectedReceiptVersion = 2
+const protectedReceiptVersion = 3
 const protectedReceiptBytes = 16 << 10
-const protectedReceiptName = "startup-receipt-v2.json"
+const protectedReceiptName = "startup-receipt-v3.json"
 const protectedDeltaTimeout = 2 * time.Second
 
 type protectedDiskReceipt struct {
@@ -26,6 +25,7 @@ type protectedDiskReceipt struct {
 	Projects []string `json:"projects"`
 	Snapshot string   `json:"snapshot"`
 	Identity string   `json:"identity"`
+	Witness  string   `json:"witness"`
 }
 
 // NewProtectedStartupReceiptVerifier checks for a prepared receipt in a
@@ -116,10 +116,7 @@ func reuseProtectedDiskReceipt(ctx context.Context, db *sql.DB, projects []strin
 		fmt.Fprintf(os.Stderr, "engram cloud startup: protected delta refused (events=%d)\n", len(events))
 		return false
 	}
-	// A quiet proof can advance the retention horizon too. PostgreSQL renders
-	// the active transaction IDs as a comma-separated list in the snapshot.
-	// Keep the earlier usable proof if the new list exceeds our read budget.
-	if current.snapshot != prior.snapshot && strings.Count(current.snapshot, ",") < receiptAppendPendingXIDCap {
+	if current.witness != prior.witness {
 		if err := writeProtectedDiskReceipt(root, protectedReceiptName, current); err != nil {
 			return false
 		}
@@ -165,17 +162,17 @@ func readProtectedDiskReceipt(root *os.Root, name string) (protectedReceipt, err
 		return protectedReceipt{}, err
 	}
 	var disk protectedDiskReceipt
-	if len(data) > protectedReceiptBytes || json.Unmarshal(data, &disk) != nil || disk.Version != protectedReceiptVersion || len(disk.Projects) == 0 || disk.Snapshot == "" || disk.Identity == "" {
+	if len(data) > protectedReceiptBytes || json.Unmarshal(data, &disk) != nil || disk.Version != protectedReceiptVersion || len(disk.Projects) == 0 || disk.Snapshot == "" || disk.Identity == "" || disk.Witness == "" {
 		return protectedReceipt{}, errReceiptAppendUnproven
 	}
 	if !slices.Equal(protectedProjects(disk.Projects), disk.Projects) {
 		return protectedReceipt{}, errReceiptAppendUnproven
 	}
-	return protectedReceipt{disk.Projects, disk.Snapshot, disk.Identity}, nil
+	return protectedReceipt{disk.Projects, disk.Snapshot, disk.Identity, disk.Witness}, nil
 }
 
 func writeProtectedDiskReceipt(root *os.Root, name string, receipt protectedReceipt) error {
-	disk := protectedDiskReceipt{protectedReceiptVersion, receipt.projects, receipt.snapshot, receipt.identity}
+	disk := protectedDiskReceipt{protectedReceiptVersion, receipt.projects, receipt.snapshot, receipt.identity, receipt.witness}
 	data, err := json.Marshal(disk)
 	if err != nil {
 		return err

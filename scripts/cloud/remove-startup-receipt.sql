@@ -16,7 +16,8 @@ BEGIN
   END LOOP;
 END $$;
 DROP FUNCTION receipt_audit.record_catalog(), receipt_audit.record_insert(), receipt_audit.record_other(),
-              receipt_audit.identity(), receipt_audit.catalog(), receipt_audit.prune_prefix(xid8), receipt_audit.reset_log();
-DROP TABLE receipt_audit.events, receipt_audit.enrollment;
+              receipt_audit.identity(), receipt_audit.catalog(), receipt_audit.prune_prefix(xid8), receipt_audit.reset_log(),
+              receipt_audit.save_witness(text);
+DROP TABLE receipt_audit.events, receipt_audit.enrollment, receipt_audit.witnesses;
 DROP SCHEMA receipt_audit;
 COMMIT;

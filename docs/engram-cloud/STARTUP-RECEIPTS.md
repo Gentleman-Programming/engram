@@ -24,9 +24,9 @@ This opt-in expects a Linux Cloud process, PostgreSQL 16 or later, and a finite 
    engram cloud repair prepare-startup-receipt
    ```
 
-   The command verifies an existing PostgreSQL snapshot in a read-only transaction. Success stores `startup-receipt-v2.json` in the private directory. If preparation reports incomplete coverage, start normally so Engram can run repair, then prepare again.
+   The command verifies an existing PostgreSQL snapshot without changing application rows. It commits a witness in the audit schema in that same transaction before storing `startup-receipt-v3.json` in the private directory. If preparation reports incomplete coverage, start normally so Engram can run repair, then prepare again.
 
-4. Restart `engram cloud serve` with the same settings. The log entry `protected receipt reused` confirms bounded startup. When scope or database enrollment changes, prepare a new receipt. A timeout or a declined proof resumes ordinary startup repair.
+4. Restart `engram cloud serve` with the same settings. The log entry `protected receipt reused` confirms bounded startup. When scope or database enrollment changes, prepare a new receipt. A timeout, a missing witness after a physical restore, or a declined proof resumes ordinary startup repair. Quiet restarts reuse the existing witness. A verified append records a fresh witness before advancing the receipt. Retention prunes old witnesses with the audit history.
 
 ## Adopt a separate runtime from the Compose bootstrap
 

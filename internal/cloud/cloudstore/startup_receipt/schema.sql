@@ -20,6 +20,22 @@ CREATE SCHEMA receipt_audit;
 CREATE TABLE receipt_audit.events(xid xid8 NOT NULL, kind text NOT NULL, project text, seq bigint, id text);
 CREATE INDEX ON receipt_audit.events(xid);
 CREATE TABLE receipt_audit.enrollment(expected jsonb NOT NULL, epoch uuid NOT NULL, retained_from xid8 NOT NULL);
+CREATE TABLE receipt_audit.witnesses(token uuid PRIMARY KEY, scope text NOT NULL, snapshot text NOT NULL, xid xid8 NOT NULL);
+CREATE INDEX ON receipt_audit.witnesses(xid);
+
+-- A physical restore can preserve the enrollment identity but omit the
+-- transaction which verified the receipt. Issue a fresh token in that
+-- transaction, and bind it to its actual PostgreSQL snapshot.
+CREATE FUNCTION receipt_audit.save_witness(receipt_scope text) RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE witness uuid := gen_random_uuid();
+BEGIN
+  IF current_setting('transaction_isolation')<>'repeatable read' OR length(receipt_scope)<>64 THEN
+    RAISE EXCEPTION 'invalid startup receipt witness request';
+  END IF;
+  INSERT INTO receipt_audit.witnesses VALUES(witness,receipt_scope,pg_current_snapshot()::text,pg_current_xact_id());
+  RETURN witness;
+END $$;
+REVOKE EXECUTE ON FUNCTION receipt_audit.save_witness(text) FROM PUBLIC;
 
 CREATE FUNCTION receipt_audit.record_insert() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 BEGIN
@@ -98,6 +114,7 @@ BEGIN
   UPDATE receipt_audit.enrollment SET retained_from=new_floor;
   DELETE FROM receipt_audit.events WHERE xid<new_floor;
   GET DIAGNOSTICS removed = ROW_COUNT;
+  DELETE FROM receipt_audit.witnesses WHERE xid<new_floor;
   RETURN removed;
 END $$;
 
@@ -107,6 +124,7 @@ BEGIN
   UPDATE receipt_audit.enrollment SET epoch=gen_random_uuid();
   DELETE FROM receipt_audit.events;
   GET DIAGNOSTICS removed = ROW_COUNT;
+  DELETE FROM receipt_audit.witnesses;
   RETURN removed;
 END $$;
 REVOKE EXECUTE ON FUNCTION receipt_audit.prune_prefix(xid8),receipt_audit.reset_log() FROM PUBLIC;
@@ -115,8 +133,8 @@ DECLARE runtime_role text := current_setting('engram.startup_receipt_runtime_rol
 DECLARE retention_role text := current_setting('engram.startup_receipt_retention_role');
 BEGIN
   EXECUTE format('GRANT USAGE ON SCHEMA receipt_audit TO %I, %I',runtime_role,retention_role);
-  EXECUTE format('GRANT SELECT ON receipt_audit.events, receipt_audit.enrollment TO %I',runtime_role);
-  EXECUTE format('GRANT EXECUTE ON FUNCTION receipt_audit.identity(), receipt_audit.catalog() TO %I',runtime_role);
+  EXECUTE format('GRANT SELECT ON receipt_audit.events, receipt_audit.enrollment, receipt_audit.witnesses TO %I',runtime_role);
+  EXECUTE format('GRANT EXECUTE ON FUNCTION receipt_audit.identity(), receipt_audit.catalog(), receipt_audit.save_witness(text) TO %I',runtime_role);
   EXECUTE format('GRANT EXECUTE ON FUNCTION receipt_audit.prune_prefix(xid8),receipt_audit.reset_log() TO %I',retention_role);
 END $$;
 
@@ -147,7 +165,7 @@ BEGIN
     CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
     WHERE p.pronamespace=audit_oid AND a.grantee<>p.proowner
       AND (a.privilege_type<>'EXECUTE' OR a.is_grantable OR NOT (
-        (a.grantee=runtime_oid AND p.proname IN ('identity','catalog')) OR
+        (a.grantee=runtime_oid AND p.proname IN ('identity','catalog','save_witness')) OR
         (a.grantee=retention_oid AND p.proname IN ('prune_prefix','reset_log'))
       ))
   ) THEN

@@ -25,7 +25,7 @@ import (
 var protectedFeedDDL string
 
 func sameLabProtectedReceipt(left, right protectedReceipt) bool {
-	return left.snapshot == right.snapshot && left.identity == right.identity && slices.Equal(left.projects, right.projects)
+	return left.snapshot == right.snapshot && left.identity == right.identity && left.witness == right.witness && slices.Equal(left.projects, right.projects)
 }
 
 func TestLabProtectedScopeReceipt(t *testing.T) {
@@ -40,7 +40,7 @@ func TestLabProtectedScopeReceipt(t *testing.T) {
 	dir := t.TempDir()
 	root := openReceiptTestRoot(t, dir)
 	const name = "receipt.json"
-	valid := protectedReceipt{sorted, "800:800:", "fixture-enrollment"}
+	valid := protectedReceipt{sorted, "800:800:", "fixture-enrollment", "fixture-witness"}
 	if err := writeProtectedDiskReceipt(root, name, valid); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +51,8 @@ func TestLabProtectedScopeReceipt(t *testing.T) {
 		`{"protected_receipt_version":1,"project":"alpha","snapshot":"800:800:","identity":"fixture-enrollment"}`,
 		`{"protected_receipt_version":2,"projects":["gamma","alpha"],"snapshot":"800:800:","identity":"fixture-enrollment"}`,
 		`{"protected_receipt_version":2,"projects":["alpha","alpha"],"snapshot":"800:800:","identity":"fixture-enrollment"}`,
+		`{"protected_receipt_version":3,"projects":["alpha"],"snapshot":"800:800:","identity":"fixture-enrollment"}`,
+		`{"protected_receipt_version":3,"projects":["gamma","alpha"],"snapshot":"800:800:","identity":"fixture-enrollment","witness":"fixture-witness"}`,
 	} {
 		if err := root.WriteFile(name, []byte(unsupported), 0o600); err != nil {
 			t.Fatal(err)
@@ -311,7 +313,7 @@ func testLabConcurrentRetentionQuery(t *testing.T, ctx context.Context, cs *Clou
 	if _, err := operator.ExecContext(ctx, `SELECT receipt_audit.prune_prefix('18446744073709551615')`); err == nil {
 		t.Fatal("maintenance operator could prune beyond current xmin")
 	}
-	tx, err := startupSnapshot(ctx, cs.db)
+	tx, err := startupSnapshot(ctx, cs.db, true)
 	if err != nil {
 		t.Fatal(err)
 	}

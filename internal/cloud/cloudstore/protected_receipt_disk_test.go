@@ -14,7 +14,7 @@ func TestProtectedReceiptDoesNotDependOnWorkingDirectory(t *testing.T) {
 	other := t.TempDir()
 	t.Chdir(other)
 	const name = "receipt.json"
-	value := protectedReceipt{projects: []string{"fixture"}, snapshot: "1:2:", identity: "fixture-db"}
+	value := protectedReceipt{projects: []string{"fixture"}, snapshot: "1:2:", identity: "fixture-db", witness: "fixture-witness"}
 	if err := writeProtectedDiskReceipt(root, name, value); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestProtectedReceiptRejectsNonRegularTarget(t *testing.T) {
 	if err := os.Mkdir(receiptDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	value := protectedReceipt{projects: []string{"fixture"}, snapshot: "1:2:", identity: "fixture-db"}
+	value := protectedReceipt{projects: []string{"fixture"}, snapshot: "1:2:", identity: "fixture-db", witness: "fixture-witness"}
 	if _, err := readProtectedDiskReceipt(root, name); !errors.Is(err, errReceiptAppendUnproven) {
 		t.Fatalf("directory read: %v", err)
 	}

@@ -2,12 +2,17 @@ package cloudstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"strings"
 )
 
 type protectedReceipt struct {
 	projects           []string
 	snapshot, identity string
+	witness            string
 }
 
 const receiptAppendPendingXIDCap = 128
@@ -17,7 +22,7 @@ func captureProtectedReceipt(ctx context.Context, db *sql.DB, projects []string)
 	if len(projects) == 0 {
 		return protectedReceipt{}, errReceiptAppendUnproven
 	}
-	tx, err := startupSnapshot(ctx, db)
+	tx, err := startupSnapshot(ctx, db, false)
 	if err != nil {
 		return protectedReceipt{}, err
 	}
@@ -43,7 +48,22 @@ func captureProtectedReceipt(ctx context.Context, db *sql.DB, projects []string)
 			return protectedReceipt{}, errReceiptAppendUnproven
 		}
 	}
-	return protectedReceipt{projects, snapshot, identity}, tx.Commit()
+	return commitProtectedReceipt(ctx, tx, protectedReceipt{projects: projects, snapshot: snapshot, identity: identity})
+}
+
+func (r protectedReceipt) scopeKey() string {
+	data, _ := json.Marshal(r.projects)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+func commitProtectedReceipt(ctx context.Context, tx *sql.Tx, receipt protectedReceipt) (protectedReceipt, error) {
+	if err := tx.QueryRowContext(ctx, `SELECT receipt_audit.save_witness($1)::text`, receipt.scopeKey()).Scan(&receipt.witness); err != nil {
+		return protectedReceipt{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return protectedReceipt{}, err
+	}
+	return receipt, nil
 }
 
 func protectedCatalogSnapshot(ctx context.Context, tx *sql.Tx, prior string) (string, string, error) {
@@ -73,7 +93,7 @@ func protectedCatalogSnapshot(ctx context.Context, tx *sql.Tx, prior string) (st
 // Try a bounded proof and commit its read-only snapshot before advancing the
 // test receipt. Real fallback may write and runs only after this tx returns.
 func tryProtectedDelta(ctx context.Context, db *sql.DB, prior protectedReceipt) (protectedReceipt, []receiptAppendEvent, error) {
-	tx, err := startupSnapshot(ctx, db)
+	tx, err := startupSnapshot(ctx, db, false)
 	if err != nil {
 		return prior, nil, err
 	}
@@ -85,6 +105,15 @@ func tryProtectedDelta(ctx context.Context, db *sql.DB, prior protectedReceipt) 
 	if prior.identity != identity {
 		return prior, nil, errReceiptAppendUnproven
 	}
+	var witnessed bool
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM receipt_audit.witnesses
+		WHERE token=$1::uuid AND scope=$2 AND snapshot=$3)`, prior.witness, prior.scopeKey(), prior.snapshot).Scan(&witnessed)
+	if err != nil {
+		return prior, nil, err
+	}
+	if !witnessed {
+		return prior, nil, errReceiptAppendUnproven
+	}
 	events, err := readProtectedAppendEvents(ctx, tx, prior.snapshot)
 	if err != nil {
 		return prior, nil, err
@@ -92,10 +121,17 @@ func tryProtectedDelta(ctx context.Context, db *sql.DB, prior protectedReceipt) 
 	if err := verifyAppendMembership(ctx, tx, prior.projects, events); err != nil {
 		return prior, events, err
 	}
-	if err := tx.Commit(); err != nil {
+	// Quiet starts can reuse the existing witness without generating a new
+	// database write. A large pending set is likewise safe against the old
+	// witnessed snapshot and will be rechecked on the next start.
+	if len(events) == 0 || strings.Count(snapshot, ",") >= receiptAppendPendingXIDCap {
+		return prior, events, tx.Commit()
+	}
+	current, err := commitProtectedReceipt(ctx, tx, protectedReceipt{projects: prior.projects, snapshot: snapshot, identity: identity})
+	if err != nil {
 		return prior, events, err
 	}
-	return protectedReceipt{prior.projects, snapshot, identity}, events, nil
+	return current, events, nil
 }
 
 func readProtectedAppendEvents(ctx context.Context, tx *sql.Tx, snapshot string) ([]receiptAppendEvent, error) {

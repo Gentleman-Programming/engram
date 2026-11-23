@@ -9,8 +9,8 @@ import (
 	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
 )
 
-func startupSnapshot(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+func startupSnapshot(ctx context.Context, db *sql.DB, readOnly bool) (*sql.Tx, error) {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: readOnly})
 	if err != nil {
 		return nil, err
 	}
