@@ -3522,7 +3522,7 @@ func ambiguousProjectChoiceCollision(res projectpkg.DetectionResult, choice stri
 		var err error
 		colliding, err = projectpkg.AmbiguousGitChildProjectCollisions(res.Path, normalized)
 		if err != nil {
-			return fmt.Errorf("%w: verify colliding Git checkout names: %v", projectpkg.ErrAmbiguousProject, err)
+			return fmt.Errorf("%w: could not verify colliding Git checkout names", projectpkg.ErrAmbiguousProject)
 		}
 	}
 	if len(colliding) > 1 {

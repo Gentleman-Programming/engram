@@ -733,7 +733,10 @@ func AmbiguousGitChildProjectCollisions(dir, normalized string) ([]string, error
 				continue
 			}
 			if _, err := os.Stat(filepath.Join(dir, entry.Name(), ".git")); err != nil {
-				continue
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, err
 			}
 			colliding = append(colliding, candidate)
 			if len(colliding) == 2 {
