@@ -2,13 +2,18 @@
 package selftest
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/v3/internal/server"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
@@ -155,25 +160,51 @@ func runDatabaseSaveSearchContext(dataDir string) error {
 
 	const sessionID = "selftest-reliability-session"
 	const project = "selftest-reliability"
-	if err := s.CreateSession(sessionID, project, dataDir); err != nil {
-		return fmt.Errorf("create session: %w", err)
+	const title = "Self-test database migration"
+	handler := server.New(s, 0).Handler()
+	var session struct {
+		ID string `json:"id"`
 	}
-	if _, err := s.AddObservation(store.AddObservationParams{
+	if err := postCreatedJSON(handler, "/sessions", map[string]string{
+		"id":             sessionID,
+		"project":        project,
+		"directory":      dataDir,
+		"ownership_mode": store.SessionOwnershipProjectOwned,
+	}, &session); err != nil {
+		return err
+	}
+	if session.ID != sessionID {
+		return fmt.Errorf("session registration did not return the requested ID")
+	}
+	var save struct {
+		ID int64 `json:"id"`
+	}
+	if err := postCreatedJSON(handler, "/observations", store.AddObservationParams{
 		SessionID: sessionID,
 		Type:      "decision",
-		Title:     "Self-test database migration",
+		Title:     title,
 		Content:   "Self-test verifies local database initialization, save, search, and context.",
 		Project:   project,
 		Scope:     "project",
-	}); err != nil {
-		return fmt.Errorf("save observation: %w", err)
+	}, &save); err != nil {
+		return err
+	}
+	if save.ID <= 0 {
+		return fmt.Errorf("save did not return an observation ID")
+	}
+	saved, err := s.GetObservation(save.ID)
+	if err != nil {
+		return fmt.Errorf("read saved observation: %w", err)
+	}
+	if saved == nil || saved.SessionID != sessionID || saved.Project == nil || *saved.Project != project || saved.Title != title {
+		return fmt.Errorf("saved observation did not match the registered session and project")
 	}
 
 	results, err := s.Search("database migration", store.SearchOptions{Project: project, Scope: "project", Limit: 5})
 	if err != nil {
 		return fmt.Errorf("search observation: %w", err)
 	}
-	if len(results) == 0 || results[0].Title != "Self-test database migration" {
+	if len(results) == 0 || results[0].Title != title {
 		return fmt.Errorf("search did not return the saved observation")
 	}
 
@@ -181,8 +212,26 @@ func runDatabaseSaveSearchContext(dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("format context: %w", err)
 	}
-	if !strings.Contains(context, "Self-test database migration") {
+	if !strings.Contains(context, title) {
 		return fmt.Errorf("context did not include the saved observation")
+	}
+	return nil
+}
+
+func postCreatedJSON(handler http.Handler, path string, payload, result any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode POST %s: %w", path, err)
+	}
+	request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		return fmt.Errorf("POST %s returned HTTP %d: %s", path, response.Code, strings.TrimSpace(response.Body.String()))
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), result); err != nil {
+		return fmt.Errorf("decode POST %s response: %w", path, err)
 	}
 	return nil
 }
