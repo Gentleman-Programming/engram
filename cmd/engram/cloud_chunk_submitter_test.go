@@ -1,0 +1,165 @@
+package main
+
+import (
+	"bytes"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"testing"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+)
+
+func TestCloudRuntimeRecordsManagedChunkSubmitter(t *testing.T) {
+	const legacy = "fixture-legacy-sync-token"
+	const pepper = "fixture-managed-token-pepper-32-bytes"
+	const project = "submitter-fixture"
+	const display = "same-display"
+	t.Setenv("ENGRAM_CLOUD_TOKEN", legacy)
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+	dsn := openIsolatedCloudRuntimeSchema(t)
+	ctx := t.Context()
+	opened, err := newCloudRuntime(ctx, cloud.Config{
+		DSN: dsn, JWTSecret: "fixture-managed-chunk-submitters-jwt-secret",
+		TokenPepper: pepper, AllowedProjects: []string{project}, MaxPushBodyBytes: cloud.DefaultMaxPushBodyBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := opened.(*defaultCloudRuntime)
+	t.Cleanup(func() { _ = runtime.store.Close() })
+	handler := runtime.server.Handler()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	hasher, err := cloudauth.NewManagedTokenHasher([]byte(pepper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := func(name string) (principal, bearer string) {
+		t.Helper()
+		u, err := runtime.store.CreateHumanUser(ctx, cloudstore.CreateHumanUserParams{
+			Username: name, Email: name + "@example.invalid", DisplayName: display, Role: cloudstore.PrincipalRoleAdmin,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runtime.store.CreateProjectGrant(ctx, cloudstore.CreateProjectGrantParams{
+			PrincipalID: u.PrincipalID, Project: project, GrantedByPrincipalID: u.PrincipalID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		token, err := cloudauth.GenerateManagedToken("fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash, err := hasher.Hash(token.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runtime.store.CreatePrincipalToken(ctx, cloudstore.CreatePrincipalTokenParams{
+			PrincipalID: u.PrincipalID, TokenPrefix: token.Prefix, TokenHash: hash, Name: "fixture",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return u.PrincipalID, token.Raw
+	}
+	firstID, first := managed("fixture-first")
+	secondID, second := managed("fixture-second")
+	post := func(token, path string, payload any, want int) {
+		t.Helper()
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "https://example.invalid"+path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != want {
+			t.Fatalf("%s status=%d want=%d: %s", path, res.Code, want, res.Body.String())
+		}
+	}
+	session := func(id string) map[string]string {
+		return map[string]string{"id": id, "directory": "/fixture", "started_at": "2026-10-01T00:00:00Z"}
+	}
+	push := func(id, author string) map[string]any {
+		return map[string]any{"project": project, "created_by": author,
+			"submitted_by_principal_id": "client-claim",
+			"data":                      map[string]any{"sessions": []any{session(id)}}}
+	}
+	batch := func(id string) map[string]any {
+		return map[string]any{"created_by": "client-claim", "entries": []map[string]any{{
+			"project": project, "entity": "session", "entity_key": id, "op": "upsert", "payload": session(id),
+			"submitted_by_principal_id": "client-claim",
+		}}}
+	}
+	post(first, "/sync/push", push("credited-direct", "historic-credited-author"), http.StatusOK)
+	post(first, "/sync/mutations/push", batch("first-mutation"), http.StatusOK)
+	post(second, "/sync/mutations/push", batch("second-mutation"), http.StatusOK)
+	post(legacy, "/sync/push", push("unverified-history", display), http.StatusOK)
+
+	type chunkCredit struct {
+		author    string
+		submitter sql.NullString
+	}
+	read := func() map[string]chunkCredit {
+		t.Helper()
+		rows, err := db.QueryContext(ctx, `SELECT chunk_id, created_by, submitted_by_principal_id::text
+			FROM cloud_chunks WHERE project_name=$1`, project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = rows.Close() }()
+		credits := map[string]chunkCredit{}
+		for rows.Next() {
+			var id string
+			var credit chunkCredit
+			if err := rows.Scan(&id, &credit.author, &credit.submitter); err != nil {
+				t.Fatal(err)
+			}
+			credits[id] = credit
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return credits
+	}
+	prior := read()
+	counts := map[chunkCredit]int{}
+	for _, credit := range prior {
+		counts[credit]++
+	}
+	want := map[chunkCredit]int{
+		{"historic-credited-author", sql.NullString{String: firstID, Valid: true}}: 1,
+		{display, sql.NullString{String: firstID, Valid: true}}:                    1,
+		{display, sql.NullString{String: secondID, Valid: true}}:                   1,
+		{display, sql.NullString{}}:                                                1,
+	}
+	if !reflect.DeepEqual(counts, want) {
+		t.Fatalf("unexpected stored submitters or credited authors: %v", counts)
+	}
+	post(second, "/sync/push", push("credited-direct", "client-cannot-change-credited-author"), http.StatusOK)
+	post(second, "/sync/push", push("unverified-history", display), http.StatusOK)
+	post(first, "/sync/mutations/push", batch("second-mutation"), http.StatusOK)
+	if after := read(); !reflect.DeepEqual(after, prior) {
+		t.Fatal("a replay changed immutable chunk submission metadata")
+	}
+	manifest, err := runtime.store.ReadManifest(ctx, project)
+	if err != nil || len(manifest.Chunks) != 4 {
+		t.Fatalf("unexpected manifest: %+v %v", manifest, err)
+	}
+	for _, entry := range manifest.Chunks {
+		if entry.CreatedBy != prior[entry.ID].author {
+			t.Fatal("manifest credit changed")
+		}
+	}
+}

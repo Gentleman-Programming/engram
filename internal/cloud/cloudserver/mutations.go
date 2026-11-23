@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
@@ -243,7 +244,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), normalizedEntries)
+	acceptedSeqs, err := ms.InsertMutationBatch(managedChunkSubmissionContext(r.Context()), normalizedEntries)
 	if err != nil {
 		var entryErr *cloudstore.MutationBatchEntryError
 		if errors.As(err, &entryErr) {
@@ -263,6 +264,24 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		"project_source": project.SourceRequestBody,
 		"project_path":   "",
 	})
+}
+
+// managedChunkSubmissionContext records who submitted accepted Sync data.
+// Direct push also transports historical imports, so this identity cannot
+// replace the chunk's credited author.
+func managedChunkSubmissionContext(ctx context.Context) context.Context {
+	principal, ok := PrincipalFromContext(ctx)
+	if !ok || !principal.Enabled || principal.Source != cloudauth.PrincipalSourceManagedToken {
+		return ctx
+	}
+	if principal.Kind != cloudauth.PrincipalKindHuman && principal.Kind != cloudauth.PrincipalKindServiceAccount {
+		return ctx
+	}
+	id, err := strconv.ParseInt(principal.ID, 10, 64)
+	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != principal.ID {
+		return ctx
+	}
+	return cloudstore.WithManagedChunkSubmitter(ctx, id)
 }
 
 func mutationPushCreatedBy(ctx context.Context) string {

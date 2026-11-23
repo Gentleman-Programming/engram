@@ -281,9 +281,9 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 
 	counts := summarizeChunk(payload)
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO cloud_chunks (project_name, chunk_id, created_by, client_created_at, payload, sessions_count, observations_count, prompts_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		project, strings.TrimSpace(chunkID), strings.TrimSpace(createdBy), originCreatedAt, payload, counts.sessions, counts.observations, counts.prompts)
+		INSERT INTO cloud_chunks (project_name, chunk_id, created_by, client_created_at, payload, sessions_count, observations_count, prompts_count, submitted_by_principal_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		project, strings.TrimSpace(chunkID), strings.TrimSpace(createdBy), originCreatedAt, payload, counts.sessions, counts.observations, counts.prompts, managedChunkSubmitter(ctx))
 	if err != nil {
 		if isUniqueViolation(err) {
 			conflictErr := cs.resolveChunkConflict(ctx, project, chunkID, payload)
@@ -777,6 +777,7 @@ func (cs *CloudStore) migrateSchema(ctx context.Context) error {
 			project_name TEXT NOT NULL DEFAULT 'default',
 			chunk_id TEXT NOT NULL,
 			created_by TEXT NOT NULL,
+			submitted_by_principal_id BIGINT REFERENCES cloud_principals(id),
 			client_created_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			payload JSONB NOT NULL,
@@ -785,6 +786,7 @@ func (cs *CloudStore) migrateSchema(ctx context.Context) error {
 			prompts_count INTEGER NOT NULL DEFAULT 0
 		)`,
 		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS project_name TEXT`,
+		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS submitted_by_principal_id BIGINT REFERENCES cloud_principals(id)`,
 		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS client_created_at TIMESTAMPTZ`,
 		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
 		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb`,
@@ -1049,10 +1051,10 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 			createdBy = "unknown"
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count, submitted_by_principal_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (project_name, chunk_id) DO NOTHING`,
-			chunk.project, chunk.id, createdBy, chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts,
+			chunk.project, chunk.id, createdBy, chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts, managedChunkSubmitter(ctx),
 		); err != nil {
 			return nil, fmt.Errorf("cloudstore: materialize mutation batch chunk: %w", err)
 		}

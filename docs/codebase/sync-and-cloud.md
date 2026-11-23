@@ -218,6 +218,10 @@ For complete route details, use [DOCS.md — HTTP API Endpoints](../../DOCS.md#h
 
 `internal/cloud/cloudstore/cloudstore.go` persists to Postgres, materializes chunks/mutations, and feeds dashboard read models. If an organizational policy matters, state lives here or is enforced from `cloudserver` against data from here.
 
+### Authenticated chunk submitter
+
+Both Sync push routes can record the enabled managed principal that submitted a new chunk. The nullable `cloud_chunks.submitted_by_principal_id` is internal and write-once through those routes. Client-provided author credit continues to follow the existing `created_by` contracts. In particular, an import's authenticated submitter may differ from its original author. Legacy rows and chunks generated solely by repair lack a verified submitter. Retries retain the stored credit and submitter, including an absent submitter. Manifest and dashboard author displays continue to read `created_by`.
+
 ## Sync/cloud guardrails
 
 - Local SQLite remains the source of truth.
