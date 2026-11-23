@@ -72,6 +72,8 @@ BEGIN
   END LOOP;
 END $$;
 
+-- The audit only covers writes to these three tables. Their rows must also
+-- survive recovery and have identical visibility for the proof and repair.
 CREATE FUNCTION receipt_audit.catalog() RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
   SELECT jsonb_agg(jsonb_build_array(source.name,c.oid,c.relnamespace,c.relfilenode,c.relpersistence,c.relkind,c.relrowsecurity,
     (SELECT jsonb_agg(jsonb_build_array(a.attnum,a.attname,a.atttypid,a.attcollation,a.attnotnull,a.attgenerated,pg_get_expr(d.adbin,d.adrelid)) ORDER BY a.attnum)
@@ -80,8 +82,18 @@ CREATE FUNCTION receipt_audit.catalog() RETURNS jsonb LANGUAGE sql STABLE SECURI
     (SELECT jsonb_agg(jsonb_build_array(t.oid,t.tgenabled,pg_get_triggerdef(t.oid)) ORDER BY t.oid)
       FROM pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal)) ORDER BY source.name)
   FROM (VALUES('public.cloud_mutations'),('public.cloud_chunks'),('public.cloud_project_sessions')) source(name)
-  LEFT JOIN pg_class c ON c.oid=to_regclass(source.name);
+  JOIN pg_class c ON c.oid=to_regclass(source.name)
+  WHERE c.relkind='r' AND c.relpersistence='p'
+    AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity
+    AND NOT EXISTS (SELECT FROM pg_inherits i WHERE i.inhparent=c.oid OR i.inhrelid=c.oid)
+  HAVING count(*)=3;
 $$;
+DO $$
+BEGIN
+  IF receipt_audit.catalog() IS NULL THEN
+    RAISE EXCEPTION 'startup receipt requires ordinary permanent source tables without row security or inheritance';
+  END IF;
+END $$;
 INSERT INTO receipt_audit.enrollment SELECT receipt_audit.catalog(),gen_random_uuid(),'0'::xid8;
 
 CREATE FUNCTION receipt_audit.identity() RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$

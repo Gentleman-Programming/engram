@@ -24,6 +24,16 @@ import (
 //go:embed startup_receipt/schema.sql
 var protectedFeedDDL string
 
+var labUnsupportedReceiptSources = []struct {
+	name, change, restore string
+}{
+	{"forced row security", `ALTER TABLE public.cloud_mutations ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY`, `ALTER TABLE public.cloud_mutations DISABLE ROW LEVEL SECURITY, NO FORCE ROW LEVEL SECURITY`},
+	{"inheritance", `CREATE TABLE public.fixture_inherited () INHERITS (public.cloud_mutations)`, `DROP TABLE public.fixture_inherited`},
+	// Changing persistence rewrites the relation, so even SET LOGGED would
+	// leave this fixture ineligible for the subsequent verified append tests.
+	{"unlogged source", `ALTER TABLE public.cloud_chunks SET UNLOGGED`, ""},
+}
+
 func sameLabProtectedReceipt(left, right protectedReceipt) bool {
 	return left.snapshot == right.snapshot && left.identity == right.identity && left.witness == right.witness && slices.Equal(left.projects, right.projects)
 }
@@ -100,17 +110,37 @@ func openProtectedAppendFixture(t *testing.T, ctx context.Context) *CloudStore {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
+	install := func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `SELECT
+			set_config('engram.startup_receipt_runtime_role', 'cloud_delta_owner', true),
+			set_config('engram.startup_receipt_retention_role', 'cloud_delta_retention_operator', true)`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, protectedFeedDDL)
+		return err
+	}
+	for _, source := range labUnsupportedReceiptSources {
+		t.Run("reject enrollment with "+source.name, func(t *testing.T) {
+			tx, err := admin.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(ctx, source.change); err != nil {
+				t.Fatal(err)
+			}
+			var pgErr *pgconn.PgError
+			if err := install(tx); !errors.As(err, &pgErr) || pgErr.Message != "startup receipt requires ordinary permanent source tables without row security or inheritance" {
+				t.Fatalf("expected source eligibility error, got %v", err)
+			}
+		})
+	}
 	tx, err := admin.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `SELECT
-		set_config('engram.startup_receipt_runtime_role', 'cloud_delta_owner', true),
-		set_config('engram.startup_receipt_retention_role', 'cloud_delta_retention_operator', true)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.ExecContext(ctx, protectedFeedDDL); err != nil {
+	if err := install(tx); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -142,6 +172,29 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		return receipt
+	}
+	for _, source := range labUnsupportedReceiptSources {
+		if source.restore == "" {
+			continue
+		}
+		t.Run("reject reuse with "+source.name, func(t *testing.T) {
+			prior := baseline("source-eligibility")
+			if _, err := cs.db.ExecContext(ctx, source.change); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := captureProtectedReceipt(ctx, cs.db, prior.projects); !errors.Is(err, errReceiptAppendUnproven) {
+				t.Errorf("receipt captured with unsupported source: %v", err)
+			}
+			if next, _, err := tryProtectedDelta(ctx, cs.db, prior); !errors.Is(err, errReceiptAppendUnproven) || !sameLabProtectedReceipt(prior, next) {
+				t.Errorf("receipt advanced with unsupported source: %v", err)
+			}
+			if _, err := cs.db.ExecContext(ctx, source.restore); err != nil {
+				t.Fatal(err)
+			}
+			if next, _, err := tryProtectedDelta(ctx, cs.db, prior); !errors.Is(err, errReceiptAppendUnproven) || !sameLabProtectedReceipt(prior, next) {
+				t.Errorf("receipt advanced after source shape was restored: %v", err)
+			}
+		})
 	}
 	appendBatch := func(project, entity, id string, payload []byte) int64 {
 		t.Helper()

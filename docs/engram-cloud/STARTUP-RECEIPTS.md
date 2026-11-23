@@ -4,6 +4,8 @@ An enrolled Engram Cloud operator can prepare a local receipt before restarting 
 
 This opt-in expects a Linux Cloud process, PostgreSQL 16 or later, and a finite `ENGRAM_CLOUD_ALLOWED_PROJECTS` list. Use an existing private directory owned by the Cloud process user for `ENGRAM_CLOUD_STARTUP_RECEIPT_DIR`. The process needs to read and write the directory. Use storage local to the Cloud deployment with persistent space for the receipt. Each directory serves one configured PostgreSQL database and project list.
 
+The `cloud_mutations`, `cloud_chunks` and `cloud_project_sessions` tables in `public` must be ordinary permanent tables without row security or inheritance. Enrollment rejects unsupported sources. After enrollment, startup uses ordinary repair whenever source eligibility cannot be verified.
+
 ## Install and prepare
 
 1. Identify an existing working Cloud login and a separate existing role for audit retention. The Cloud login must be distinct from the database and audit administrator. Connect to the Cloud database using an administrator that can create PostgreSQL event triggers. Leave the startup option unset during installation.
@@ -16,7 +18,7 @@ This opt-in expects a Linux Cloud process, PostgreSQL 16 or later, and a finite 
      --file=scripts/cloud/install-startup-receipt.sql
    ```
 
-   The script grants the Cloud login read access to receipt evidence and grants the retention role access to the maintenance functions. A missing role, absent source table, database lock timeout or default privilege outside those grants rolls back the installation.
+   The script grants the Cloud login read access to receipt evidence and permission to record verification witnesses. It grants the retention role access to the maintenance functions. A missing role, ineligible source table, database lock timeout or default privilege outside those grants rolls back the installation.
 
 3. In the same execution environment that will run Cloud, set `ENGRAM_DATABASE_URL`, `ENGRAM_CLOUD_ALLOWED_PROJECTS` and `ENGRAM_CLOUD_STARTUP_RECEIPT_DIR`. Run the preparation command using the runtime login.
 
@@ -59,4 +61,4 @@ psql --dbname='service=engram-audit-admin' \
   --file=scripts/cloud/remove-startup-receipt.sql
 ```
 
-The Cloud database retains its application rows and role registrations. Any saved receipt belongs to its previous enrollment. A later enrollment requires preparing a fresh receipt before it can be reused.
+The Cloud database retains its application rows, role registrations, and any ownership or grants from the runtime handoff. Any saved receipt belongs to its previous enrollment. A later enrollment requires preparing a fresh receipt before it can be reused.

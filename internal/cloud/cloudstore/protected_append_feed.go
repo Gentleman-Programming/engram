@@ -77,7 +77,7 @@ func protectedCatalogSnapshot(ctx context.Context, tx *sql.Tx, prior string) (st
 			SELECT pg_current_snapshot() AS current,
 			       coalesce(nullif($1,'')::pg_snapshot,pg_current_snapshot()) AS prior
 		)
-		SELECT current::text, receipt_audit.identity(), receipt_audit.catalog()=expected
+		SELECT current::text, receipt_audit.identity(), coalesce(receipt_audit.catalog()=expected,false)
 		       AND pg_snapshot_xmin(current)>=retained_from AND pg_snapshot_xmin(prior)>=retained_from
 		       AND (SELECT count(*) FROM (SELECT pg_snapshot_xip(prior) LIMIT $2) pending)<$2
 		FROM receipt_audit.enrollment CROSS JOIN snapshot`, prior, receiptAppendPendingXIDCap+1).Scan(&snapshot, &identity, &exact)
