@@ -12,7 +12,11 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/server"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func TestClaudeCodeSessionEndHook(t *testing.T) {
@@ -208,7 +212,7 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 
 	// Issue #1624: a resumed session keeps its ended root ID, so SessionEnd
 	// must close the live continuation through the runtime scope.
-	t.Run("ends the live continuation of an already-ended root", func(t *testing.T) {
+	t.Run("ends a continuation on an older core", func(t *testing.T) {
 		var mu sync.Mutex
 		var requests []string
 		var runtimeBody map[string]string
@@ -219,6 +223,8 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 			switch r.URL.Path {
 			case "/sessions/resumed-root":
 				_, _ = io.WriteString(w, `{"id":"resumed-root","project":"client","directory":"/work","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`)
+			case "/health":
+				_, _ = io.WriteString(w, `{"status":"ok","capabilities":{"runtime_session_resolution":true}}`)
 			case "/runtime-sessions/end":
 				if err := json.NewDecoder(r.Body).Decode(&runtimeBody); err != nil {
 					t.Errorf("decode runtime end: %v", err)
@@ -234,7 +240,7 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 
 		mu.Lock()
 		defer mu.Unlock()
-		want := []string{"GET /sessions/resumed-root", "POST /runtime-sessions/end"}
+		want := []string{"GET /sessions/resumed-root", "GET /health", "POST /runtime-sessions/end"}
 		if strings.Join(requests, ",") != strings.Join(want, ",") {
 			t.Fatalf("requests = %v, want %v", requests, want)
 		}
@@ -272,4 +278,127 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 
 		runHook(t, "session-end.sh", `{"session_id":"server-failure"}`, map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
 	})
+}
+
+func TestClaudeSessionEndDoesNotCloseReplacementContinuation(t *testing.T) {
+	requireHookBinaries(t)
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "engram.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.New(store.FallbackConfig(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const root, project, mode = "delayed-end", "test-project", store.SessionOwnershipProjectOwned
+	directory := t.TempDir()
+	if err := db.StartSessionWithOwnershipMode(root, project, directory, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.ResumeSessionWithOwnershipMode(root, project, directory, mode)
+	if err != nil || first != root+":resume:2" {
+		t.Fatalf("first continuation = %q, %v", first, err)
+	}
+	production := server.New(db, 0).Handler()
+	var ends, status atomic.Int32
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/runtime-sessions/end" {
+			production.ServeHTTP(w, r)
+			return
+		}
+		if ends.Add(1) == 1 {
+			if err := db.EndSession(first, ""); err != nil {
+				t.Error(err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if id, err := db.ResumeSessionWithOwnershipMode(root, project, directory, mode); err != nil || id != root+":resume:3" {
+				t.Errorf("replacement continuation = %q, %v", id, err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+		response := httptest.NewRecorder()
+		production.ServeHTTP(response, r)
+		status.Store(int32(response.Code))
+		w.WriteHeader(response.Code)
+	}))
+	t.Cleanup(endpoint.Close)
+	stdout, stderr := runHookWithStderr(t, "session-end.sh", `{"session_id":"delayed-end"}`, map[string]string{"ENGRAM_URL": endpoint.URL})
+	if stdout != "" || stderr != "" {
+		t.Fatalf("expected a silent hook, got %q, %q", stdout, stderr)
+	}
+	next, err := db.GetSession(root + ":resume:3")
+	if err != nil || next.EndedAt != nil {
+		t.Fatalf("replacement should remain live after the delayed close, got %+v, %v", next, err)
+	}
+	if ends.Load() != 1 || status.Load() != http.StatusConflict {
+		t.Fatalf("end calls/status = %d/%d, want one conflict without retry", ends.Load(), status.Load())
+	}
+}
+
+func TestClaudeContinuationEndRequiresConfirmedScope(t *testing.T) {
+	requireHookBinaries(t)
+	const supported = `{"status":"ok","capabilities":{"runtime_session_conditional_end":true}}`
+	const resolved = `{"id":"root:resume:2","resumed_from":"root","status":"resolved"}`
+	for _, tc := range []struct {
+		name, health, resolution string
+		healthCode, resolveCode  int
+		wantEnd                  bool
+	}{
+		{name: "capability unavailable", healthCode: http.StatusServiceUnavailable},
+		{name: "malformed capability", health: `{"status":"ok","capabilities":{"runtime_session_conditional_end":"true"}}`},
+		{name: "multiple capability envelopes", health: supported + "\n" + `{"status":"ok"}`},
+		{name: "contradictory capability keys", health: `{"status":"ok","capabilities":{"runtime_session_conditional_end":true,"runtime_session_conditional_end":false}}`},
+		{name: "overwritten capability object", health: `{"status":"ok","capabilities":{"runtime_session_conditional_end":true},"capabilities":{}}`},
+		{name: "redirected capability", health: `{"status":"ok"}`, healthCode: http.StatusFound},
+		{name: "resolve unavailable", health: supported, resolveCode: http.StatusNotFound},
+		{name: "redirected resolution", health: supported, resolution: resolved, resolveCode: http.StatusFound},
+		{name: "multiple resolution envelopes", health: supported, resolution: resolved + "\n" + resolved},
+		{name: "wrong root", health: supported, resolution: `{"id":"root:resume:2","resumed_from":"different","status":"resolved"}`},
+		{name: "invalid continuation", health: supported, resolution: `{"id":"root:resume:bad","resumed_from":"root","status":"resolved"}`},
+		{name: "continuation with trailing newline", health: supported, resolution: `{"id":"root:resume:2\n","resumed_from":"root","status":"resolved"}`},
+		{name: "exact continuation", health: supported, resolution: resolved, wantEnd: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ends atomic.Int32
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /sessions/root":
+					_, _ = io.WriteString(w, `{"id":"root","project":"client","directory":"/work","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`)
+				case "GET /health":
+					if tc.healthCode != 0 {
+						w.WriteHeader(tc.healthCode)
+					}
+					_, _ = io.WriteString(w, tc.health)
+				case "POST /runtime-sessions/resolve":
+					if tc.resolveCode != 0 {
+						w.WriteHeader(tc.resolveCode)
+					}
+					_, _ = io.WriteString(w, tc.resolution)
+				case "POST /runtime-sessions/end":
+					ends.Add(1)
+					var body map[string]string
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["expected_effective_id"] != "root:resume:2" || body["id"] != "root" {
+						t.Errorf("conditional end body = %v, %v", body, err)
+					}
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			t.Cleanup(endpoint.Close)
+			runHook(t, "session-end.sh", `{"session_id":"root"}`, map[string]string{"ENGRAM_URL": endpoint.URL})
+			var want int32
+			if tc.wantEnd {
+				want = 1
+			}
+			if got := ends.Load(); got != want {
+				t.Fatalf("runtime end requests = %d, want %d", got, want)
+			}
+		})
+	}
 }
