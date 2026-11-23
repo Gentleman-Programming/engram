@@ -10,7 +10,7 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
-const migrateCopyUsage = "Usage: engram migrate-copy --data-dir <absolute-source> --output-dir <new-absolute-destination> --confirm-quiescent --json\n"
+const migrateCopyUsage = "Usage: engram migrate-copy --data-dir <absolute-source> --output-dir <new-absolute-destination> --confirm-quiescent --json [--catalog-diagnostics=v3.4.0]\n"
 
 // Parse all flags before reading any source or resolving default configuration.
 func runMigrateCopy(args []string, stdout, stderr io.Writer) int {
@@ -41,7 +41,7 @@ func runMigrateCopy(args []string, stdout, stderr io.Writer) int {
 			} else {
 				output = args[i]
 			}
-		case "--confirm-quiescent", "--json":
+		case "--confirm-quiescent", "--json", "--catalog-diagnostics=v3.4.0":
 		default:
 			return fail(2, fmt.Errorf("unknown flag %s", flag))
 		}
@@ -51,7 +51,11 @@ func runMigrateCopy(args []string, stdout, stderr io.Writer) int {
 			return fail(2, fmt.Errorf("required flag %s", flag))
 		}
 	}
-	result, e := store.MigrateCopy(source, output, true)
+	migrate := store.MigrateCopy
+	if seen["--catalog-diagnostics=v3.4.0"] {
+		migrate = store.MigrateCopyWithV340Diagnostics
+	}
+	result, e := migrate(source, output, true)
 	if e != nil {
 		return fail(1, e)
 	}

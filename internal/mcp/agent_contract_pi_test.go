@@ -200,7 +200,8 @@ func piCopySources(t *testing.T, root string, goSources bool) string {
 	dst := t.TempDir()
 	paths := []string{"plugin/pi/index.ts", "plugin/pi/compaction-recovery.js", "plugin/pi/memory-tool-chrome.js", "plugin/pi/private-redaction.js", "plugin/pi/runtime-contract.js", "plugin/pi/runtime-contract.json", "plugin/pi/test/plugin-sandbox.mjs"}
 	if goSources {
-		paths = append(paths, "go.mod", "go.sum", "docs/contracts/agent-contract-v1.json")
+		paths = append(paths, "go.mod", "go.sum", "docs/contracts/agent-contract-v1.json",
+			"internal/store/testdata/migrate_copy_v3.4.0_catalog.json")
 		err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err

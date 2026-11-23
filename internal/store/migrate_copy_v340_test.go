@@ -208,3 +208,33 @@ func TestMigrateCopyV340RejectsNearMisses(t *testing.T) {
 		})
 	}
 }
+
+func TestMigrateCopyV340DiagnosticReportsKnownDifferences(t *testing.T) {
+	src, db := copyV340Fixture(t)
+	if _, err := db.Exec(`
+DROP INDEX idx_obs_session;
+CREATE INDEX idx_obs_session ON observations(project);
+DROP INDEX idx_memrel_source;
+CREATE TABLE private_fixture_name(item TEXT DEFAULT 'private_fixture_definition');
+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := copySnapshot(t, src)
+	root := copyTempDir(t)
+	plain, err := MigrateCopy(src, filepath.Join(root, "plain"), true)
+	if plain != nil || err == nil || strings.Contains(err.Error(), "catalog comparison") {
+		t.Fatalf("ordinary rejection: result=%+v err=%v", plain, err)
+	}
+	result, err := MigrateCopyWithV340Diagnostics(src, filepath.Join(root, "diagnostic"), true)
+	const comparison = "v3.4.0 catalog comparison changed=[idx_obs_session] missing=[idx_memrel_source] unknown_objects=1"
+	if result != nil || err == nil || !strings.Contains(err.Error(), comparison) ||
+		!strings.Contains(err.Error(), "incomplete output retained") || strings.Contains(err.Error(), "private_fixture") {
+		t.Fatalf("catalog diagnostics: result=%+v err=%v", result, err)
+	}
+	if !reflect.DeepEqual(before, copySnapshot(t, src)) {
+		t.Fatal("rejected migration changed the source")
+	}
+}
