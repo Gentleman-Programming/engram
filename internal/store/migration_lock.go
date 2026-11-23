@@ -30,6 +30,10 @@ var migrationLockTimeout = 60 * time.Second
 // different inode/file object, defeating the exclusion. Cancellation closes
 // only this waiter's descriptor.
 func acquireMigrationLockContext(ctx context.Context, path string) (func(), error) {
+	return acquireMigrationLockOnContention(ctx, path, nil)
+}
+
+func acquireMigrationLockOnContention(ctx context.Context, path string, onContention func()) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -91,6 +95,11 @@ func acquireMigrationLockContext(ctx context.Context, path string) (func(), erro
 				"timed out after %s waiting for migration lock %s — another engram process appears to be holding it; check for a stuck engram process (and terminate it) before retrying",
 				migrationLockTimeout, path,
 			)
+		}
+		if onContention != nil {
+			onContention()
+			onContention = nil
+			continue
 		}
 		timer := time.NewTimer(backoff)
 		select {

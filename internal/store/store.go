@@ -1308,7 +1308,7 @@ func primeConnection(ctx context.Context, db *sql.DB) error {
 const schemaVersion = 1
 
 var migrateRunCount atomic.Int64
-var acquireStartupMigrationLock = acquireMigrationLockContext
+var acquireStartupMigrationLock = acquireMigrationLockOnContention
 
 // runStartupMigrations serializes migrations and the every-open repair. It
 // never writes a database with a schema version newer than this binary.
@@ -1322,14 +1322,20 @@ func (s *Store) runStartupMigrations(ctx context.Context, startupLockHeld bool) 
 			return nil
 		}
 		var checked *observationNormalizationCheck
-		if !startupLockHeld && current == schemaVersion {
-			checked = s.checkObservationNormalization(ctx)
+		if !startupLockHeld {
+			var onContention func()
+			if current == schemaVersion {
+				onContention = func() {
+					checked = s.checkObservationNormalization(ctx)
+					if checked != nil {
+						startupTraceFrom(ctx).Mark("observation-normalization-checked")
+					}
+				}
+			}
+			unlock, err := acquireStartupMigrationLock(ctx, filepath.Join(s.cfg.DataDir, ".migrate.lock"), onContention)
 			if checked != nil {
 				defer func(conn *sql.Conn) { _ = conn.Close() }(checked.conn)
 			}
-		}
-		if !startupLockHeld {
-			unlock, err := acquireStartupMigrationLock(ctx, filepath.Join(s.cfg.DataDir, ".migrate.lock"))
 			if err != nil {
 				return fmt.Errorf("engram: acquire migration lock: %w", err)
 			}

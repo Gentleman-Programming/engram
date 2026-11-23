@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,14 +15,38 @@ func TestStartupMigrationReusesCleanObservationCheck(t *testing.T) {
 		VALUES ('fixture', '{"captured":true,"project_enrolled":false}')`); err != nil {
 		t.Fatal(err)
 	}
-	var phases bytes.Buffer
-	ctx := NewStartupTrace(&phases, time.Now()).Context(t.Context())
+	unlock, err := acquireMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phases := releaseMigrationAfterObservationCheck{release: unlock}
+	defer func() {
+		if phases.release != nil {
+			phases.release()
+		}
+	}()
+	budget, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ctx := NewStartupTrace(&phases, time.Now()).Context(budget)
 	if err := s.runStartupMigrations(ctx, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(phases.String(), " observation-normalization-reused\n") {
 		t.Fatalf("clean check was not reused through startup:\n%s", phases.String())
 	}
+}
+
+type releaseMigrationAfterObservationCheck struct {
+	bytes.Buffer
+	release func()
+}
+
+func (out *releaseMigrationAfterObservationCheck) Write(line []byte) (int, error) {
+	if bytes.HasSuffix(line, []byte(" observation-normalization-checked\n")) {
+		out.release()
+		out.release = nil
+	}
+	return out.Buffer.Write(line)
 }
 
 func TestObservationNormalizationCheckRejectsInterveningWrite(t *testing.T) {

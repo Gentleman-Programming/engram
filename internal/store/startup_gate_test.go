@@ -343,7 +343,7 @@ func TestStartupMigrationBatchAvoidsRedundantGenerationProbes(t *testing.T) {
 			}
 			return originalStatFile(path)
 		}
-		acquireStartupMigrationLock = func(context.Context, string) (func(), error) {
+		acquireStartupMigrationLock = func(context.Context, string, func()) (func(), error) {
 			changed = true
 			return func() {}, nil
 		}
@@ -370,9 +370,9 @@ func TestSharedStartupCancelsMigrationLockWait(t *testing.T) {
 
 	waiting := make(chan struct{})
 	originalLock := acquireStartupMigrationLock
-	acquireStartupMigrationLock = func(ctx context.Context, path string) (func(), error) {
+	acquireStartupMigrationLock = func(ctx context.Context, path string, onContention func()) (func(), error) {
 		close(waiting)
-		return originalLock(ctx, path)
+		return originalLock(ctx, path, onContention)
 	}
 	t.Cleanup(func() { acquireStartupMigrationLock = originalLock })
 	ctx, cancel := context.WithCancel(context.Background())
