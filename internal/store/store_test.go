@@ -3630,7 +3630,7 @@ func TestFormatCompactionContextIsSessionScoped(t *testing.T) {
 		{"session-b", []string{"session-b", "summary-b", "pinned-b", "recent-b", "prompt-b"}, []string{"session-a", "summary-a", "pinned-a", "recent-a", "prompt-a"}},
 	} {
 		t.Run(tc.sessionID, func(t *testing.T) {
-			context, err := s.FormatCompactionContext(tc.sessionID)
+			context, err := s.FormatCompactionContext(t.Context(), tc.sessionID)
 			if err != nil {
 				t.Fatalf("format compaction context: %v", err)
 			}
@@ -3647,7 +3647,7 @@ func TestFormatCompactionContextIsSessionScoped(t *testing.T) {
 		})
 	}
 
-	if _, err := s.FormatCompactionContext("missing"); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := s.FormatCompactionContext(t.Context(), "missing"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing session error = %v, want sql.ErrNoRows", err)
 	}
 }
@@ -3753,7 +3753,7 @@ func TestTopicKeyUpsertMovesObservationToLatestSession(t *testing.T) {
 		t.Fatalf("expected revision_count=2, got %d", observation.RevisionCount)
 	}
 
-	context, err := s.FormatCompactionContext("session-a")
+	context, err := s.FormatCompactionContext(t.Context(), "session-a")
 	if err != nil {
 		t.Fatalf("format session A compaction context: %v", err)
 	}
