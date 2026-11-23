@@ -162,4 +162,24 @@ func TestCloudRuntimeRecordsManagedChunkSubmitter(t *testing.T) {
 			t.Fatal("manifest credit changed")
 		}
 	}
+	view, err := runtime.store.DashboardStoreForProjectsContext(ctx, []string{project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitters, err := view.ListAuthenticatedChunkSubmitters(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(submitters) != 2 ||
+		submitters[0].Username != "fixture-first" || submitters[0].Chunks != 2 || submitters[0].Projects != 1 ||
+		submitters[1].Username != "fixture-second" || submitters[1].Chunks != 1 || submitters[1].Projects != 1 {
+		t.Fatalf("expected one row per managed credential owner: %+v", submitters)
+	}
+	emptyView, err := runtime.store.DashboardStoreForProjectsContext(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := emptyView.ListAuthenticatedChunkSubmitters(ctx); err != nil || len(rows) != 0 {
+		t.Fatalf("view without grants: %v, %v", rows, err)
+	}
 }
