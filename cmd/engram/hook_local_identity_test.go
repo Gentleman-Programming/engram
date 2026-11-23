@@ -65,7 +65,7 @@ func TestHookRejectsForeignLocalIdentityBeforeSessionTraffic(t *testing.T) {
 			}))
 			defer server.Close()
 			t.Setenv("ENGRAM_PORT", strings.TrimPrefix(server.URL, "http://127.0.0.1:"))
-			id, err := confirmHookSessionForPlatform("private-session", "private-cwd", true, "linux")
+			id, err := confirmHookSessionWithin("private-session", "private-cwd", true, "linux", hookSessionConfirmationBudget())
 			// Close waits for all handlers, synchronizing their path writes before
 			// assertions read the capture, including on a failed confirmation.
 			server.Close()
@@ -179,7 +179,7 @@ func TestHookLocalIdentityReleaseGuidance(t *testing.T) {
 				}
 			}))
 			t.Setenv("ENGRAM_PORT", strings.TrimPrefix(listener.URL, "http://127.0.0.1:"))
-			id, err := confirmHookSessionForPlatform("private-session", "private-cwd", true, "windows")
+			id, err := confirmHookSessionWithin("private-session", "private-cwd", true, "windows", hookSessionConfirmationBudget())
 			listener.Close()
 			if tc.confirmed {
 				if err != nil || id != "private-session" {

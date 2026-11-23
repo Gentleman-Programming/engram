@@ -138,7 +138,7 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			effective, err := confirmHookSessionForPlatform("host", "untrusted-cwd", true, platform)
+			effective, err := confirmHookSessionWithin("host", "untrusted-cwd", true, platform, hookSessionConfirmationBudget())
 			wantSuccess := tc.wantSuccess
 			if (err == nil) != wantSuccess || (wantSuccess && effective != "host") || (!wantSuccess && effective != "") {
 				t.Fatalf("confirmation: effective=%q error=%v want success=%v", effective, err, wantSuccess)
