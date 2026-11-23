@@ -112,10 +112,14 @@ func ensureDatabaseFile(path string) error {
 }
 
 var openDB = func(dbPath string, generation *databaseGeneration) (*sql.DB, error) {
+	return openGenerationDB(storeDSN(dbPath), generation, false)
+}
+
+func openGenerationDB(dsn string, generation *databaseGeneration, readOnly bool) (*sql.DB, error) {
 	// Obtain the registered driver without opening a connection. A fresh
 	// sqlite.Driver would omit deterministic functions registered at startup.
 	// Do not mutate shared driver hooks or copy its private implementation.
-	registry, err := sql.Open("sqlite", storeDSN(dbPath))
+	registry, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -123,8 +127,8 @@ var openDB = func(dbPath string, generation *databaseGeneration) (*sql.DB, error
 	if err := registry.Close(); err != nil {
 		return nil, err
 	}
-	d := &generationDriver{Driver: sqliteDriver, generation: generation}
-	return sql.OpenDB(generationConnector{driver: d, name: storeDSN(dbPath)}), nil
+	d := &generationDriver{Driver: sqliteDriver, generation: generation, readOnly: readOnly}
+	return sql.OpenDB(generationConnector{driver: d, name: dsn}), nil
 }
 
 type generationConnector struct {
@@ -140,6 +144,7 @@ func (c generationConnector) Driver() driver.Driver { return c.driver }
 type generationDriver struct {
 	driver.Driver
 	generation *databaseGeneration
+	readOnly   bool
 }
 
 func (d *generationDriver) Open(name string) (driver.Conn, error) {
@@ -152,7 +157,7 @@ func (d *generationDriver) Open(name string) (driver.Conn, error) {
 	}
 	// Keep WAL persistence initialization local to this fenced connection,
 	// in the same position as the former per-driver connection hook.
-	if fc, ok := conn.(sqlite.FileControl); ok {
+	if fc, ok := conn.(sqlite.FileControl); ok && !d.readOnly {
 		_, _ = fc.FileControlPersistWAL("main", 1)
 	}
 	if err := d.generation.check(); err != nil {

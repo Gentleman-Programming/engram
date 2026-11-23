@@ -930,6 +930,8 @@ type Store struct {
 	instanceID              string
 	generation              *databaseGeneration
 	hooks                   storeHooks
+	readinessMu             sync.Mutex
+	readinessDB             *sql.DB
 
 	repairMu        sync.Mutex
 	repairDone      bool
@@ -1204,10 +1206,19 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 
 func (s *Store) Close() error {
 	s.compatibilityClosed.Store(true)
+	s.readinessMu.Lock()
+	readinessDB := s.readinessDB
+	s.readinessDB = nil
+	s.readinessMu.Unlock()
+	if readinessDB != nil {
+		return errors.Join(readinessDB.Close(), s.db.Close())
+	}
 	return s.db.Close()
 }
 
 // ─── Migrations ──────────────────────────────────────────────────────────────
+
+const sqliteBusyTimeout = "busy_timeout(5000)"
 
 // storeDSN builds the modernc.org/sqlite DSN for dbPath with the session
 // pragmas encoded as _pragma query parameters. The driver applies these to
@@ -1223,7 +1234,7 @@ func storeDSN(dbPath string) string {
 	q := url.Values{}
 	q.Set("_txlock", "immediate")
 	for _, p := range []string{
-		"busy_timeout(5000)",
+		sqliteBusyTimeout,
 		"journal_mode(WAL)",
 		// Leave room for SQLite's default 1,000-frame checkpoint interval
 		// at the largest page size. SQLite applies the limit on safe reuse
