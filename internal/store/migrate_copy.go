@@ -34,7 +34,17 @@ type copyEntry struct {
 // client and keep both directories under exclusive control throughout copying
 // and subsequent promotion. On failure a newly created output is retained, never
 // removed; it must not be admitted as a usable store.
-func MigrateCopy(source, output string, confirmed bool) (result *MigrateCopyResult, err error) {
+func MigrateCopy(source, output string, confirmed bool) (*MigrateCopyResult, error) {
+	return migrateCopy(source, output, confirmed, false)
+}
+
+// MigrateCopyWithV340Diagnostics adds a schema comparison on catalog
+// rejection. Migration admission and successful results are unchanged.
+func MigrateCopyWithV340Diagnostics(source, output string, confirmed bool) (*MigrateCopyResult, error) {
+	return migrateCopy(source, output, confirmed, true)
+}
+
+func migrateCopy(source, output string, confirmed, diagnoseV340 bool) (result *MigrateCopyResult, err error) {
 	if !confirmed {
 		return nil, fmt.Errorf("--confirm-quiescent is required; stop every source client first")
 	}
@@ -114,7 +124,7 @@ func MigrateCopy(source, output string, confirmed bool) (result *MigrateCopyResu
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	checkErr := copyValidateDB(db)
+	checkErr := copyValidateDB(db, diagnoseV340)
 	closeErr := db.Close()
 	if err = errors.Join(checkErr, closeErr); err != nil {
 		return nil, err
@@ -367,7 +377,7 @@ func copyCatalog(db *sql.DB) (map[string]copyCatalogObject, error) {
 // legacy compatibility shape originally based on the v3.3.2 -> b81ea5e diff,
 // and frozen complete v3.1.0/v3.4.0/v3.6.0 catalogs. Schema version equality alone is never
 // admission. Unknown objects, columns, triggers and constraints fail closed.
-func copyValidateDB(db *sql.DB) error {
+func copyValidateDB(db *sql.DB, diagnoseV340 bool) error {
 	var v int
 	if e := db.QueryRow("PRAGMA user_version").Scan(&v); e != nil {
 		return e
@@ -459,7 +469,11 @@ func copyValidateDB(db *sql.DB) error {
 	if reflect.DeepEqual(actual, current) {
 		return nil
 	}
-	return fmt.Errorf("unsupported database catalog; use a core supporting this store's exact shape")
+	unsupported := errors.New("unsupported database catalog; use a core supporting this store's exact shape")
+	if diagnoseV340 {
+		return withV340CatalogDifference(unsupported, actual)
+	}
+	return unsupported
 }
 
 // Normalize only whitespace outside quoted SQL; literal default/trigger values
