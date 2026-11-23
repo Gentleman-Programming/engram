@@ -24,6 +24,42 @@ func TestSearchCanceledRequest(t *testing.T) {
 	}
 }
 
+func TestSearchCancelsUnknownProjectHint(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/search?q=synthetic&project=missing", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req.WithContext(cancelAfterProjectLookup{Context: ctx, cancel: cancel}))
+	if ctx.Err() != context.Canceled {
+		t.Fatal("the project existence query did not trigger cancellation")
+	}
+	const canceled = "{\"code\":\"project_resolution_failed\",\"error\":\"project resolution failed: context canceled\"}\n"
+	if rec.Code != http.StatusInternalServerError || rec.Body.String() != canceled {
+		t.Fatalf("unknown project hint after cancellation = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+type cancelAfterProjectLookup struct {
+	context.Context
+	cancel context.CancelFunc
+}
+
+// Hide the embedded cancellation state so database/sql uses AfterFunc when
+// it attaches the cancellation watcher to the first query's rows.
+func (ctx cancelAfterProjectLookup) Value(any) any { return nil }
+
+func (ctx cancelAfterProjectLookup) AfterFunc(fn func()) func() bool {
+	stop := context.AfterFunc(ctx.Context, fn)
+	return func() bool {
+		stopped := stop()
+		if stopped {
+			ctx.cancel()
+		}
+		return stopped
+	}
+}
+
 func TestHealthDoesNotWaitForStoreConnection(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

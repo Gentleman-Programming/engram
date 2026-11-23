@@ -920,7 +920,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
-		s.writeProjectResolutionError(w, resolved, err)
+		s.writeProjectResolutionErrorContext(r.Context(), w, resolved, err)
 		return
 	}
 
