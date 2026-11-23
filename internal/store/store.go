@@ -1959,10 +1959,10 @@ func (s *Store) migrateWithObservationCheck(ctx context.Context, checked *observ
 		return err
 	}
 
-	if !checked.unchanged(ctx, s.generation) {
-		if err := s.normalizeLegacyObservations(); err != nil {
-			return err
-		}
+	if checked.unchanged(ctx, s.generation) {
+		startupTraceFrom(ctx).Mark("observation-normalization-reused")
+	} else if err := s.normalizeLegacyObservations(); err != nil {
+		return err
 	}
 
 	if _, err := s.execHook(s.db, `UPDATE user_prompts SET project = '' WHERE project IS NULL`); err != nil {

@@ -1,10 +1,28 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestStartupMigrationReusesCleanObservationCheck(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO cloud_upgrade_state(project, snapshot_json)
+		VALUES ('fixture', '{"captured":true,"project_enrolled":false}')`); err != nil {
+		t.Fatal(err)
+	}
+	var phases bytes.Buffer
+	ctx := NewStartupTrace(&phases, time.Now()).Context(t.Context())
+	if err := s.runStartupMigrations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(phases.String(), " observation-normalization-reused\n") {
+		t.Fatalf("clean check was not reused through startup:\n%s", phases.String())
+	}
+}
 
 func TestObservationNormalizationCheckRejectsInterveningWrite(t *testing.T) {
 	s := newTestStore(t)
