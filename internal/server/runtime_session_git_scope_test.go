@@ -124,7 +124,10 @@ func checkRuntimeResolveGitScope(t *testing.T, endWhileChecking, failFirstScopeC
 		}
 	}()
 
-	body, err := json.Marshal(map[string]string{"id": root, "project": project, "directory": dir, "ownership_mode": mode})
+	// A different spelling exercises worktree verification. Exact persisted
+	// paths resolve from the read snapshot without a second Git lookup.
+	requested := dir + string(filepath.Separator) + "."
+	body, err := json.Marshal(map[string]string{"id": root, "project": project, "directory": requested, "ownership_mode": mode})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -63,8 +63,7 @@ func (s *Server) handleRuntimeSession(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		ctx := r.Context()
-		directory := projectpkg.RuntimeWorktreeDirectoryContext(ctx, body.Directory)
-		id, err = s.store.ResolveRuntimeSessionWithOwnershipModeContext(ctx, body.ID, body.Project, directory, body.OwnershipMode)
+		id, err = s.store.ResolveRuntimeSessionFromDirectoryContext(ctx, body.ID, body.Project, body.Directory, body.OwnershipMode)
 		if ctx.Err() != nil {
 			return
 		}

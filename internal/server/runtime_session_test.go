@@ -7,13 +7,106 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
+
+func TestRuntimeSessionResolveReusesExactStoredDirectory(t *testing.T) {
+	_, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("Git is required to observe worktree lookups")
+	}
+	directory, subdirectory := httpHomeSelectionFixture(t)
+	directory = projectpkg.DirectoryIdentity(directory)
+
+	db := newServerTestStore(t)
+	const root, project, mode = "registered-root", "fixture-project", store.SessionOwnershipProjectOwned
+	if err := db.CreateSessionWithOwnershipMode(root, project, directory, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession(root, "terminal fixture"); err != nil {
+		t.Fatal(err)
+	}
+	effective, err := db.ResumeSessionWithOwnershipMode(root, project, directory, mode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(t.TempDir(), "git-trace.json")
+	t.Setenv("GIT_TRACE2_EVENT", trace)
+	handler := New(db, 0).Handler()
+	call := func(owner, requested, expected string, status int) {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"id": root, "project": owner, "directory": requested, "ownership_mode": mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/runtime-sessions/resolve", bytes.NewReader(body)))
+		if w.Code != status {
+			t.Fatalf("resolve %q = %d %s, want %d", requested, w.Code, w.Body, status)
+		}
+		if expected != "" {
+			var ack map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil || ack["id"] != expected ||
+				ack["resumed_from"] != root || ack["status"] != "resolved" {
+				t.Fatalf("resolve ack = %s, %v", w.Body, err)
+			}
+		}
+	}
+	call(project, directory, effective, http.StatusOK)
+	if records, err := os.ReadFile(trace); err != nil || strings.Count(string(records), `"event":"start"`) != 1 {
+		t.Fatalf("an exact persisted scope must use one Git lookup: %v\n%s", err, records)
+	}
+	call("other-project", directory, "", http.StatusConflict)
+	if err := os.Remove(trace); err != nil {
+		t.Fatal(err)
+	}
+
+	call(project, subdirectory, effective, http.StatusOK)
+	if records, err := os.ReadFile(trace); err != nil || !strings.Contains(string(records), "--show-toplevel") {
+		t.Fatalf("the worktree alias did not consult Git: %v\n%s", err, records)
+	}
+	if runtime.GOOS == "windows" {
+		call(project, strings.ToUpper(directory), effective, http.StatusOK)
+	}
+	// A new binding for the live continuation cannot reuse a prior result.
+	if _, err := db.DB().Exec("UPDATE sessions SET directory = ? WHERE id = ?", t.TempDir(), effective); err != nil {
+		t.Fatal(err)
+	}
+	call(project, directory, "", http.StatusConflict)
+
+	if _, err := db.DB().Exec("UPDATE sessions SET directory = ? WHERE id = ?", directory, effective); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	nested := filepath.Join(other, "other-nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	httpHomeGit(t, other, "init", "--quiet")
+	httpHomeGit(t, directory, "config", "--local", "core.worktree", nested)
+	// Git maps directory to nested, then maps nested to the other checkout's
+	// root. Equal strings in SQLite must not bypass this scope conflict.
+	call(project, directory, "", http.StatusConflict)
+	httpHomeGit(t, directory, "config", "--local", "--unset", "core.worktree")
+
+	shift := "shift"
+	if err := os.MkdirAll(filepath.Join(directory, shift, shift), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(directory, ".git"))
+	t.Setenv("GIT_WORK_TREE", shift)
+	call(project, directory, "", http.StatusConflict)
+}
 
 func TestRuntimeSessionResolveReadsWhileWriterIsReserved(t *testing.T) {
 	directory := t.TempDir()
