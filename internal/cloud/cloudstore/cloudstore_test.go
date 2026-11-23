@@ -1351,12 +1351,18 @@ func TestBackfillMutationChunksIsIdempotent(t *testing.T) {
 	if first.ChunksInserted != 1 {
 		t.Fatalf("expected first repair to insert one chunk, got %+v", first)
 	}
-	second, err := cs.BackfillMutationChunks(ctx, project, true)
+	var progress []string
+	second, err := cs.BackfillMutationChunksWithProgress(ctx, project, true, func(phase string, rows int) {
+		progress = append(progress, fmt.Sprintf("%s/%d", phase, rows))
+	})
 	if err != nil {
 		t.Fatalf("second BackfillMutationChunks: %v", err)
 	}
 	if second.ChunksPlanned != 0 || second.ChunksInserted != 0 || second.AlreadyMaterialized != 1 {
 		t.Fatalf("expected second repair to be noop, got %+v", second)
+	}
+	if !slices.Equal(progress, []string{"chunks/1", "journal/1"}) {
+		t.Errorf("repair progress = %v, want [chunks/1 journal/1]", progress)
 	}
 	if got := countCloudChunksForProject(t, cs, project); got != 1 {
 		t.Fatalf("expected no duplicate chunks after rerun, got %d", got)

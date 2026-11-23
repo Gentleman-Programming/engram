@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,21 @@ func TestCloudRuntimeReportsStartupOnStoreFailure(t *testing.T) {
 
 func TestCloudRuntimeReportsStartupProgressInRepairOrder(t *testing.T) {
 	dsn := openIsolatedCloudRuntimeSchema(t)
+	ctx := context.Background()
+	seedStore, err := cloudstore.New(cloud.Config{DSN: dsn})
+	if err != nil {
+		t.Fatalf("initialize fixture schema: %v", err)
+	}
+	t.Cleanup(func() { _ = seedStore.Close() })
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open fixture database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(ctx, `INSERT INTO cloud_mutations (project, entity, entity_key, op, payload)
+		VALUES ('first', 'session', 'invalid-session', 'upsert', '{"id":"invalid-session"}')`); err != nil {
+		t.Fatalf("seed invalid legacy mutation: %v", err)
+	}
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
 	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
 
@@ -59,9 +75,12 @@ func TestCloudRuntimeReportsStartupProgressInRepairOrder(t *testing.T) {
 		`engram cloud startup: checking mutation chunks for project="second" (1/2)`,
 		`engram cloud repair materialize-mutations: project="second" candidates=0 already_materialized=0 chunks_planned=0 chunks_inserted=0 elapsed=`,
 		`engram cloud startup: checking mutation chunks for project="first" (2/2)`,
-		`engram cloud repair materialize-mutations: project="first" candidates=0 already_materialized=0 chunks_planned=0 chunks_inserted=0 elapsed=`,
+		`engram cloud repair materialize-mutations: project="first" candidates=1 already_materialized=0 chunks_planned=0 chunks_inserted=0 elapsed=`,
 	}
 	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	lines = slices.DeleteFunc(lines, func(line string) bool {
+		return strings.HasPrefix(line, "engram cloud startup: checking mutation chunks") && strings.Contains(line, " rows_scanned=")
+	})
 	if len(lines) != len(want) {
 		t.Fatalf("startup stderr = %q, want %d lines", stderr, len(want))
 	}
@@ -69,6 +88,12 @@ func TestCloudRuntimeReportsStartupProgressInRepairOrder(t *testing.T) {
 		if !strings.HasPrefix(lines[i], prefix) {
 			t.Errorf("startup stderr line %d = %q, want prefix %q", i+1, lines[i], prefix)
 		}
+	}
+	if !strings.HasSuffix(lines[3], " invalid_mutations=0") || !strings.HasSuffix(lines[5], " invalid_mutations=1") {
+		t.Errorf("startup summaries did not count invalid mutations per project: %q", stderr)
+	}
+	if strings.Contains(stderr, "invalid-session") {
+		t.Errorf("startup exposed a fixture mutation identifier: %q", stderr)
 	}
 }
 

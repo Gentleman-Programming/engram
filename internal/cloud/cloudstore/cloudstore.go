@@ -1067,6 +1067,12 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 const mutationBackfillChunkSize = 100
 
 func (cs *CloudStore) BackfillMutationChunks(ctx context.Context, project string, apply bool) (MutationChunkBackfillReport, error) {
+	return cs.BackfillMutationChunksWithProgress(ctx, project, apply, nil)
+}
+
+// BackfillMutationChunksWithProgress reports completed reads per phase while
+// retaining the same repair plan and transaction as BackfillMutationChunks.
+func (cs *CloudStore) BackfillMutationChunksWithProgress(ctx context.Context, project string, apply bool, progress func(phase string, rows int)) (MutationChunkBackfillReport, error) {
 	if cs == nil || cs.db == nil {
 		return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: not initialized")
 	}
@@ -1076,7 +1082,7 @@ func (cs *CloudStore) BackfillMutationChunks(ctx context.Context, project string
 	}
 
 	report := MutationChunkBackfillReport{Project: project, Applied: apply}
-	materialized, err := cs.existingChunkMutationSignatures(ctx, project)
+	materialized, err := cs.existingChunkMutationSignatures(ctx, project, progress)
 	if err != nil {
 		return MutationChunkBackfillReport{}, err
 	}
@@ -1092,11 +1098,16 @@ func (cs *CloudStore) BackfillMutationChunks(ctx context.Context, project string
 	defer rows.Close()
 
 	missing := make([]MutationEntry, 0)
+	var scanned int
 	for rows.Next() {
 		var entry MutationEntry
 		var payload string
 		if err := rows.Scan(&entry.Project, &entry.Entity, &entry.EntityKey, &entry.Op, &payload); err != nil {
 			return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: scan mutation chunk backfill candidate: %w", err)
+		}
+		if progress != nil {
+			scanned++
+			progress("journal", scanned)
 		}
 		if !isChunkMaterializableMutationEntity(entry.Entity) {
 			continue
@@ -1174,7 +1185,7 @@ func (cs *CloudStore) BackfillMutationChunks(ctx context.Context, project string
 	return report, nil
 }
 
-func (cs *CloudStore) existingChunkMutationSignatures(ctx context.Context, project string) (map[string]struct{}, error) {
+func (cs *CloudStore) existingChunkMutationSignatures(ctx context.Context, project string, progress func(phase string, rows int)) (map[string]struct{}, error) {
 	rows, err := cs.db.QueryContext(ctx, `SELECT payload FROM cloud_chunks WHERE project_name = $1`, project)
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: query existing chunk mutations: %w", err)
@@ -1182,6 +1193,7 @@ func (cs *CloudStore) existingChunkMutationSignatures(ctx context.Context, proje
 	defer rows.Close()
 
 	signatures := make(map[string]struct{})
+	var scanned int
 	for rows.Next() {
 		var payload []byte
 		if err := rows.Scan(&payload); err != nil {
@@ -1200,6 +1212,10 @@ func (cs *CloudStore) existingChunkMutationSignatures(ctx context.Context, proje
 				return nil, fmt.Errorf("cloudstore: sign existing chunk mutation %s/%s/%s: %w", mutation.Project, mutation.Entity, mutation.EntityKey, err)
 			}
 			signatures[sig] = struct{}{}
+		}
+		if progress != nil {
+			scanned++
+			progress("chunks", scanned)
 		}
 	}
 	if err := rows.Err(); err != nil {

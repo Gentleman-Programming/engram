@@ -192,14 +192,23 @@ func buildRuntimeAuthenticator(cfg cloud.Config, cs *cloudstore.CloudStore, allo
 func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.CloudStore, projects []string) error {
 	for i, project := range projects {
 		started := time.Now()
+		lastReport := started
 		fmt.Fprintf(os.Stderr, "engram cloud startup: checking mutation chunks for project=%q (%d/%d)\n", project, i+1, len(projects))
-		report, err := cs.BackfillMutationChunks(ctx, project, true)
+		report, err := cs.BackfillMutationChunksWithProgress(ctx, project, true, func(phase string, rows int) {
+			now := time.Now()
+			if now.Sub(lastReport) < 5*time.Second {
+				return
+			}
+			lastReport = now
+			fmt.Fprintf(os.Stderr, "engram cloud startup: checking mutation chunks for project=%q (%d/%d) phase=%s rows_scanned=%d elapsed=%s\n",
+				project, i+1, len(projects), phase, rows, now.Sub(started).Round(time.Millisecond))
+		})
 		if err != nil {
 			return fmt.Errorf("cloud repair materialize-mutations for project %q: %w", project, err)
 		}
 		fmt.Fprintf(os.Stderr,
-			"engram cloud repair materialize-mutations: project=%q candidates=%d already_materialized=%d chunks_planned=%d chunks_inserted=%d elapsed=%s\n",
-			report.Project, report.CandidateMutations, report.AlreadyMaterialized, report.ChunksPlanned, report.ChunksInserted, time.Since(started).Round(time.Millisecond),
+			"engram cloud repair materialize-mutations: project=%q candidates=%d already_materialized=%d chunks_planned=%d chunks_inserted=%d elapsed=%s invalid_mutations=%d\n",
+			report.Project, report.CandidateMutations, report.AlreadyMaterialized, report.ChunksPlanned, report.ChunksInserted, time.Since(started).Round(time.Millisecond), report.InvalidMutations,
 		)
 	}
 	return nil
