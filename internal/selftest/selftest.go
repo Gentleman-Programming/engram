@@ -166,8 +166,10 @@ func runDatabaseSaveSearchContext(dataDir string) error {
 		ID string `json:"id"`
 	}
 	if err := postCreatedJSON(handler, "/sessions", map[string]string{
-		"id":      sessionID,
-		"project": project,
+		"id":             sessionID,
+		"project":        project,
+		"directory":      dataDir,
+		"ownership_mode": store.SessionOwnershipProjectOwned,
 	}, &session); err != nil {
 		return err
 	}
