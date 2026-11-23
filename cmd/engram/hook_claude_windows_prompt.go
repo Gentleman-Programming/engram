@@ -40,21 +40,31 @@ func cmdClaudeWindowsUserPromptSubmit(check bool) {
 	var prompt struct {
 		SessionID string `json:"session_id"`
 	}
-	if err == nil && json.Unmarshal(input, &prompt) == nil && claudeWindowsPromptAlreadyLoaded(stateDir, prompt.SessionID) {
-		_, _ = fmt.Fprintln(os.Stdout, "{}")
-		return
+	var marker string
+	if err == nil && json.Unmarshal(input, &prompt) == nil {
+		var loaded bool
+		marker, loaded = claimClaudeWindowsPromptMarker(stateDir, prompt.SessionID)
+		if loaded {
+			_, _ = fmt.Fprintln(os.Stdout, "{}")
+			return
+		}
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]map[string]string{
+	err = json.NewEncoder(os.Stdout).Encode(map[string]map[string]string{
 		"hookSpecificOutput": {
 			"hookEventName":     "UserPromptSubmit",
 			"additionalContext": claudeWindowsPromptBootstrap(),
 		},
 	})
+	if err != nil && marker != "" {
+		// A failed output write leaves the next prompt eligible for bootstrap.
+		_ = os.Remove(marker)
+	}
 }
 
-func claudeWindowsPromptAlreadyLoaded(stateDir, sessionID string) bool {
+// claimClaudeWindowsPromptMarker returns the path only when this invocation creates it.
+func claimClaudeWindowsPromptMarker(stateDir, sessionID string) (string, bool) {
 	if sessionID == "" {
-		return false
+		return "", false
 	}
 	key := sessionID
 	if !claudeWindowsPromptUUID.MatchString(key) {
@@ -65,13 +75,13 @@ func claudeWindowsPromptAlreadyLoaded(stateDir, sessionID string) bool {
 	marker, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err == nil {
 		_ = marker.Close()
-		return false
+		return path, false
 	}
 	if !os.IsExist(err) {
-		return false
+		return "", false
 	}
 	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
+	return "", err == nil && info.Mode().IsRegular()
 }
 
 func claudeWindowsPromptBootstrap() string {

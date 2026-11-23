@@ -134,6 +134,27 @@ func TestClaudeWindowsPromptBootstrapCLI(t *testing.T) {
 			t.Fatalf("existing marker returned %q", got)
 		}
 	})
+	t.Run("closed stdout leaves first prompt available", func(t *testing.T) {
+		const failedInput = `{"session_id":"5bc10c2d-54bf-472d-a1d5-ea0ebb3673d2"}`
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = writer.Close() }()
+		if err := reader.Close(); err != nil {
+			t.Fatal(err)
+		}
+		cmd := newClaudeWindowsPromptCommand(t, root, "")
+		cmd.Stdin = strings.NewReader(failedInput)
+		cmd.Stdout = writer
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("native prompt hook with closed stdout: %v", err)
+		}
+		assertBootstrap(t, run(t, failedInput, ""))
+		if got := run(t, failedInput, ""); got != "{}" {
+			t.Fatalf("subsequent prompt returned %q", got)
+		}
+	})
 	t.Run("malformed input still gets local bootstrap", func(t *testing.T) {
 		assertBootstrap(t, run(t, `{"session_id":`, ""))
 	})
