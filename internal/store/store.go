@@ -3893,7 +3893,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			}
 			*effective = id
 		}
-		if managed != nil && id != managed.scope.EffectiveID {
+		if managed != nil && managed.scope.EffectiveID != "" && id != managed.scope.EffectiveID {
 			return ErrRuntimeSessionEffectiveIDMismatch
 		}
 		if id != root {
@@ -3976,9 +3976,12 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			return err
 		}
 		if managed != nil {
-			if err := s.admitManagedRuntimeTx(tx, managed); err != nil {
+			selected := *managed
+			selected.scope.EffectiveID = id
+			if err := s.admitManagedRuntimeTx(tx, &selected); err != nil {
 				return err
 			}
+			managed.generation = selected.generation
 		}
 		if !found && (provenance == nil || !provenance.rootRegistrationOnly || id == root) {
 			if err := captureProjectProvenanceTx(tx, "session", id, provenance); err != nil {

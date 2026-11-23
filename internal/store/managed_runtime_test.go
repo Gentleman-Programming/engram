@@ -20,12 +20,12 @@ func TestManagedRuntimeAttachRegistersAndAdmitsAtomically(t *testing.T) {
 	if err := st.EnrollProject(scope.Project); err != nil {
 		t.Fatal(err)
 	}
-	first, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
-	if err != nil || first <= 0 {
-		t.Fatalf("first attachment: %d, %v", first, err)
+	effective, first, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
+	if err != nil || first <= 0 || effective != scope.Root {
+		t.Fatalf("first attachment: %q %d, %v", effective, first, err)
 	}
-	if retry, err := st.AttachManagedRuntime(scope, managedTestHostA, false); err != nil || retry != first {
-		t.Fatalf("reattachment after lost acknowledgement: %d, %v", retry, err)
+	if id, retry, err := st.AttachManagedRuntime(scope, managedTestHostA, false); err != nil || retry != first || id != effective {
+		t.Fatalf("reattachment after lost acknowledgement: %q %d, %v", id, retry, err)
 	}
 	if err := st.RetireManagedRuntimeHost(scope, first, managedTestHostA); err != nil {
 		t.Fatal(err)
@@ -37,18 +37,23 @@ func TestManagedRuntimeAttachRegistersAndAdmitsAtomically(t *testing.T) {
 	successor.EffectiveID = "root:resume:2"
 	replacement := successor
 	replacement.EffectiveID = "root:resume:3"
+	unresolved := successor
+	unresolved.EffectiveID = ""
 	before, err := st.getSyncState(DefaultSyncTargetKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AttachManagedRuntime(replacement, managedTestHostB, true); !errors.Is(err, ErrRuntimeSessionEffectiveIDMismatch) {
+	if _, _, err := st.AttachManagedRuntime(replacement, managedTestHostB, true); !errors.Is(err, ErrRuntimeSessionEffectiveIDMismatch) {
 		t.Fatalf("unexpected continuation selection: %v", err)
+	}
+	if _, _, err := st.AttachManagedRuntime(unresolved, managedTestHostA, true); !errors.Is(err, ErrManagedRuntimeGeneration) {
+		t.Fatalf("old host was able to attach to a later continuation: %v", err)
 	}
 	if _, err := st.db.Exec(`CREATE TRIGGER fixture_reject_attachment BEFORE INSERT ON managed_runtime_hosts
 		BEGIN SELECT RAISE(ABORT, 'forced attachment failure'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AttachManagedRuntime(successor, managedTestHostB, true); err == nil || !strings.Contains(err.Error(), "forced attachment failure") {
+	if _, _, err := st.AttachManagedRuntime(unresolved, managedTestHostB, true); err == nil || !strings.Contains(err.Error(), "forced attachment failure") {
 		t.Fatalf("did not reach the host write after session registration: %v", err)
 	}
 	var rows, generations int
@@ -65,9 +70,15 @@ func TestManagedRuntimeAttachRegistersAndAdmitsAtomically(t *testing.T) {
 	if _, err := st.db.Exec("DROP TRIGGER fixture_reject_attachment"); err != nil {
 		t.Fatal(err)
 	}
-	next, err := st.AttachManagedRuntime(successor, managedTestHostB, true)
-	if err != nil || next <= first {
-		t.Fatalf("continuation attachment: %d, %v", next, err)
+	effective, next, err := st.AttachManagedRuntime(unresolved, managedTestHostB, true)
+	if err != nil || next <= first || effective != successor.EffectiveID {
+		t.Fatalf("continuation attachment: %q %d, %v", effective, next, err)
+	}
+	if id, retry, err := st.AttachManagedRuntime(unresolved, managedTestHostB, true); err != nil || retry != next || id != effective {
+		t.Fatalf("lost unasserted attachment result: %q %d, %v", id, retry, err)
+	}
+	if _, _, err := st.AttachManagedRuntime(unresolved, managedTestHostA, true); !errors.Is(err, ErrManagedRuntimeGeneration) {
+		t.Fatalf("old host was able to reattach to the active continuation: %v", err)
 	}
 	generation, hosts, err := st.ListManagedRuntimeHosts(successor)
 	if err != nil || generation != next || len(hosts) != 1 || hosts[0] != managedTestHostB {

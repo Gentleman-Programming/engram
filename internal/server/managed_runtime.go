@@ -19,6 +19,7 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	attach := r.URL.Path == "/internal/managed-runtime/attach"
 	var body struct {
 		Root        string                      `json:"root"`
 		EffectiveID string                      `json:"effective_id"`
@@ -34,7 +35,8 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil || decoder.Decode(new(any)) != io.EOF ||
-		strings.TrimSpace(body.Root) == "" || strings.TrimSpace(body.EffectiveID) == "" ||
+		strings.TrimSpace(body.Root) == "" ||
+		((!attach || body.EffectiveID != "") && strings.TrimSpace(body.EffectiveID) == "") ||
 		strings.TrimSpace(body.Project) == "" || strings.TrimSpace(body.Directory) == "" ||
 		(body.Mode != store.SessionOwnershipProjectOwned && body.Mode != store.SessionOwnershipShared) {
 		jsonError(w, http.StatusBadRequest, "invalid managed runtime scope")
@@ -48,7 +50,6 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var hosts []store.ManagedRuntimeHost
-	attach := r.URL.Path == "/internal/managed-runtime/attach"
 	if attach != (body.Resume != nil) {
 		jsonError(w, http.StatusBadRequest, "only attachment takes a resume decision")
 		return
@@ -75,7 +76,10 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if attach {
-			body.Generation, err = s.store.AttachManagedRuntime(scope, *body.Host, *body.Resume)
+			scope.EffectiveID, body.Generation, err = s.store.AttachManagedRuntime(scope, *body.Host, *body.Resume)
+			if err == nil {
+				s.notifyWrite()
+			}
 		} else {
 			body.Generation, err = s.store.AdmitManagedRuntime(scope, *body.Host)
 		}

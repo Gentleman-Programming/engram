@@ -60,10 +60,14 @@ type ManagedRuntimeScope struct {
 }
 
 func (scope ManagedRuntimeScope) normalized() (ManagedRuntimeScope, error) {
-	if err := validateSessionID(scope.Root); err != nil {
+	if err := validateSessionID(scope.EffectiveID); err != nil {
 		return scope, err
 	}
-	if err := validateSessionID(scope.EffectiveID); err != nil {
+	return scope.normalizedBinding()
+}
+
+func (scope ManagedRuntimeScope) normalizedBinding() (ManagedRuntimeScope, error) {
+	if err := validateSessionID(scope.Root); err != nil {
 		return scope, err
 	}
 	if !validSessionOwnershipMode(scope.Mode) {
@@ -117,21 +121,30 @@ func newManagedRuntimeAdmission(scope ManagedRuntimeScope, host ManagedRuntimeHo
 	return managedRuntimeAdmission{scope: scope, host: host}, err
 }
 
-// AttachManagedRuntime registers the exact expected live session and admits the
-// verified host in the same writer transaction. The caller must authorize the
-// host before registration. Selecting a different continuation rolls back.
-func (s *Store) AttachManagedRuntime(scope ManagedRuntimeScope, host ManagedRuntimeHost, resume bool) (int64, error) {
-	admission, err := newManagedRuntimeAdmission(scope, host)
-	if err != nil {
-		return 0, err
+// AttachManagedRuntime registers the live session and admits the verified host
+// in one writer transaction. If the caller supplies an expected effective ID,
+// selecting a different continuation rolls back. A host previously attached to
+// this root cannot attach itself to a later continuation.
+func (s *Store) AttachManagedRuntime(scope ManagedRuntimeScope, host ManagedRuntimeHost, resume bool) (string, int64, error) {
+	if !host.valid() {
+		return "", 0, ErrManagedRuntimeHostIdentity
 	}
-	scope = admission.scope
+	if scope.EffectiveID != "" {
+		if err := validateSessionID(scope.EffectiveID); err != nil {
+			return "", 0, err
+		}
+	}
+	scope, err := scope.normalizedBinding()
+	if err != nil {
+		return "", 0, err
+	}
+	admission := managedRuntimeAdmission{scope: scope, host: host}
 	effective := scope.Root
 	err = s.startSessionRegistration(scope.Root, scope.Project, scope.Directory, scope.Mode, resume, &effective, false, nil, nil, &admission)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
-	return admission.generation, nil
+	return effective, admission.generation, nil
 }
 
 // AdmitManagedRuntime advances the generation for an already registered binding.
@@ -177,6 +190,15 @@ func (s *Store) admitManagedRuntimeTx(tx *sql.Tx, admission *managedRuntimeAdmis
 	}
 	if otherRoot {
 		return ErrRuntimeSessionScopeConflict
+	}
+	var otherBinding bool
+	if err := tx.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM managed_runtime_hosts WHERE root=? AND effective_id<>? AND pid=? AND start=? AND domain=?
+	)`, scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain).Scan(&otherBinding); err != nil {
+		return err
+	}
+	if otherBinding {
+		return ErrManagedRuntimeGeneration
 	}
 	var retired bool
 	err := tx.QueryRow(`SELECT retired FROM managed_runtime_hosts

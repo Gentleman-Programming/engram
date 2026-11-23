@@ -71,7 +71,9 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	call(owned, token, prefix+"attach", body, 409)
 	body["effective_id"] = "root"
 	call(owned, token, prefix+"admit", body, 400)
+	delete(body, "effective_id")
 	resp := call(owned, token, prefix+"attach", body, 200)
+	body["effective_id"] = "root"
 	retry := call(owned, token, prefix+"attach", body, 200)
 	if retry.Body.String() != resp.Body.String() {
 		t.Fatalf("attachment retry changed receipt: %s and %s", retry.Body, resp.Body)
