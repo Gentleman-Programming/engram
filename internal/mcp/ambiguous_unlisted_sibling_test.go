@@ -86,7 +86,7 @@ func TestMemSave_RecoveryRejectsCollisionWithUnlistedSibling(t *testing.T) {
 	body := callResultJSON(t, initial)
 	choices, ok := body["available_projects"].([]any)
 	if !initial.IsError || body["error_code"] != "ambiguous_project" || !ok || len(choices) != 2 ||
-		!((choices[0] == unrelated && choices[1] == visible) || (choices[1] == unrelated && choices[0] == visible)) {
+		((choices[0] != unrelated || choices[1] != visible) && (choices[1] != unrelated || choices[0] != visible)) {
 		t.Fatalf("expected native detector to report both visible choices and omit %q: %v", omitted, body)
 	}
 	token, ok := body["recovery_token"].(string)
