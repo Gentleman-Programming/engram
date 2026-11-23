@@ -62,7 +62,9 @@ Install Engram's Pi-native package:
 engram setup pi
 ```
 
-This source version of `engram setup pi` runs `pi install npm:gentle-engram@0.4.1`, then ensures Pi settings contain that package, replacing earlier `0.1.8`, `0.1.11`, `0.1.12`, `0.1.14`, `0.1.15`, `0.1.16`, `0.2.0`, `0.3.0`, and `0.4.0` pins when present. Engram core `3.3.1` uses the same `0.4.1` pin; older core `3.3.0` binaries pin `0.3.0`, so use the explicit manual install below to select `0.4.1` with an older core. Pi agent writes use native `mem_*` tools, not Engram MCP registration. `engram setup pi` does not create or change `mcpServers.engram`. Earlier `0.1.16` `pi-engram init` still registers Engram MCP and must not be used for native-only setup; version `0.2.0` init does not create or change `mcp.json` and warns about an existing `mcpServers.engram` entry. If the Pi agent directory's `mcp.json` already contains `mcpServers.engram`, Go setup warns with its exact path and key; manually remove only that key and restart/reload Pi for the native-only guarantee. Until then native-only agent writes are **not guaranteed**. Other MCP servers are preserved.
+This version of `engram setup pi` installs `npm:gentle-engram@0.8.0`, replaces recognized historical npm pin strings, and preserves custom package entries.
+
+Pi agent writes use native `mem_*` tools. If Pi already has an Engram MCP entry, setup reports the file and key. For native-only writes, remove the `mcpServers.engram` key from that file and restart Pi. Keep the entries for your other MCP servers.
 
 Pi 0.99.0 and later ship built-in MCP (`mcp.json`, `/mcp`, `pi mcp add`); an installed `pi-mcp-adapter` replaces that built-in support, so neither `engram setup pi` nor `pi-engram init` adds it. An existing adapter entry in `settings.json` is left untouched.
 
@@ -70,13 +72,15 @@ For versioned mise installations, setup selects the shim directory from an absol
 
 When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also auto-pins `npmCommand` in Pi's `settings.json` to `["mise", "exec", "node@<version>", "--", "npm"]`, preventing Node version drift from silently changing which npm root Pi uses. If `npmCommand` already exists in `settings.json`, the existing value is preserved. This step is a no-op when mise is not installed.
 
-Manual equivalent:
+For a manual upgrade of the personal Pi package on Engram 3.7.2, run the following command. Use it when an older native `mem_update` tool is still active and its schema lacks `expected_project`.
 
 ```bash
-pi install npm:gentle-engram@0.4.1
+pi install npm:gentle-engram@0.8.0
 ```
 
-Restart Pi after installation.
+An active `gentle-engram` pin in a trusted project's `.pi/settings.json` can override the personal package. If that project has a plain npm pin, run `pi install --local npm:gentle-engram@0.8.0` from the project directory. For a package entry with custom settings, update its `source` pin and keep the other fields. [Pi package scope](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/packages.md#understand-scope-and-identity)
+
+Restart Pi and check that the native `mem_update` tool exposes `expected_project`. Set it to the observation's existing project when updating.
 
 The package has two paths:
 
