@@ -344,16 +344,23 @@ func TestClaudeSessionEndDoesNotCloseReplacementContinuation(t *testing.T) {
 func TestClaudeContinuationEndRequiresConfirmedScope(t *testing.T) {
 	requireHookBinaries(t)
 	const supported = `{"status":"ok","capabilities":{"runtime_session_conditional_end":true}}`
+	const resolved = `{"id":"root:resume:2","resumed_from":"root","status":"resolved"}`
 	for _, tc := range []struct {
 		name, health, resolution string
+		healthCode, resolveCode  int
 		wantEnd                  bool
 	}{
-		{"capability unavailable", "", "", false},
-		{"malformed capability", `{"status":"ok","capabilities":{"runtime_session_conditional_end":"true"}}`, "", false},
-		{"resolve unavailable", supported, "", false},
-		{"wrong root", supported, `{"id":"root:resume:2","resumed_from":"different","status":"resolved"}`, false},
-		{"invalid continuation", supported, `{"id":"root:resume:bad","resumed_from":"root","status":"resolved"}`, false},
-		{"exact continuation", supported, `{"id":"root:resume:2","resumed_from":"root","status":"resolved"}`, true},
+		{name: "capability unavailable", healthCode: http.StatusServiceUnavailable},
+		{name: "malformed capability", health: `{"status":"ok","capabilities":{"runtime_session_conditional_end":"true"}}`},
+		{name: "multiple capability envelopes", health: supported + "\n" + `{"status":"ok"}`},
+		{name: "redirected capability", health: `{"status":"ok"}`, healthCode: http.StatusFound},
+		{name: "resolve unavailable", health: supported, resolveCode: http.StatusNotFound},
+		{name: "redirected resolution", health: supported, resolution: resolved, resolveCode: http.StatusFound},
+		{name: "multiple resolution envelopes", health: supported, resolution: resolved + "\n" + resolved},
+		{name: "wrong root", health: supported, resolution: `{"id":"root:resume:2","resumed_from":"different","status":"resolved"}`},
+		{name: "invalid continuation", health: supported, resolution: `{"id":"root:resume:bad","resumed_from":"root","status":"resolved"}`},
+		{name: "continuation with trailing newline", health: supported, resolution: `{"id":"root:resume:2\n","resumed_from":"root","status":"resolved"}`},
+		{name: "exact continuation", health: supported, resolution: resolved, wantEnd: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var ends atomic.Int32
@@ -362,15 +369,13 @@ func TestClaudeContinuationEndRequiresConfirmedScope(t *testing.T) {
 				case "GET /sessions/root":
 					_, _ = io.WriteString(w, `{"id":"root","project":"client","directory":"/work","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`)
 				case "GET /health":
-					if tc.health == "" {
-						w.WriteHeader(http.StatusServiceUnavailable)
-						return
+					if tc.healthCode != 0 {
+						w.WriteHeader(tc.healthCode)
 					}
 					_, _ = io.WriteString(w, tc.health)
 				case "POST /runtime-sessions/resolve":
-					if tc.resolution == "" {
-						w.WriteHeader(http.StatusNotFound)
-						return
+					if tc.resolveCode != 0 {
+						w.WriteHeader(tc.resolveCode)
 					}
 					_, _ = io.WriteString(w, tc.resolution)
 				case "POST /runtime-sessions/end":
