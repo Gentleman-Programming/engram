@@ -45,6 +45,18 @@ func New(cfg cloud.Config) (*CloudStore, error) {
 
 // NewContext opens the Store and initializes its schema and session index.
 func NewContext(ctx context.Context, cfg cloud.Config) (*CloudStore, error) {
+	store, err := openCloudStore(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.migrate(ctx); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func openCloudStore(ctx context.Context, cfg cloud.Config) (*CloudStore, error) {
 	dsn := strings.TrimSpace(cfg.DSN)
 	if dsn == "" {
 		return nil, fmt.Errorf("cloudstore: database dsn is required")
@@ -59,12 +71,7 @@ func NewContext(ctx context.Context, cfg cloud.Config) (*CloudStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("cloudstore: ping postgres: %w", err)
 	}
-	store := &CloudStore{db: db}
-	if err := store.migrate(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return store, nil
+	return &CloudStore{db: db}, nil
 }
 
 func (cs *CloudStore) Close() error {
@@ -696,6 +703,13 @@ func (cs *CloudStore) ReadChunk(ctx context.Context, project, chunkID string) ([
 }
 
 func (cs *CloudStore) migrate(ctx context.Context) error {
+	if err := cs.migrateSchema(ctx); err != nil {
+		return err
+	}
+	return cs.backfillProjectSessionsFromChunks(ctx)
+}
+
+func (cs *CloudStore) migrateSchema(ctx context.Context) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS cloud_users (
 			id BIGSERIAL PRIMARY KEY,
@@ -923,9 +937,6 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			return fmt.Errorf("cloudstore: migrate: %w", err)
 		}
 	}
-	if err := cs.backfillProjectSessionsFromChunks(ctx); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -1082,51 +1093,14 @@ func (cs *CloudStore) BackfillMutationChunksWithProgress(ctx context.Context, pr
 	}
 
 	report := MutationChunkBackfillReport{Project: project, Applied: apply}
-	materialized, err := cs.existingChunkMutationSignatures(ctx, project, progress)
+	materialized, err := existingChunkMutationSignaturesWith(ctx, cs.db, project, progress)
 	if err != nil {
 		return MutationChunkBackfillReport{}, err
 	}
 
-	rows, err := cs.db.QueryContext(ctx, `
-		SELECT project, entity, entity_key, op, payload::text
-		FROM cloud_mutations
-		WHERE project = $1
-		ORDER BY seq ASC`, project)
+	missing, err := readMutationChunkBackfillCandidates(ctx, cs.db, project, materialized, &report, progress)
 	if err != nil {
-		return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: query mutation chunk backfill candidates: %w", err)
-	}
-	defer rows.Close()
-
-	missing := make([]MutationEntry, 0)
-	var scanned int
-	for rows.Next() {
-		var entry MutationEntry
-		var payload string
-		if err := rows.Scan(&entry.Project, &entry.Entity, &entry.EntityKey, &entry.Op, &payload); err != nil {
-			return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: scan mutation chunk backfill candidate: %w", err)
-		}
-		if progress != nil {
-			scanned++
-			progress("journal", scanned)
-		}
-		if !isChunkMaterializableMutationEntity(entry.Entity) {
-			continue
-		}
-		entry.Payload = json.RawMessage(payload)
-		report.CandidateMutations++
-		sig, err := mutationEntrySignature(entry)
-		if err != nil {
-			report.InvalidMutations++
-			continue
-		}
-		if _, ok := materialized[sig]; ok {
-			report.AlreadyMaterialized++
-			continue
-		}
-		missing = append(missing, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: iterate mutation chunk backfill candidates: %w", err)
+		return MutationChunkBackfillReport{}, err
 	}
 
 	chunks := make([]materializedMutationChunk, 0)
@@ -1185,8 +1159,57 @@ func (cs *CloudStore) BackfillMutationChunksWithProgress(ctx context.Context, pr
 	return report, nil
 }
 
-func (cs *CloudStore) existingChunkMutationSignatures(ctx context.Context, project string, progress func(phase string, rows int)) (map[string]struct{}, error) {
-	rows, err := cs.db.QueryContext(ctx, `SELECT payload FROM cloud_chunks WHERE project_name = $1`, project)
+type mutationChunkQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func readMutationChunkBackfillCandidates(ctx context.Context, query mutationChunkQueryer, project string, materialized map[string]struct{}, report *MutationChunkBackfillReport, progress func(phase string, rows int)) ([]MutationEntry, error) {
+	rows, err := query.QueryContext(ctx, `
+		SELECT project, entity, entity_key, op, payload::text
+		FROM cloud_mutations
+		WHERE project = $1
+		ORDER BY seq ASC`, project)
+	if err != nil {
+		return nil, fmt.Errorf("cloudstore: query mutation chunk backfill candidates: %w", err)
+	}
+	defer rows.Close()
+
+	missing := make([]MutationEntry, 0)
+	var scanned int
+	for rows.Next() {
+		var entry MutationEntry
+		var payload string
+		if err := rows.Scan(&entry.Project, &entry.Entity, &entry.EntityKey, &entry.Op, &payload); err != nil {
+			return nil, fmt.Errorf("cloudstore: scan mutation chunk backfill candidate: %w", err)
+		}
+		if progress != nil {
+			scanned++
+			progress("journal", scanned)
+		}
+		if !isChunkMaterializableMutationEntity(entry.Entity) {
+			continue
+		}
+		entry.Payload = json.RawMessage(payload)
+		report.CandidateMutations++
+		sig, err := mutationEntrySignature(entry)
+		if err != nil {
+			report.InvalidMutations++
+			continue
+		}
+		if _, ok := materialized[sig]; ok {
+			report.AlreadyMaterialized++
+			continue
+		}
+		missing = append(missing, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cloudstore: iterate mutation chunk backfill candidates: %w", err)
+	}
+	return missing, nil
+}
+
+func existingChunkMutationSignaturesWith(ctx context.Context, query mutationChunkQueryer, project string, progress func(phase string, rows int)) (map[string]struct{}, error) {
+	rows, err := query.QueryContext(ctx, `SELECT payload FROM cloud_chunks WHERE project_name = $1`, project)
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: query existing chunk mutations: %w", err)
 	}

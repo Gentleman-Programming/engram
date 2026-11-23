@@ -1,0 +1,354 @@
+//go:build engram_lab_protected_receipt
+
+package cloudstore
+
+import (
+	"context"
+	"database/sql"
+	_ "embed"
+	"encoding/json"
+	"errors"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+//go:embed startup_receipt/schema.sql
+var protectedFeedDDL string
+
+func sameLabProtectedReceipt(left, right protectedReceipt) bool {
+	return left.snapshot == right.snapshot && left.identity == right.identity && slices.Equal(left.projects, right.projects)
+}
+
+func TestLabProtectedScopeReceipt(t *testing.T) {
+	projects := []string{"gamma", "alpha", "beta", "alpha"}
+	sorted := protectedProjects(projects)
+	if !slices.Equal(sorted, []string{"alpha", "beta", "gamma"}) || projects[0] != "gamma" {
+		t.Fatalf("canonical receipt changed fallback input: receipt %v, fallback %v", sorted, projects)
+	}
+	if len(protectedProjects([]string{"alpha", "*"})) != 0 || len(protectedProjects([]string{"alpha", " Gamma "})) != 0 {
+		t.Fatal("wildcard or raw identities cannot authorize the shortcut")
+	}
+	dir := t.TempDir()
+	root := openReceiptTestRoot(t, dir)
+	const name = "receipt.json"
+	valid := protectedReceipt{sorted, "800:800:", "fixture-enrollment"}
+	if err := writeProtectedDiskReceipt(root, name, valid); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readProtectedDiskReceipt(root, name); err != nil || !sameLabProtectedReceipt(got, valid) {
+		t.Fatalf("sorted receipt round trip: %+v, %v", got, err)
+	}
+	for _, unsupported := range []string{
+		`{"protected_receipt_version":1,"project":"alpha","snapshot":"800:800:","identity":"fixture-enrollment"}`,
+		`{"protected_receipt_version":2,"projects":["gamma","alpha"],"snapshot":"800:800:","identity":"fixture-enrollment"}`,
+		`{"protected_receipt_version":2,"projects":["alpha","alpha"],"snapshot":"800:800:","identity":"fixture-enrollment"}`,
+	} {
+		if err := root.WriteFile(name, []byte(unsupported), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readProtectedDiskReceipt(root, name); !errors.Is(err, errReceiptAppendUnproven) {
+			t.Fatalf("old or noncanonical receipt %q: %v", unsupported, err)
+		}
+	}
+}
+
+func openProtectedAppendFixture(t *testing.T, ctx context.Context) *CloudStore {
+	t.Helper()
+	dsn := os.Getenv("CLOUDSTORE_TEST_PROTECTED_DELTA_DSN")
+	if dsn == "" {
+		t.Skip("requires the owned PostgreSQL protected append runner")
+	}
+	u, err := url.Parse(dsn)
+	if err != nil || u.Scheme != "postgres" || u.Hostname() != "127.0.0.1" || u.User == nil || u.User.Username() != "fixture2397" {
+		t.Fatal("expected an isolated loopback fixture")
+	}
+	admin, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	var directory, version string
+	var initialized bool
+	if err := admin.QueryRowContext(ctx, `SELECT current_setting('data_directory'), current_setting('server_version_num'),
+		to_regclass('public.cloud_chunks') IS NOT NULL`).Scan(&directory, &version, &initialized); err != nil {
+		t.Fatal(err)
+	}
+	if initialized || !strings.HasPrefix(version, "18") ||
+		filepath.Clean(directory) != filepath.Clean(os.Getenv("CLOUDSTORE_TEST_PROTECTED_DELTA_DIR")) ||
+		!strings.HasPrefix(filepath.Base(filepath.Dir(directory)), "engram-2397-go-delta-") {
+		t.Fatal("expected a fresh owned PostgreSQL 18 data directory")
+	}
+	if _, err := admin.ExecContext(ctx, `CREATE ROLE cloud_delta_owner LOGIN;
+		CREATE ROLE cloud_delta_retention_operator LOGIN;
+		GRANT CREATE, USAGE ON SCHEMA public TO cloud_delta_owner`); err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.User("cloud_delta_owner")
+	cs, err := NewContext(ctx, cloud.Config{DSN: u.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	tx, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT
+		set_config('engram.startup_receipt_runtime_role', 'cloud_delta_owner', true),
+		set_config('engram.startup_receipt_retention_role', 'cloud_delta_retention_operator', true)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, protectedFeedDDL); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for _, disallowed := range []string{
+		`ALTER EVENT TRIGGER receipt_catalog_ddl DISABLE`,
+		`SET event_triggers=false`,
+		`DELETE FROM receipt_audit.events`,
+		`SELECT receipt_audit.reset_log()`,
+	} {
+		_, err := cs.db.ExecContext(ctx, disallowed)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			t.Fatalf("ordinary source role must be denied %q, got %v", disallowed, err)
+		}
+	}
+	return cs
+}
+
+func TestLabProtectedAppendFeedPostgres(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cs := openProtectedAppendFixture(t, ctx)
+	baseline := func(project string) protectedReceipt {
+		t.Helper()
+		receipt, err := captureProtectedReceipt(ctx, cs.db, []string{project})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return receipt
+	}
+	appendBatch := func(project, entity, id string, payload []byte) int64 {
+		t.Helper()
+		seq, err := cs.InsertMutationBatch(ctx, []MutationEntry{{Project: project, Entity: entity, EntityKey: id, Op: store.SyncOpUpsert, Payload: payload}})
+		if err != nil || len(seq) != 1 {
+			t.Fatalf("real writer: sequences=%v, %v", seq, err)
+		}
+		return seq[0]
+	}
+	const insertUncovered = `INSERT INTO cloud_mutations(project, entity, entity_key, op, payload) VALUES ($1,'observation',$2,'upsert',$3) RETURNING seq`
+	insertMissing := func(db *sql.DB, project, id string) int64 {
+		t.Helper()
+		var seq int64
+		if err := db.QueryRowContext(ctx, insertUncovered, project, id, receiptAppendObservation(id, "unmaterialized")).Scan(&seq); err != nil {
+			t.Fatal(err)
+		}
+		return seq
+	}
+	assertLegacyFallback := func(prior protectedReceipt, kind string, seq int64) {
+		t.Helper()
+		advanced, events, err := tryProtectedDelta(ctx, cs.db, prior)
+		if !errors.Is(err, errReceiptAppendUnproven) || !sameLabProtectedReceipt(prior, advanced) || len(events) != 1 || events[0].kind != kind || events[0].seq != seq {
+			t.Fatalf("%s fallback %q changed receipt or events: %+v (%v)", kind, prior.projects[0], events, err)
+		}
+		report, err := cs.BackfillMutationChunks(ctx, prior.projects[0], true)
+		if err != nil || report.ChunksPlanned != 1 || report.ChunksInserted != 1 {
+			t.Fatalf("ordinary fallback for %q failed: %+v, %v", prior.projects[0], report, err)
+		}
+		repaired := baseline(prior.projects[0])
+		if _, events, err := tryProtectedDelta(ctx, cs.db, repaired); err != nil || len(events) != 0 {
+			t.Fatalf("post-repair receipt must verify with zero events: %+v (%v)", events, err)
+		}
+		t.Logf("%s event %s -> legacy planned and inserted one chunk -> zero-event recovery", prior.projects[0], kind)
+	}
+
+	healthy := baseline("healthy")
+	// Rerun the actual schema initialization to check its idempotent DDL and
+	// zero-row updates leave the protected warm receipt usable.
+	if err := cs.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, events, err := tryProtectedDelta(ctx, cs.db, healthy); err != nil || len(events) != 0 {
+		t.Fatalf("idempotent initialization invalidated receipt: %+v (%v)", events, err)
+	}
+	const opaque = " session\u00a0 "
+	appendBatch("healthy", store.SyncEntitySession, opaque, []byte(`{"id":" session\u00a0 ","directory":"/fixture","project":"old"}`))
+	advanced, events, err := tryProtectedDelta(ctx, cs.db, healthy)
+	if err != nil || sameLabProtectedReceipt(healthy, advanced) || len(events) != 3 {
+		t.Fatalf("healthy real PG event append must advance: %+v (%v)", events, err)
+	}
+	if _, events, err := tryProtectedDelta(ctx, cs.db, advanced); err != nil || len(events) != 0 {
+		t.Fatalf("advanced receipt must accept zero events: %+v (%v)", events, err)
+	}
+	t.Log("healthy append accepted three actual events, then zero after receipt advance")
+
+	missing := baseline("missing")
+	assertLegacyFallback(missing, "journal", insertMissing(cs.db, "missing", "missing-observation"))
+
+	// Keep the lower journal INSERT uncommitted until a later normal writer is
+	// committed and observed in a baseline. No sequence-maximum check sees it.
+	lower, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lower.Rollback() }()
+	var lowSeq, maxSeq int64
+	if err := lower.QueryRowContext(ctx, insertUncovered, "late", "lower-observation", receiptAppendObservation("lower-observation", "late")).Scan(&lowSeq); err != nil {
+		t.Fatal(err)
+	}
+	highSeq := appendBatch("late", store.SyncEntityObservation, "higher-observation", receiptAppendObservation("higher-observation", "visible"))
+	late := baseline("late")
+	if _, events, err := tryProtectedDelta(ctx, cs.db, late); err != nil || len(events) != 0 {
+		t.Fatalf("current still-invisible pending transaction: events=%+v (%v)", events, err)
+	}
+	if err := lower.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.db.QueryRowContext(ctx, `SELECT max(seq) FROM cloud_mutations WHERE project='late'`).Scan(&maxSeq); err != nil || lowSeq >= highSeq || maxSeq != highSeq {
+		t.Fatalf("late sequence boundary: low=%d high=%d max=%d, %v", lowSeq, highSeq, maxSeq, err)
+	}
+	var lowXID, highXID string
+	var lowVisible, highVisible bool
+	if err := cs.db.QueryRowContext(ctx, `SELECT low.xid::text, high.xid::text,
+			pg_visible_in_snapshot(low.xid,$3::pg_snapshot), pg_visible_in_snapshot(high.xid,$3::pg_snapshot)
+		FROM receipt_audit.events low CROSS JOIN receipt_audit.events high
+		WHERE low.kind='journal' AND low.seq=$1 AND high.kind='journal' AND high.seq=$2`, lowSeq, highSeq, late.snapshot).
+		Scan(&lowXID, &highXID, &lowVisible, &highVisible); err != nil || lowVisible || !highVisible {
+		t.Fatalf("late transaction visibility: low=%v high=%v, %v", lowVisible, highVisible, err)
+	}
+	t.Logf("snapshot %s received sequence %d (XID %s) after visible maximum %d (XID %s)", late.snapshot, lowSeq, lowXID, highSeq, highXID)
+	assertLegacyFallback(late, "journal", lowSeq)
+
+	appendBatch("ddl", store.SyncEntityObservation, "legacy-raw", receiptAppendObservation("legacy-raw", "original"))
+	drift := baseline("ddl")
+	if _, err := cs.db.ExecContext(ctx, `BEGIN;
+		ALTER TABLE cloud_mutations DISABLE TRIGGER receipt_update;
+		UPDATE cloud_mutations SET payload = jsonb_set(payload,'{content}','"changed during DDL"') WHERE project='ddl';
+		ALTER TABLE cloud_mutations ENABLE ALWAYS TRIGGER receipt_update;
+		COMMIT;`); err != nil {
+		t.Fatal(err)
+	}
+	// Catalog equality has already been rechecked when we observe a concrete
+	// catalog-dirty event (the row UPDATE trigger did not fire).
+	assertLegacyFallback(drift, "catalog-dirty", 0)
+
+	capReceipt := baseline("overflow")
+	if _, err := cs.db.ExecContext(ctx, `INSERT INTO cloud_mutations(project,entity,entity_key,op,payload)
+		SELECT 'overflow','ignored',i::text,'upsert','{}'::jsonb FROM generate_series(1,$1) i`, receiptAppendEventCap+5); err != nil {
+		t.Fatal(err)
+	}
+	if next, events, err := tryProtectedDelta(ctx, cs.db, capReceipt); !sameLabProtectedReceipt(next, capReceipt) || !errors.Is(err, errReceiptAppendUnproven) || len(events) != receiptAppendEventCap+1 {
+		t.Fatalf("select at most cap+1 before fallback: events=%d (%v)", len(events), err)
+	}
+	future := baseline("currently-invisible")
+	active, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = active.Rollback() }()
+	var activeSeq int64
+	if err := active.QueryRowContext(ctx, insertUncovered, future.projects[0], "uncommitted", receiptAppendObservation("uncommitted", "pending")).Scan(&activeSeq); err != nil {
+		t.Fatal(err)
+	}
+	if _, events, err := tryProtectedDelta(ctx, cs.db, future); err != nil || len(events) != 0 {
+		t.Fatalf("xmax-tail lookup must exclude currently invisible uncommitted events: %+v (%v)", events, err)
+	}
+	if err := active.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	retained := baseline("retained-query")
+	prunedSeq := insertMissing(cs.db, "retained-query", "pruned-observation")
+	testLabConcurrentRetentionQuery(t, ctx, cs, retained, prunedSeq)
+
+	outside := baseline("healthy")
+	if _, err := cs.db.ExecContext(ctx, `INSERT INTO cloud_chunks(project_name,chunk_id,created_by,payload)
+		VALUES ('outside-repair','new','fixture','{"sessions":[{"id":" opaque outside "}]}')`); err != nil {
+		t.Fatal(err)
+	}
+	advanced, events, err = tryProtectedDelta(ctx, cs.db, outside)
+	if !errors.Is(err, errReceiptAppendUnproven) || !sameLabProtectedReceipt(outside, advanced) || len(events) != 1 || events[0].kind != "cloud_chunks" {
+		t.Fatalf("global index must reject an unindexed append outside repair scope: %+v (%v)", events, err)
+	}
+	if err := cs.backfillProjectSessionsFromChunks(ctx); !errors.Is(err, ErrSessionIndexHistoricalResolutionRequired) {
+		t.Fatalf("ordinary session-index guard must still run: %v", err)
+	}
+	t.Log("out-of-scope chunk event rejected, and ordinary exact opaque-index guard applies")
+}
+
+func testLabConcurrentRetentionQuery(t *testing.T, ctx context.Context, cs *CloudStore, prior protectedReceipt, seq int64) {
+	t.Helper()
+	dsn, err := url.Parse(os.Getenv("CLOUDSTORE_TEST_PROTECTED_DELTA_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dsn.User = url.User("cloud_delta_retention_operator")
+	operator, err := sql.Open("pgx", dsn.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = operator.Close() }()
+	for _, command := range []string{`DELETE FROM receipt_audit.events`, `TRUNCATE receipt_audit.events`, `UPDATE receipt_audit.enrollment SET retained_from='0'`} {
+		_, err := operator.ExecContext(ctx, command)
+		var denied *pgconn.PgError
+		if !errors.As(err, &denied) || denied.Code != "42501" {
+			t.Fatalf("maintenance operator bypassed guarded API: %q: %v", command, err)
+		}
+	}
+	if _, err := operator.ExecContext(ctx, `SELECT receipt_audit.prune_prefix('18446744073709551615')`); err == nil {
+		t.Fatal("maintenance operator could prune beyond current xmin")
+	}
+	tx, err := startupSnapshot(ctx, cs.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, identity, err := protectedCatalogSnapshot(ctx, tx, prior.snapshot); err != nil || identity != prior.identity {
+		t.Fatalf("in-flight proof must start with valid old floor: %v", err)
+	}
+	var removed int64
+	if err := operator.QueryRowContext(ctx, `SELECT receipt_audit.prune_prefix(pg_snapshot_xmin(pg_current_snapshot()))`).Scan(&removed); err != nil || removed == 0 {
+		t.Fatalf("prune must progress while older proof is in flight: removed=%d, %v", removed, err)
+	}
+	if _, err := operator.ExecContext(ctx, `SELECT receipt_audit.prune_prefix('0')`); err == nil {
+		t.Fatal("maintenance operator could lower the protected floor")
+	}
+	events, err := readProtectedAppendEvents(ctx, tx, prior.snapshot)
+	if err != nil || len(events) != 1 || events[0].seq != seq {
+		t.Fatalf("old transaction must see the pruned row through MVCC: %+v (%v)", events, err)
+	}
+	if err := verifyAppendMembership(ctx, tx, prior.projects, events); !errors.Is(err, errReceiptAppendUnproven) {
+		t.Fatalf("old transaction must reject the incomplete append: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if next, events, err := tryProtectedDelta(ctx, cs.db, prior); !sameLabProtectedReceipt(next, prior) || len(events) != 0 || !errors.Is(err, errReceiptAppendUnproven) {
+		t.Fatalf("fresh transaction must refuse stale floor before loading events: %+v (%v)", events, err)
+	}
+	report, err := cs.BackfillMutationChunks(ctx, prior.projects[0], true)
+	if err != nil || report.ChunksInserted != 1 {
+		t.Fatalf("ordinary repair after stale floor: %+v (%v)", report, err)
+	}
+	t.Logf("prefix retention removed %d events; in-flight proof saw its old event, fresh proof refused stale floor, legacy repaired one", removed)
+}
+
+func receiptAppendObservation(id, content string) []byte {
+	payload, _ := json.Marshal(map[string]string{
+		"sync_id": id, "session_id": "observation-session", "type": "decision", "title": "Fixture", "content": content, "scope": "project",
+	})
+	return payload
+}

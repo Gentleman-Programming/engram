@@ -16,6 +16,9 @@ type Config struct {
 	AdminToken       string
 	AllowedProjects  []string
 	MaxPushBodyBytes int64
+	// StartupReceiptDir opts in to a startup proof cache in a private
+	// directory. The audit feed is provisioned separately.
+	StartupReceiptDir string
 	// TokenPepper is the dedicated secret used to hash managed cloud tokens
 	// (see internal/cloud/auth.ManagedTokenHasher). It MUST be distinct from
 	// JWTSecret so rotating the dashboard/session signing secret does not
@@ -44,6 +47,7 @@ func IsDefaultJWTSecret(secret string) bool {
 
 func ConfigFromEnv() Config {
 	cfg := DefaultConfig()
+	cfg.StartupReceiptDir = strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_STARTUP_RECEIPT_DIR"))
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_DATABASE_URL")); v != "" {
 		cfg.DSN = v
 	}
