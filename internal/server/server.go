@@ -1606,7 +1606,7 @@ func (s *Server) handleCompactionContext(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	context, err := s.store.FormatCompactionContext(sessionID)
+	context, err := s.store.FormatCompactionContext(r.Context(), sessionID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, "session not found")

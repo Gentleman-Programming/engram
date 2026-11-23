@@ -4902,7 +4902,7 @@ func (s *Store) recentUnpinnedObservations(ctx context.Context, project, scope s
 	return s.queryContextObservations(ctx, s.db, query, args, compact)
 }
 
-func (s *Store) compactionObservations(sessionID, project string, pinned bool, limit int) ([]Observation, error) {
+func (s *Store) compactionObservations(ctx context.Context, sessionID, project string, pinned bool, limit int) ([]Observation, error) {
 	pinnedValue := 0
 	if pinned {
 		pinnedValue = 1
@@ -4917,7 +4917,7 @@ func (s *Store) compactionObservations(sessionID, project string, pinned bool, l
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	return s.queryObservations(query, args...)
+	return s.queryContextObservations(ctx, s.db, query, args, false)
 }
 
 // ObservationsNeedingReview returns non-deleted observations whose review_after has passed.
@@ -5372,12 +5372,12 @@ func (s *Store) recentPrompts(ctx context.Context, project string, limit int) ([
 	return results, rows.Err()
 }
 
-func (s *Store) compactionPrompts(sessionID, project string, limit int) ([]Prompt, error) {
+func (s *Store) compactionPrompts(ctx context.Context, sessionID, project string, limit int) ([]Prompt, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 
-	rows, err := s.queryItHook(s.db, `
+	rows, err := s.queryContextSection(ctx, s.db, `
 		SELECT id, ifnull(sync_id, '') as sync_id, session_id, content, ifnull(project, '') as project, created_at
 		FROM user_prompts
 		WHERE session_id = ? AND LOWER(ifnull(project, '')) = ?
@@ -6927,27 +6927,27 @@ func truncateUTF8Prefix(s string, maxBytes int) string {
 
 // FormatCompactionContext returns runtime context that is strictly limited to
 // one persisted session. The session's project is derived from the store and
-// is never supplied by the caller.
-func (s *Store) FormatCompactionContext(sessionID string) (string, error) {
-	session, err := s.GetSession(sessionID)
+// is never supplied by the caller. All reads honor ctx.
+func (s *Store) FormatCompactionContext(ctx context.Context, sessionID string) (string, error) {
+	session, err := s.getSessionContext(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
 
 	project, _ := NormalizeProject(session.Project)
 	var observationCount int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = ? AND LOWER(project) = ? AND deleted_at IS NULL`, session.ID, project).Scan(&observationCount); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM observations WHERE session_id = ? AND LOWER(project) = ? AND deleted_at IS NULL`, session.ID, project).Scan(&observationCount); err != nil {
 		return "", err
 	}
-	pinned, err := s.compactionObservations(session.ID, project, true, 0)
+	pinned, err := s.compactionObservations(ctx, session.ID, project, true, 0)
 	if err != nil {
 		return "", err
 	}
-	observations, err := s.compactionObservations(session.ID, project, false, s.cfg.MaxContextResults)
+	observations, err := s.compactionObservations(ctx, session.ID, project, false, s.cfg.MaxContextResults)
 	if err != nil {
 		return "", err
 	}
-	prompts, err := s.compactionPrompts(session.ID, project, 10)
+	prompts, err := s.compactionPrompts(ctx, session.ID, project, 10)
 	if err != nil {
 		return "", err
 	}
