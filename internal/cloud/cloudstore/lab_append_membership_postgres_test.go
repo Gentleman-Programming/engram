@@ -6,6 +6,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
@@ -126,6 +128,34 @@ func TestLabAppendMembershipPostgres(t *testing.T) {
 			ALTER TABLE cloud_mutations ALTER COLUMN project TYPE text COLLATE casefold_fixture`)
 		if err := verify(outside); !errors.Is(err, errReceiptAppendUnproven) {
 			t.Fatalf("inexact SQL project equality must fall back: %v", err)
+		}
+	})
+	t.Run("case-insensitive-project-type", func(t *testing.T) {
+		owned := os.Getenv("CLOUDSTORE_TEST_PROTECTED_DELTA_DIR")
+		if owned == "" {
+			t.Skip("requires the owned PostgreSQL protected append runner")
+		}
+		var directory string
+		if err := cs.db.QueryRowContext(ctx, `SHOW data_directory`).Scan(&directory); err != nil || filepath.Clean(directory) != filepath.Clean(owned) {
+			t.Fatalf("expected the owned PostgreSQL data directory, got %q (%v)", directory, err)
+		}
+		// Use fresh connections after changing the column type, as on restart.
+		cs.db.SetMaxIdleConns(0)
+		exec(`CREATE EXTENSION citext;
+			ALTER TABLE cloud_mutations ALTER COLUMN project TYPE citext COLLATE "C"`)
+		var seq int64
+		if err := cs.db.QueryRowContext(ctx, `
+			INSERT INTO cloud_mutations(project, entity, entity_key, op, payload)
+			VALUES ('ALIAS-PROJECT', 'observation', 'new-alias', 'upsert', $1) RETURNING seq`,
+			receiptAppendObservation("new-alias", "unmaterialized")).Scan(&seq); err != nil {
+			t.Fatal(err)
+		}
+		report, err := cs.BackfillMutationChunks(ctx, "alias-project", false)
+		if err != nil || report.ChunksPlanned != 1 {
+			t.Fatalf("ordinary repair must find the uppercase project: %+v (%v)", report, err)
+		}
+		if err := verify([]receiptAppendEvent{{kind: "journal", project: "ALIAS-PROJECT", seq: seq}}, "alias-project"); !errors.Is(err, errReceiptAppendUnproven) {
+			t.Fatalf("case-insensitive project type must fall back: %v", err)
 		}
 	})
 }

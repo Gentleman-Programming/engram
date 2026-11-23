@@ -62,10 +62,12 @@ func verifyAppendMembership(ctx context.Context, tx *sql.Tx, projects []string, 
 		}
 	}
 	if len(chunks)+len(journal) > 0 {
-		// Match the legacy project's SQL equality before using byte-exact maps.
+		// The ordinary project predicate uses SQL equality. Only use byte-exact
+		// maps when both the column types and collations preserve that equality.
 		var exact bool
 		if err := tx.QueryRowContext(ctx, `
-			SELECT count(*)=2 AND coalesce(bool_and(c.collisdeterministic),false)
+			SELECT count(*)=2 AND coalesce(bool_and(
+				a.atttypid='pg_catalog.text'::pg_catalog.regtype AND c.collisdeterministic),false)
 			FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_collation c ON c.oid=a.attcollation
 			WHERE (a.attrelid='cloud_chunks'::pg_catalog.regclass AND a.attname='project_name')
 			   OR (a.attrelid='cloud_mutations'::pg_catalog.regclass AND a.attname='project')`).Scan(&exact); err != nil {
