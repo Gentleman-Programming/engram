@@ -823,10 +823,12 @@ func main() {
 	}
 
 	if usesLocalSQLite(os.Args[1:]) {
-		if err := prepareSQLiteTemp(cfg.DataDir); err != nil {
+		release, err := prepareSQLiteTemp(cfg.DataDir)
+		if err != nil {
 			fatal(err)
 			return
 		}
+		defer release()
 	}
 
 	// Migrate orphaned databases that ended up in wrong locations
