@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,20 @@ import (
 
 func TestClaudeWindowsPromptCLIProcess(t *testing.T) {
 	if os.Getenv("ENGRAM_TEST_CLAUDE_WINDOWS_PROMPT_PROCESS") != "1" {
+		return
+	}
+	if path := os.Getenv("ENGRAM_TEST_CLAUDE_PROMPT_RESERVATION"); path != "" {
+		release, busy := reserveClaudeWindowsPrompt(path)
+		if release == nil || busy {
+			t.Fatal("fixture could not acquire prompt reservation")
+		}
+		defer release()
+		if _, err := os.Stdout.WriteString("held\n"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+			t.Fatal(err)
+		}
 		return
 	}
 	// TestMain strips the ambient Pi marker before starting any tests.
@@ -35,6 +51,7 @@ func newClaudeWindowsPromptCommand(t *testing.T, root, pi string, args ...string
 	cmd := exec.CommandContext(ctx, os.Args[0], testArgs...)
 	cmd.Env = append(os.Environ(),
 		"ENGRAM_TEST_CLAUDE_WINDOWS_PROMPT_PROCESS=1",
+		"ENGRAM_TEST_CLAUDE_PROMPT_RESERVATION=",
 		"ENGRAM_TEST_CLAUDE_WINDOWS_PROMPT_PI="+pi,
 		"ENGRAM_DATA_DIR="+filepath.Join(root, "must-not-exist"),
 		"ENGRAM_URL=http://127.0.0.1:1",
@@ -157,6 +174,71 @@ func TestClaudeWindowsPromptBootstrapCLI(t *testing.T) {
 	})
 	t.Run("malformed input still gets local bootstrap", func(t *testing.T) {
 		assertBootstrap(t, run(t, `{"session_id":`, ""))
+	})
+	t.Run("unlocked reservation leaves first prompt available", func(t *testing.T) {
+		const id = "a3a6310c-b54c-47f2-b963-39490785abba"
+		pending := filepath.Join(root, "engram-claude-"+id+"-tools-loaded.pending")
+		if err := os.WriteFile(pending, []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		input := `{"session_id":"` + id + `"}`
+		assertBootstrap(t, run(t, input, ""))
+		if content, err := os.ReadFile(pending); err != nil || string(content) != "fixture" {
+			t.Fatalf("unowned reservation = %q, %v", content, err)
+		}
+		if got := run(t, input, ""); got != "{}" {
+			t.Fatalf("subsequent prompt returned %q", got)
+		}
+	})
+	t.Run("terminated reservation holder leaves first prompt available", func(t *testing.T) {
+		const id = "e188e4f2-6c40-4b7f-8c68-efc06336e2a4"
+		marker := claudeWindowsPromptMarkerPath(root, id)
+		pending := marker + ".pending"
+		holder := newClaudeWindowsPromptCommand(t, root, "")
+		holder.Env = append(holder.Env, "ENGRAM_TEST_CLAUDE_PROMPT_RESERVATION="+pending)
+		stdout, err := holder.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdin, err := holder.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = stdin.Close() }()
+		if err := holder.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if holder.ProcessState == nil {
+				_ = holder.Process.Kill()
+				_ = holder.Wait()
+			}
+		})
+		// Keep the holder's input open until we terminate the process.
+		if ready, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || ready != "held\n" {
+			t.Fatalf("reservation holder readiness = %q, %v", ready, err)
+		}
+		input := `{"session_id":"` + id + `"}`
+		if got := run(t, input, ""); got != "{}" {
+			t.Fatalf("prompt while another process holds the reservation = %q", got)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("reservation produced a completed marker: %v", err)
+		}
+		if err := holder.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		var exitErr *exec.ExitError
+		if err := holder.Wait(); !errors.As(err, &exitErr) {
+			t.Fatalf("expected terminated reservation holder: %v", err)
+		}
+		if _, err := os.Stat(pending); !os.IsNotExist(err) {
+			t.Fatalf("reservation survived process termination: %v", err)
+		}
+		assertBootstrap(t, run(t, input, ""))
+		if got := run(t, input, ""); got != "{}" {
+			t.Fatalf("subsequent prompt = %q", got)
+		}
 	})
 	if _, err := os.Stat(filepath.Join(root, "must-not-exist")); !os.IsNotExist(err) {
 		t.Fatalf("hook touched an Engram data directory: %v", err)

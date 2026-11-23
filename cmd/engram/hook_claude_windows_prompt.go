@@ -42,9 +42,19 @@ func cmdClaudeWindowsUserPromptSubmit(check bool) {
 	}
 	var marker string
 	if err == nil && json.Unmarshal(input, &prompt) == nil {
-		var loaded bool
-		marker, loaded = claimClaudeWindowsPromptMarker(stateDir, prompt.SessionID)
-		if loaded {
+		marker = claudeWindowsPromptMarkerPath(stateDir, prompt.SessionID)
+	}
+	if marker != "" {
+		if claudeWindowsPromptMarkerExists(marker) {
+			_, _ = fmt.Fprintln(os.Stdout, "{}")
+			return
+		}
+		release, inProgress := reserveClaudeWindowsPrompt(marker + ".pending")
+		if release != nil {
+			defer release()
+		}
+		// Recheck after acquiring the reservation in case a previous writer just finished.
+		if inProgress || claudeWindowsPromptMarkerExists(marker) {
 			_, _ = fmt.Fprintln(os.Stdout, "{}")
 			return
 		}
@@ -55,33 +65,28 @@ func cmdClaudeWindowsUserPromptSubmit(check bool) {
 			"additionalContext": claudeWindowsPromptBootstrap(),
 		},
 	})
-	if err != nil && marker != "" {
-		// A failed output write leaves the next prompt eligible for bootstrap.
-		_ = os.Remove(marker)
+	if err == nil && marker != "" {
+		if file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err == nil {
+			_ = file.Close()
+		}
 	}
 }
 
-// claimClaudeWindowsPromptMarker returns the path only when this invocation creates it.
-func claimClaudeWindowsPromptMarker(stateDir, sessionID string) (string, bool) {
+func claudeWindowsPromptMarkerPath(stateDir, sessionID string) string {
 	if sessionID == "" {
-		return "", false
+		return ""
 	}
 	key := sessionID
 	if !claudeWindowsPromptUUID.MatchString(key) {
 		key = "sid-" + hex.EncodeToString([]byte(key))
 	}
 	// Keep ordinary UUID and non-UUID markers compatible with the Bash route.
-	path := filepath.Join(stateDir, "engram-claude-"+key+"-tools-loaded")
-	marker, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err == nil {
-		_ = marker.Close()
-		return path, false
-	}
-	if !os.IsExist(err) {
-		return "", false
-	}
+	return filepath.Join(stateDir, "engram-claude-"+key+"-tools-loaded")
+}
+
+func claudeWindowsPromptMarkerExists(path string) bool {
 	info, err := os.Stat(path)
-	return "", err == nil && info.Mode().IsRegular()
+	return err == nil && info.Mode().IsRegular()
 }
 
 func claudeWindowsPromptBootstrap() string {
