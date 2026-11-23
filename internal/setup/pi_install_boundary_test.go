@@ -75,6 +75,41 @@ func TestPiInstallPreservesCustomAtCommandBoundary(t *testing.T) {
 	}
 }
 
+func TestPiInstallMigratesEarlyManagedPins(t *testing.T) {
+	for _, version := range []string{"0.1.5", "0.1.6", "0.1.7", "0.1.13"} {
+		t.Run(version, func(t *testing.T) {
+			resetSetupSeams(t)
+			dir := t.TempDir()
+			t.Setenv("PI_CODING_AGENT_DIR", dir)
+			path := filepath.Join(dir, "settings.json")
+			pin := "npm:gentle-engram@" + version
+			custom := `{"source":"` + pin + `","extensions":["keep.ts"]}`
+			before := `{"packages":["` + pin + `",` + custom + `,"npm:gentle-engram@0.1.10","./local"]}`
+			if err := os.WriteFile(path, []byte(before), 0600); err != nil {
+				t.Fatal(err)
+			}
+			want := `{"packages":["` + piGentleEngramPackage + `",` + custom + `,"npm:gentle-engram@0.1.10","./local"]}`
+			runCommand = func(name string, args ...string) ([]byte, error) {
+				if name != "pi" || !reflect.DeepEqual(args, []string{"install", piGentleEngramPackage}) {
+					t.Fatalf("unexpected install command: %s %v", name, args)
+				}
+				// Pi persists the new source at the first npm identity match.
+				return nil, os.WriteFile(path, []byte(want), 0600)
+			}
+			if _, err := Install("pi"); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !samePiJSON(got, []byte(want)) {
+				t.Fatalf("migrated settings = %s; want %s", got, want)
+			}
+		})
+	}
+}
+
 func TestPiInstallConflictRetainsRecoveryAndLatestSettings(t *testing.T) {
 	resetSetupSeams(t)
 	dir := t.TempDir()

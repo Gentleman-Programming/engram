@@ -6,9 +6,13 @@ import { dirname, join } from "node:path";
 const packageMetadata = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf-8"));
 const PACKAGE_NAME = `npm:${packageMetadata.name}@${packageMetadata.version}`;
 const LEGACY_PACKAGE_NAMES = new Set([
+  "npm:gentle-engram@0.1.5",
+  "npm:gentle-engram@0.1.6",
+  "npm:gentle-engram@0.1.7",
   "npm:gentle-engram@0.1.8",
   "npm:gentle-engram@0.1.11",
   "npm:gentle-engram@0.1.12",
+  "npm:gentle-engram@0.1.13",
   "npm:gentle-engram@0.1.14",
   "npm:gentle-engram@0.1.15",
   "npm:gentle-engram@0.1.16",
