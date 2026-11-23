@@ -187,11 +187,29 @@ done`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	stateDir := t.TempDir()
-	for turn := 0; turn < 2; turn++ {
+	newHook := func() *exec.Cmd {
 		run := exec.Command("bash", bashScriptPath(t, filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "user-prompt-submit.sh")))
 		run.Env = append(os.Environ(), "MSYSTEM=MINGW64", "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=auto", "ENGRAM_PORT="+port, "TMPDIR="+filepath.ToSlash(stateDir), "BASH_ENV="+bashScriptPath(t, bashEnv))
 		run.Stdin = strings.NewReader(string(input))
-		output, err := run.CombinedOutput()
+		return run
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brokenOutput := newHook()
+	brokenOutput.Stdout = writer
+	if err := brokenOutput.Run(); err != nil {
+		if _, exited := err.(*exec.ExitError); !exited {
+			t.Fatal(err)
+		}
+	}
+	for turn := 0; turn < 2; turn++ {
+		output, err := newHook().CombinedOutput()
 		if err != nil {
 			t.Fatalf("safe hook failed: %v: %s", err, output)
 		}
