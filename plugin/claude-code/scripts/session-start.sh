@@ -45,12 +45,8 @@ fi
 
 # Create session. Claude keeps the session ID on --resume, so resume=true lets
 # the server register a live continuation when the original session already ended.
-PROJECT=$(engram_resolve_and_register_claude_session "$SESSION_ID" "$CWD")
-
-# Emit the confirmed effective identity before optional history, in slim and
-# full modes. Preserve managed-local transport instead of exporting its URL as
-# an external-server opt-in. Older binaries/failures simply provide no hint.
-printf '%s' "$INPUT" | ENGRAM_URL="$ENGRAM_EXTERNAL_URL" ENGRAM_PORT="$ENGRAM_PORT" ENGRAM_SOCKET="$ENGRAM_SOCKET" engram hook claude-session-context 2>/dev/null || true
+engram_claude_lifecycle_context "$SESSION_ID" "$CWD" "$INPUT"
+PROJECT="$CLAUDE_LIFECYCLE_PROJECT"
 
 # Auto-import git-synced chunks
 if [ -f "${CWD}/.engram/manifest.json" ]; then

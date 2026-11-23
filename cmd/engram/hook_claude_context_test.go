@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -24,6 +25,65 @@ func runClaudeSessionContext(t *testing.T, input string) string {
 	exitFunc = func(code int) { t.Errorf("context hook exited with %d", code) }
 	cmdHook([]string{"claude-session-context"})
 	return result
+}
+
+func TestClaudeContextUsesOnlyVerifiedAcknowledgement(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ack  string
+		want string
+	}{
+		{"root", `{"id":"host","status":"created"}`, "host"},
+		{"continuation", `{"id":"host:resume:2","status":"created","resumed_from":"host"}`, "host:resume:2"},
+		{"unrelated continuation", `{"id":"other:resume:2","status":"created","resumed_from":"host"}`, ""},
+		{"no ancestry", `{"id":"host:resume:2","status":"created"}`, ""},
+		{"malformed receipt", `{"id":"host","status":"created"}{"id":"other"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := claudeReceiptSessionID([]byte(tc.ack), "host"); got != tc.want {
+				t.Fatalf("receipt returned %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeReceiptWireRejectsNonCreatedAndOversizedResponses(t *testing.T) {
+	const request = "{\"id\":\"host\"}\n"
+	const body = `{"id":"host","status":"created"}`
+	for _, tc := range []struct {
+		name string
+		wire string
+		hint bool
+	}{
+		{"created", request + body + "\n201", true},
+		{"wrong status", request + body + "\n500", false},
+		{"missing status", request + body, false},
+		{"oversized", request + body + strings.Repeat(" ", 2*hookDenialBodyLimit) + "\n201", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ENGRAM_URL", "http://fixture.example")
+			t.Setenv("PI_CODING_AGENT", "")
+			stdin, output, exit := os.Stdin, claudeHookOutput, exitFunc
+			t.Cleanup(func() { os.Stdin, claudeHookOutput, exitFunc = stdin, output, exit })
+			input := filepath.Join(t.TempDir(), "receipt")
+			if err := os.WriteFile(input, []byte(tc.wire), 0600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.Open(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = file.Close() })
+			os.Stdin = file
+			emitted, failed := false, false
+			claudeHookOutput = func([]byte) error { emitted = true; return nil }
+			exitFunc = func(code int) { failed = code == 1 }
+			cmdHook([]string{"claude-session-context", "--receipt"})
+			if emitted != tc.hint || failed == tc.hint {
+				t.Fatalf("emitted=%v failed=%v, want hint=%v", emitted, failed, tc.hint)
+			}
+		})
+	}
 }
 
 func TestClaudeSessionContextConfirmedBinding(t *testing.T) {

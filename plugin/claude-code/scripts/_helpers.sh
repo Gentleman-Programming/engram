@@ -117,18 +117,18 @@ engram_curl() {
 }
 
 # Lifecycle hooks register through the server; it owns continuation allocation.
-# Return the authoritative project for the hook's subsequent context request.
+# Keep the project for the hook's subsequent history request.
 engram_register_claude_session() {
   local id="$1" project="$2" dir="$3" source="${4:-}"
   local mode="project_owned" encoded_id session="" persisted_project=""
-  local response code lookup_status attempt
+  local response code lookup_status attempt registration context
+  CLAUDE_LIFECYCLE_PROJECT="$project"
+  CLAUDE_LIFECYCLE_CONTEXT_HANDLED=0
   if [ -z "$id" ]; then
-    printf '%s\n' "$project"
     return 0
   fi
   if [ -z "$project" ]; then
     printf '%s\n' "warning: Engram session registration failed: project could not be resolved; memory writes may be denied." >&2
-    printf '\n'
     return 0
   fi
   encoded_id=$(printf '%s' "$id" | jq -sRr @uri 2>/dev/null)
@@ -153,7 +153,6 @@ engram_register_claude_session() {
         [ "$lookup_status" -eq 0 ] || continue
       fi
       printf '%s\n' "warning: Engram session registration failed: session lookup failed; no registration was attempted. Check the Engram server and retry SessionStart." >&2
-      printf '%s\n' "$project"
       return 0
     done
   fi
@@ -170,16 +169,33 @@ engram_register_claude_session() {
       mode="shared"
     fi
   fi
+  CLAUDE_LIFECYCLE_PROJECT="$project"
   [ "${ENGRAM_MANAGED_LOCAL:-0}" = 1 ] || source=""
-  if ! engram_curl -sf "${ENGRAM_URL}/sessions" \
-    -X POST -H "Content-Type: application/json" \
-    -d "$(jq -n --arg id "$id" --arg project "$project" --arg dir "$dir" --arg mode "$mode" --arg source "$source" \
-      '{id: $id, project: $project, directory: $dir, ownership_mode: $mode, resume: true}
-       + (if $source != "" then {registration_project_source: $source} else {} end)')" >/dev/null 2>/dev/null; then
-    # Never log the response body, session ID, project, cwd or credentials.
-    printf '%s\n' "warning: Engram session registration failed: server rejected the request or could not be reached; memory writes may be denied. Check the Engram server and retry SessionStart." >&2
+  registration=$(jq -cn --arg id "$id" --arg project "$project" --arg dir "$dir" --arg mode "$mode" --arg source "$source" \
+    '{id: $id, project: $project, directory: $dir, ownership_mode: $mode, resume: true}
+     + (if $source != "" then {registration_project_source: $source} else {} end)') || return 0
+  if [ "$(engram hook claude-session-context --check 2>/dev/null)" = "claude-register-context-v1" ]; then
+    CLAUDE_LIFECYCLE_CONTEXT_HANDLED=1
+    # Stream curl through the bounded parser and emit only its successful
+    # context. Pipefail also rejects a failed or incomplete curl transfer.
+    if context=$(
+      set -o pipefail
+      {
+        printf '%s\n' "$registration"
+        engram_curl -sf "${ENGRAM_URL}/sessions" -X POST -H "Content-Type: application/json" -d "$registration" -w '\n%{http_code}'
+      } 2>/dev/null | ENGRAM_URL="$ENGRAM_EXTERNAL_URL" ENGRAM_PORT="$ENGRAM_PORT" ENGRAM_SOCKET="$ENGRAM_SOCKET" \
+        engram hook claude-session-context --receipt 2>/dev/null
+    ); then
+      [ -z "$context" ] || printf '%s\n' "$context"
+    else
+      printf '%s\n' "warning: Engram could not confirm session registration or its context binding." >&2
+    fi
+    return 0
+  elif engram_curl -sf "${ENGRAM_URL}/sessions" -X POST -H "Content-Type: application/json" -d "$registration" >/dev/null 2>/dev/null; then
+    return 0
   fi
-  printf '%s\n' "$project"
+  # Never log the response body, session ID, project, cwd or credentials.
+  printf '%s\n' "warning: Engram session registration failed: server rejected the request or could not be reached; memory writes may be denied. Check the Engram server and retry SessionStart." >&2
 }
 
 engram_health_matches_instance() {
@@ -194,6 +210,15 @@ engram_resolve_and_register_claude_session() {
   selection=$(resolve_project "$dir" registration) || selection=""
   # The unit separator avoids Windows jq newline conversion.
   engram_register_claude_session "$id" "${selection%$'\037'*}" "$dir" "${selection##*$'\037'}"
+}
+
+engram_claude_lifecycle_context() {
+  local id="$1" dir="$2" input="$3"
+  engram_resolve_and_register_claude_session "$id" "$dir"
+  # Older cores can still run their independent context hook after registration.
+  if [ "$CLAUDE_LIFECYCLE_CONTEXT_HANDLED" = 0 ]; then
+    printf '%s' "$input" | ENGRAM_URL="$ENGRAM_EXTERNAL_URL" ENGRAM_PORT="$ENGRAM_PORT" ENGRAM_SOCKET="$ENGRAM_SOCKET" engram hook claude-session-context 2>/dev/null || true
+  fi
 }
 
 # Resolve the project through the server, which owns project policy.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/server"
@@ -34,7 +35,15 @@ func TestClaudeLifecycleConfirmedContext(t *testing.T) {
 					t.Fatal(err)
 				}
 				production := server.New(db, 0).Handler()
+				var registrations atomic.Int32
 				endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("X-Fixture-Authentication") != "curl" {
+						http.Error(w, "external server requires curl authentication", http.StatusUnauthorized)
+						return
+					}
+					if r.Method == http.MethodPost && r.URL.Path == "/sessions" {
+						registrations.Add(1)
+					}
 					switch r.URL.Path {
 					case "/project/current":
 						_, _ = io.WriteString(w, `{"project":"new-cwd-owner","project_source":"config"}`)
@@ -43,6 +52,12 @@ func TestClaudeLifecycleConfirmedContext(t *testing.T) {
 							t.Error("context lost independent persisted project")
 						}
 						_, _ = io.WriteString(w, `{"context":"synthetic history"}`)
+					case "/sessions/" + host:
+						if registrations.Load() != 0 {
+							http.Error(w, "session lookup unavailable after registration", http.StatusServiceUnavailable)
+							return
+						}
+						production.ServeHTTP(w, r)
 					default:
 						production.ServeHTTP(w, r)
 					}
@@ -53,11 +68,19 @@ func TestClaudeLifecycleConfirmedContext(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(stubDir, "engram"), []byte(wrapper), 0700); err != nil {
 					t.Fatal(err)
 				}
+				for _, name := range []string{".curlrc", "_curlrc"} {
+					if err := os.WriteFile(filepath.Join(root, name), []byte("header = \"X-Fixture-Authentication: curl\"\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				input, _ := json.Marshal(map[string]string{"session_id": host, "cwd": root, "source": "resume"})
-				output := runHook(t, script, string(input), map[string]string{
+				output, diagnostic := runHookWithStderr(t, script, string(input), map[string]string{
 					"ENGRAM_URL": endpoint.URL, "ENGRAM_DATA_DIR": filepath.Join(root, "data"),
-					"PATH": stubDir + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME": root, "USERPROFILE": root,
+					"PATH": stubDir + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME": root, "USERPROFILE": root, "CURL_HOME": root,
 				})
+				if got := registrations.Load(); got != 1 {
+					t.Fatalf("lifecycle made %d authenticated registration requests, want one: %q", got, diagnostic)
+				}
 				if !strings.Contains(output, `Confirmed Engram session ID (JSON): "context-resume-host:resume:2"`) {
 					t.Fatalf("missing effective continuation in %s context: %q", mode, output)
 				}

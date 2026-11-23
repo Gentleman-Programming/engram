@@ -93,6 +93,16 @@ func cmdHook(args []string) {
 		cmdClaudeSessionContext()
 		return
 	}
+	if len(args) == 2 && args[0] == "claude-session-context" {
+		switch args[1] {
+		case "--check":
+			fmt.Println("claude-register-context-v1")
+			return
+		case "--receipt":
+			cmdClaudeRegistrationReceipt()
+			return
+		}
+	}
 	if len(args) > 0 && args[0] == "claude-windows-user-prompt-submit" &&
 		(len(args) == 1 || (len(args) == 2 && args[1] == "--check")) {
 		cmdClaudeWindowsUserPromptSubmit(len(args) == 2)
