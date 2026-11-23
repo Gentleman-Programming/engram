@@ -33,6 +33,13 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
 )
 
+// ClaudeWindowsExtendedGuardArg selects the confirmation budget paired with the
+// managed Claude hook's ten-second host deadline.
+const ClaudeWindowsExtendedGuardArg = "--windows-extended-confirmation"
+
+// ClaudeWindowsExtendedGuardConfirmation leaves three seconds for host overhead.
+const ClaudeWindowsExtendedGuardConfirmation = 7 * time.Second
+
 type claudeSetupRunner func(string, ...string) ([]byte, error)
 
 var (

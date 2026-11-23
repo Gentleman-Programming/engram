@@ -372,6 +372,14 @@ engram setup claude-code --native-windows-prompt=enable
 
 Enable pins and checks the running Engram executable and selects a complete local variant of the existing user-scope `engram@engram` plugin. Remove any Engram prompt override from Claude's user settings before enabling, including the PowerShell example below. Both commands honor `CLAUDE_CONFIG_DIR`. Run ordinary Claude setup if you also need to register MCP.
 
+If Claude times out while waiting for Engram's `PreToolUse` session check on a slow Windows host, select the extended deadlines and restart Claude Code.
+
+```powershell
+engram setup claude-code --native-windows-prompt=enable --windows-pretooluse=extended
+```
+
+This variant gives Claude 10 seconds to run the pinned hook and gives Engram 7 seconds to confirm the session. The hook still denies the write if it cannot confirm the session within that time. Run the enable command without `--windows-pretooluse` to return to the standard deadlines.
+
 To return the same managed plugin to its Bash hook, run the disable command and restart Claude Code.
 
 ```powershell

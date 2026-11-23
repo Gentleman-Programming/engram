@@ -35,6 +35,15 @@ type claudeInstalledPlugin struct {
 // SetClaudeWindowsNativePrompt manages only the Claude user plugin. Claude
 // owns its registration, while Engram owns the catalog steering that plugin.
 func SetClaudeWindowsNativePrompt(enable bool) error {
+	return setClaudeWindowsNativePrompt(enable, false)
+}
+
+// SetClaudeWindowsNativePromptWithExtendedGuard selects paired Windows hook deadlines.
+func SetClaudeWindowsNativePromptWithExtendedGuard() error {
+	return setClaudeWindowsNativePrompt(true, true)
+}
+
+func setClaudeWindowsNativePrompt(enable, extendedGuard bool) error {
 	if enable && os.Getenv("ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE") == "0" {
 		return errors.New("ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=0 requires Bash; disable the managed native hook to select Bash")
 	}
@@ -115,7 +124,7 @@ func SetClaudeWindowsNativePrompt(enable bool) error {
 		if err != nil {
 			return err
 		}
-		selected, err = template.stage(root, pin)
+		selected, err = template.stageWithGuardBudget(root, pin, extendedGuard)
 		if err != nil {
 			return err
 		}

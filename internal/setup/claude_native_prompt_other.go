@@ -20,6 +20,11 @@ func SetClaudeWindowsNativePrompt(bool) error {
 	return errors.New("--native-windows-prompt requires Windows")
 }
 
+// SetClaudeWindowsNativePromptWithExtendedGuard is available only on Windows.
+func SetClaudeWindowsNativePromptWithExtendedGuard() error {
+	return errors.New("--windows-pretooluse requires Windows")
+}
+
 func protectManagedClaudeMarketplace(string) (bool, func(), error) {
 	return false, func() {}, nil
 }
