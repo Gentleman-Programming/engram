@@ -31,7 +31,7 @@ func TestHealthDoesNotWaitForStoreConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Close()
+	defer func() { _ = held.Close() }()
 
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()

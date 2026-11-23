@@ -930,7 +930,6 @@ type Store struct {
 	instanceID              string
 	generation              *databaseGeneration
 	hooks                   storeHooks
-	readinessMu             sync.Mutex
 	readinessDB             *sql.DB
 
 	repairMu        sync.Mutex
@@ -1199,6 +1198,14 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The Store owns both pools for its entire lifetime. The readiness pool
+	// opens its single physical connection only when it receives a query.
+	readinessDB, err := openGenerationDB(readinessDSN(dbPath), generation, true)
+	if err != nil {
+		return nil, fmt.Errorf("engram: create readiness pool: %w", err)
+	}
+	readinessDB.SetMaxOpenConns(1)
+	s.readinessDB = readinessDB
 	succeeded = true
 	trace.Mark("store-ready")
 	return s, nil
@@ -1206,12 +1213,8 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 
 func (s *Store) Close() error {
 	s.compatibilityClosed.Store(true)
-	s.readinessMu.Lock()
-	readinessDB := s.readinessDB
-	s.readinessDB = nil
-	s.readinessMu.Unlock()
-	if readinessDB != nil {
-		return errors.Join(readinessDB.Close(), s.db.Close())
+	if s.readinessDB != nil {
+		return errors.Join(s.readinessDB.Close(), s.db.Close())
 	}
 	return s.db.Close()
 }

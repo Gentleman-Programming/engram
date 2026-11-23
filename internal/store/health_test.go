@@ -18,10 +18,7 @@ func TestCheckReadinessConnectionIsReadOnlyAndCancellable(t *testing.T) {
 	if err = s.CheckReadiness(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	db, err := s.readinessDatabase()
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := s.readinessDB
 	if _, err = db.ExecContext(t.Context(), "CREATE TABLE invalid_readiness_write (id INTEGER)"); err == nil {
 		t.Fatal("readiness connection accepted a write")
 	}
@@ -29,7 +26,7 @@ func TestCheckReadinessConnectionIsReadOnlyAndCancellable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Close()
+	defer func() { _ = held.Close() }()
 	before := db.Stats().WaitCount
 	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
