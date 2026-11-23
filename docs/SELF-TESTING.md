@@ -20,7 +20,7 @@ engram test performance
 
 ## What the suites exercise
 
-- **Reliability** initializes and migrates a fresh local SQLite database, then verifies save, full-text search, formatted context, and concurrent local writes.
+- **Reliability** initializes and migrates a fresh local SQLite database. It registers a session and saves an observation through the in-process HTTP handlers, confirms the stored session and project, then verifies full-text search, formatted context, and concurrent local writes.
 - **Performance** seeds a representative local search corpus and reports repeated store-search throughput. A full run uses 1,000 records and 200 searches; `--quick` uses 100 records and 20 searches.
 
 ## JSON reports
