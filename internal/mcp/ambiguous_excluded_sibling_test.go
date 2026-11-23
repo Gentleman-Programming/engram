@@ -63,6 +63,10 @@ func TestMemSave_AmbiguousRecoveryIgnoresExcludedGitSiblings(t *testing.T) {
 		if choice == wanted {
 			expectedDir = filepath.Join(parent, " "+wanted)
 		}
+		expectedDir, err := filepath.EvalSymlinks(expectedDir)
+		if err != nil {
+			t.Fatal(err)
+		}
 		session, err := s.GetSession("session-" + choice)
 		if err != nil || session.Project != choice || session.Directory != expectedDir {
 			t.Fatalf("incorrect recovery binding for %q: %+v, %v", choice, session, err)
