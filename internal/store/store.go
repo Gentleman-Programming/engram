@@ -326,7 +326,8 @@ type AddObservationParams struct {
 	OperationID       string             `json:"operation_id,omitempty"`
 	Timings           *WriteTimings      `json:"-"`
 	// Org is a free-text grouping axis orthogonal to Scope (#776). Empty means unset.
-	Org string `json:"org,omitempty"`
+	Org            string `json:"org,omitempty"`
+	managedRuntime *managedRuntimeWrite
 }
 
 // WriteTimings collects one write operation's local database stages. It holds
@@ -4668,6 +4669,14 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 	replayed := false
 	err := s.withWriteTimings(p.Timings, func(tx *sql.Tx) error {
 		replayed = false
+		var managedConfirmed bool
+		if p.managedRuntime != nil {
+			var err error
+			managedConfirmed, err = p.managedRuntime.intentState(tx, p.OperationID)
+			if err != nil {
+				return err
+			}
+		}
 		// If the caller supplied an operation ID, check for a committed result first
 		// so a replay can return the original outcome without repeating mutations.
 		// The check runs inside the transaction so it races safely with concurrent
@@ -4683,6 +4692,9 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 				p.OperationID,
 			).Scan(&committedID, &committedFingerprint)
 			if err == nil {
+				if p.managedRuntime != nil && !managedConfirmed {
+					return ErrObservationOperationConflict
+				}
 				if !strings.HasPrefix(committedFingerprint, "v1:") {
 					return ErrObservationOperationExpired
 				}
@@ -4697,6 +4709,11 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 				return ErrObservationOperationConflict
 			}
 			if err != sql.ErrNoRows {
+				return err
+			}
+		}
+		if p.managedRuntime != nil {
+			if _, err := s.execHook(tx, "UPDATE managed_runtime_writes SET confirmed=1 WHERE operation_id=?", p.OperationID); err != nil {
 				return err
 			}
 		}
