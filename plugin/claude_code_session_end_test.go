@@ -353,6 +353,8 @@ func TestClaudeContinuationEndRequiresConfirmedScope(t *testing.T) {
 		{name: "capability unavailable", healthCode: http.StatusServiceUnavailable},
 		{name: "malformed capability", health: `{"status":"ok","capabilities":{"runtime_session_conditional_end":"true"}}`},
 		{name: "multiple capability envelopes", health: supported + "\n" + `{"status":"ok"}`},
+		{name: "contradictory capability keys", health: `{"status":"ok","capabilities":{"runtime_session_conditional_end":true,"runtime_session_conditional_end":false}}`},
+		{name: "overwritten capability object", health: `{"status":"ok","capabilities":{"runtime_session_conditional_end":true},"capabilities":{}}`},
 		{name: "redirected capability", health: `{"status":"ok"}`, healthCode: http.StatusFound},
 		{name: "resolve unavailable", health: supported, resolveCode: http.StatusNotFound},
 		{name: "redirected resolution", health: supported, resolution: resolved, resolveCode: http.StatusFound},

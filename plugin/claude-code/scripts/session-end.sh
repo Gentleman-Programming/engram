@@ -29,7 +29,8 @@ if [ -n "$SESSION" ] && RUNTIME_SCOPE=$(printf '%s' "$SESSION" | jq -ce --arg id
 ' 2>/dev/null); then
   HEALTH=$(engram_curl -s "${ENGRAM_URL}/health" --no-location --retry 0 --max-time 0.5 -w '\n%{http_code}' 2>/dev/null) || exit 0
   [ "${HEALTH##*$'\n'}" = 200 ] || exit 0
-  END_MODE=$(printf '%s' "${HEALTH%$'\n'*}" | jq -ers '
+  HEALTH=${HEALTH%$'\n'*}
+  END_MODE=$(printf '%s' "$HEALTH" | jq -ers '
     select(length == 1) | .[0] |
     select(type == "object" and .status == "ok") | (if has("capabilities") then .capabilities else {} end) |
     if type != "object" then empty
@@ -50,7 +51,15 @@ if [ -n "$SESSION" ] && RUNTIME_SCOPE=$(printf '%s' "$SESSION" | jq -ce --arg id
         $scope + {expected_effective_id: .}
       ' 2>/dev/null) || exit 0
       ;;
-    legacy) ;;
+    legacy)
+      # Object parsing keeps only the last value for a duplicate JSON key.
+      # A discarded advertisement must never authorize an unfenced end.
+      printf '%s' "$HEALTH" | jq -en --stream '
+        ["capabilities", "runtime_session_conditional_end"] as $capability |
+        [limit(2; inputs | select(length == 2 and .[0][:2] == $capability))] |
+        . == [] or . == [[$capability, false]]
+      ' >/dev/null 2>&1 || exit 0
+      ;;
     *) exit 0 ;;
   esac
   engram_curl -sf "${ENGRAM_URL}/runtime-sessions/end" --no-location --retry 0 \
