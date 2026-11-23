@@ -123,10 +123,10 @@ before source access/default configuration/update checks/orphan migration.
 any data.
 
 For a rejected v3.4.0-era store, add `--catalog-diagnostics=v3.4.0` and use a new
-output directory. On catalog rejection, stderr lists missing or changed objects
-from the published v3.4.0 catalog and counts additional objects. The summary
-contains only public object names. Admission still requires integrity and an
-exact supported catalog.
+output directory. When integrity checks pass and the readable catalog matches
+no supported shape, stderr lists missing or changed objects from the published
+v3.4.0 catalog and counts additional objects. The summary contains only public
+object names. Admission still requires integrity and an exact supported catalog.
 
 Operational failures exit 1 with empty stdout and a diagnostic. Existing output
 paths are never overwritten or deleted. If output creation already succeeded,
