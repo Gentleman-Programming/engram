@@ -18,11 +18,8 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 # server register a live continuation instead of refusing with
 # session_already_ended, which would leave every later write denied by the
 # PreToolUse gate. Registers exactly like session-start.sh.
-PROJECT=$(engram_resolve_and_register_claude_session "$SESSION_ID" "$CWD")
-
-# Refresh the effective binding after registration, including resumed roots.
-# This context is independent of slim/full protocol verbosity and history.
-printf '%s' "$INPUT" | ENGRAM_URL="$ENGRAM_EXTERNAL_URL" ENGRAM_PORT="$ENGRAM_PORT" ENGRAM_SOCKET="$ENGRAM_SOCKET" engram hook claude-session-context 2>/dev/null || true
+engram_claude_lifecycle_context "$SESSION_ID" "$CWD" "$INPUT"
+PROJECT="$CLAUDE_LIFECYCLE_PROJECT"
 
 # Fetch context from previous sessions
 CONTEXT=""
