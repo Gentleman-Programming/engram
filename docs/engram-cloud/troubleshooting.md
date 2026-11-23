@@ -10,6 +10,10 @@ Use this guide when local Engram saves work but cloud sync does not advance. The
 
 If cloud export reports a pending session mutation with `seq` and `entity_key`, run `engram cloud upgrade doctor --project <project>` and apply its deterministic repair before retrying export. Repair uses the matching local session as authority for project and directory. A conflicting payload or missing local session requires manual investigation; do not assign ownership from the journal payload alone.
 
+## Startup spends time checking mutation chunks
+
+Watch the server's standard error for the current project and its position in the startup repair. While rows are being processed, Engram logs the phase, rows scanned in that phase, and elapsed time for the project at most once every five seconds. The `chunks` phase checks stored chunks, and the `journal` phase checks legacy mutations. The final summary includes the count of invalid legacy mutations skipped during repair.
+
 ## Quick Triage
 
 Run these commands first:
