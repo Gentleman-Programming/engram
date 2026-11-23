@@ -29,6 +29,7 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		OperationID string                      `json:"operation_id"`
 		Observation *store.AddObservationParams `json:"observation"`
 		Host        *store.ManagedRuntimeHost   `json:"host"`
+		Resume      *bool                       `json:"resume"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
 	decoder.DisallowUnknownFields()
@@ -47,12 +48,17 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var hosts []store.ManagedRuntimeHost
-	if body.Host != nil && r.URL.Path != "/internal/managed-runtime/admit" && r.URL.Path != "/internal/managed-runtime/retire" {
+	attach := r.URL.Path == "/internal/managed-runtime/attach"
+	if attach != (body.Resume != nil) {
+		jsonError(w, http.StatusBadRequest, "only attachment takes a resume decision")
+		return
+	}
+	if body.Host != nil && !attach && r.URL.Path != "/internal/managed-runtime/admit" && r.URL.Path != "/internal/managed-runtime/retire" {
 		jsonError(w, http.StatusBadRequest, "host is only accepted for admission and retirement")
 		return
 	}
 	switch r.URL.Path {
-	case "/internal/managed-runtime/admit":
+	case "/internal/managed-runtime/attach", "/internal/managed-runtime/admit":
 		if body.Generation != 0 || body.OperationID != "" || body.Host == nil ||
 			body.Host.PID <= 1 || strings.TrimSpace(body.Host.Start) == "" || body.Host.Domain != "" {
 			jsonError(w, http.StatusBadRequest, "admission requires a host PID and start token")
@@ -68,7 +74,11 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, http.StatusConflict, "host identity is not current")
 			return
 		}
-		body.Generation, err = s.store.AdmitManagedRuntime(scope, *body.Host)
+		if attach {
+			body.Generation, err = s.store.AttachManagedRuntime(scope, *body.Host, *body.Resume)
+		} else {
+			body.Generation, err = s.store.AdmitManagedRuntime(scope, *body.Host)
+		}
 	case "/internal/managed-runtime/hosts":
 		if body.Generation != 0 || body.OperationID != "" {
 			jsonError(w, http.StatusBadRequest, "host lookup takes only a runtime scope")
@@ -123,7 +133,8 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "managed_runtime_hosts_remain"})
 		case errors.Is(err, store.ErrManagedRuntimeWriteUnresolved):
 			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "managed_runtime_write_unresolved"})
-		case errors.Is(err, store.ErrManagedRuntimeGeneration), errors.Is(err, store.ErrRuntimeSessionEffectiveIDMismatch), errors.Is(err, store.ErrRuntimeSessionScopeConflict):
+		case errors.Is(err, store.ErrManagedRuntimeGeneration), errors.Is(err, store.ErrRuntimeSessionEffectiveIDMismatch), errors.Is(err, store.ErrRuntimeSessionScopeConflict),
+			errors.Is(err, store.ErrSessionAlreadyEnded), errors.Is(err, store.ErrSessionOwnershipMismatch):
 			jsonError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, store.ErrObservationTitleRequired), errors.Is(err, store.ErrObservationContentRequired):
 			jsonError(w, http.StatusBadRequest, err.Error())

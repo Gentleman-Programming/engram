@@ -3646,13 +3646,13 @@ func (s *Store) StartSession(id, project, directory string) error {
 // lease. It preserves the existing session identity and refuses to reopen an
 // ended session; EndSession remains terminal truth.
 func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode string) error {
-	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, nil)
+	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, nil, nil, nil)
 }
 
 // StartSessionWithOwnershipModeTimed records database-stage timings without
 // changing session-registration behavior.
 func (s *Store) StartSessionWithOwnershipModeTimed(id, project, directory, mode string, timings *WriteTimings) error {
-	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, timings)
+	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, timings, nil, nil)
 }
 
 // ResumeSessionWithOwnershipMode atomically selects and registers a live runtime
@@ -3665,7 +3665,7 @@ func (s *Store) ResumeSessionWithOwnershipMode(id, project, directory, mode stri
 // changing runtime-session continuation selection.
 func (s *Store) ResumeSessionWithOwnershipModeTimed(id, project, directory, mode string, timings *WriteTimings) (string, error) {
 	effective := id
-	err := s.startSessionRegistration(id, project, directory, mode, true, &effective, false, timings)
+	err := s.startSessionRegistration(id, project, directory, mode, true, &effective, false, timings, nil, nil)
 	if err != nil {
 		return "", err
 	}
@@ -3689,7 +3689,7 @@ func (s *Store) RegisterIsolatedSession(id, project string, resume bool) (string
 // isolated-session validation or persistence.
 func (s *Store) RegisterIsolatedSessionTimed(id, project string, resume bool, timings *WriteTimings) (string, error) {
 	effective := id
-	if err := s.startSessionRegistration(id, project, "", SessionOwnershipProjectOwned, resume, &effective, true, timings); err != nil {
+	if err := s.startSessionRegistration(id, project, "", SessionOwnershipProjectOwned, resume, &effective, true, timings, nil, nil); err != nil {
 		return "", err
 	}
 	return effective, nil
@@ -3805,11 +3805,7 @@ func (s *Store) TryRefreshProjectOwnedSession(ctx context.Context, id, project s
 	return err == nil, err
 }
 
-func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool, timings *WriteTimings, evidence ...*ProjectProvenance) error {
-	var provenance *ProjectProvenance
-	if len(evidence) != 0 {
-		provenance = evidence[0]
-	}
+func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool, timings *WriteTimings, provenance *ProjectProvenance, managed *managedRuntimeAdmission) error {
 	if err := provenance.Validate(); err != nil {
 		return err
 	}
@@ -3897,6 +3893,9 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			}
 			*effective = id
 		}
+		if managed != nil && id != managed.scope.EffectiveID {
+			return ErrRuntimeSessionEffectiveIDMismatch
+		}
 		if id != root {
 			if err := validateIsolation(id); err != nil {
 				return err
@@ -3913,6 +3912,9 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 				return err
 			}
 			if endedAt != nil {
+				if managed != nil {
+					return ErrSessionAlreadyEnded
+				}
 				// Preserve the same child-ownership invariant as write adoption.
 				_, foreignOwner, err := foreignRecordOwnerTx(tx, id, project)
 				if err != nil {
@@ -3972,6 +3974,11 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 		}
 		if err := s.startSessionTx(tx, id, registrationProject, registrationDirectory, registrationMode); err != nil {
 			return err
+		}
+		if managed != nil {
+			if err := s.admitManagedRuntimeTx(tx, managed); err != nil {
+				return err
+			}
 		}
 		if !found && (provenance == nil || !provenance.rootRegistrationOnly || id == root) {
 			if err := captureProjectProvenanceTx(tx, "session", id, provenance); err != nil {

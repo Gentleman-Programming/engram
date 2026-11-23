@@ -517,6 +517,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("POST /internal/managed-runtime/admit", s.handleManagedRuntime)
+	s.mux.HandleFunc("POST /internal/managed-runtime/attach", s.handleManagedRuntime)
 	s.mux.HandleFunc("POST /internal/managed-runtime/hosts", s.handleManagedRuntime)
 	s.mux.HandleFunc("POST /internal/managed-runtime/retire", s.handleManagedRuntime)
 	s.mux.HandleFunc("POST /internal/managed-runtime/write-intent", s.handleManagedRuntime)

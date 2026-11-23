@@ -53,8 +53,8 @@ var (
 	errManagedRuntimeSchemaIncomplete = errors.New("managed runtime schema is incomplete")
 )
 
-// ManagedRuntimeScope is the exact runtime identity already verified by an
-// owned supervisor. This Store API does not establish host membership.
+// ManagedRuntimeScope is the exact runtime identity expected by an owned
+// supervisor.
 type ManagedRuntimeScope struct {
 	Root, EffectiveID, Project, Directory, Mode string
 }
@@ -103,70 +103,101 @@ func (scope ManagedRuntimeScope) verifyLive(tx *sql.Tx) error {
 	return nil
 }
 
-// AdmitManagedRuntime advances the generation for a verified live binding.
-// The owned supervisor is responsible for authorizing each admission and for
-// retaining the current generation across changes to its set of live hosts.
-func (s *Store) AdmitManagedRuntime(scope ManagedRuntimeScope, host ManagedRuntimeHost) (int64, error) {
+type managedRuntimeAdmission struct {
+	scope      ManagedRuntimeScope
+	host       ManagedRuntimeHost
+	generation int64
+}
+
+func newManagedRuntimeAdmission(scope ManagedRuntimeScope, host ManagedRuntimeHost) (managedRuntimeAdmission, error) {
 	if !host.valid() {
-		return 0, ErrManagedRuntimeHostIdentity
+		return managedRuntimeAdmission{}, ErrManagedRuntimeHostIdentity
 	}
 	scope, err := scope.normalized()
+	return managedRuntimeAdmission{scope: scope, host: host}, err
+}
+
+// AttachManagedRuntime registers the exact expected live session and admits the
+// verified host in the same writer transaction. The caller must authorize the
+// host before registration. Selecting a different continuation rolls back.
+func (s *Store) AttachManagedRuntime(scope ManagedRuntimeScope, host ManagedRuntimeHost, resume bool) (int64, error) {
+	admission, err := newManagedRuntimeAdmission(scope, host)
 	if err != nil {
 		return 0, err
 	}
-	var generation int64
+	scope = admission.scope
+	effective := scope.Root
+	err = s.startSessionRegistration(scope.Root, scope.Project, scope.Directory, scope.Mode, resume, &effective, false, nil, nil, &admission)
+	if err != nil {
+		return 0, err
+	}
+	return admission.generation, nil
+}
+
+// AdmitManagedRuntime advances the generation for an already registered binding.
+// The owned supervisor is responsible for authorizing each admission.
+func (s *Store) AdmitManagedRuntime(scope ManagedRuntimeScope, host ManagedRuntimeHost) (int64, error) {
+	admission, err := newManagedRuntimeAdmission(scope, host)
+	if err != nil {
+		return 0, err
+	}
 	err = s.withTx(func(tx *sql.Tx) error {
-		if err := scope.verifyLive(tx); err != nil {
-			return err
-		}
-		var tables int
-		if err := tx.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table'
-			AND name IN ('managed_runtime_generations', 'managed_runtime_writes', 'managed_runtime_hosts')`).Scan(&tables); err != nil {
-			return err
-		}
-		switch tables {
-		case 0:
-			if _, err := s.execHook(tx, managedRuntimeSchema); err != nil {
-				return err
-			}
-		case 3:
-		default:
-			return errManagedRuntimeSchemaIncomplete
-		}
-		var otherRoot bool
-		if err := tx.QueryRow(`SELECT EXISTS(
-			SELECT 1 FROM managed_runtime_generations WHERE effective_id=? AND root<>? AND closed=0
-		)`, scope.EffectiveID, scope.Root).Scan(&otherRoot); err != nil {
-			return err
-		}
-		if otherRoot {
-			return ErrRuntimeSessionScopeConflict
-		}
-		var retired bool
-		err := tx.QueryRow(`SELECT retired FROM managed_runtime_hosts
-			WHERE root=? AND effective_id=? AND pid=? AND start=? AND domain=?`,
-			scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain).Scan(&retired)
-		if err == nil {
-			if retired {
-				return ErrManagedRuntimeGeneration
-			}
-			return scope.latestOpenGeneration(tx, &generation)
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if _, err := s.execHook(tx, `INSERT INTO managed_runtime_hosts(root,effective_id,pid,start,domain)
-			VALUES (?,?,?,?,?)`, scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain); err != nil {
-			return err
-		}
-		return tx.QueryRow(`
-INSERT INTO managed_runtime_generations(root, project, directory, mode, effective_id)
-VALUES (?, ?, ?, ?, ?) RETURNING generation`, scope.Root, scope.Project, scope.Directory, scope.Mode, scope.EffectiveID).Scan(&generation)
+		return s.admitManagedRuntimeTx(tx, &admission)
 	})
 	if err != nil {
 		return 0, err
 	}
-	return generation, nil
+	return admission.generation, nil
+}
+
+func (s *Store) admitManagedRuntimeTx(tx *sql.Tx, admission *managedRuntimeAdmission) error {
+	scope, host := admission.scope, admission.host
+	if err := scope.verifyLive(tx); err != nil {
+		return err
+	}
+	var tables int
+	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table'
+		AND name IN ('managed_runtime_generations', 'managed_runtime_writes', 'managed_runtime_hosts')`).Scan(&tables); err != nil {
+		return err
+	}
+	switch tables {
+	case 0:
+		if _, err := s.execHook(tx, managedRuntimeSchema); err != nil {
+			return err
+		}
+	case 3:
+	default:
+		return errManagedRuntimeSchemaIncomplete
+	}
+	var otherRoot bool
+	if err := tx.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM managed_runtime_generations WHERE effective_id=? AND root<>? AND closed=0
+	)`, scope.EffectiveID, scope.Root).Scan(&otherRoot); err != nil {
+		return err
+	}
+	if otherRoot {
+		return ErrRuntimeSessionScopeConflict
+	}
+	var retired bool
+	err := tx.QueryRow(`SELECT retired FROM managed_runtime_hosts
+		WHERE root=? AND effective_id=? AND pid=? AND start=? AND domain=?`,
+		scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain).Scan(&retired)
+	if err == nil {
+		if retired {
+			return ErrManagedRuntimeGeneration
+		}
+		return scope.latestOpenGeneration(tx, &admission.generation)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if _, err := s.execHook(tx, `INSERT INTO managed_runtime_hosts(root,effective_id,pid,start,domain)
+		VALUES (?,?,?,?,?)`, scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain); err != nil {
+		return err
+	}
+	return tx.QueryRow(`
+INSERT INTO managed_runtime_generations(root, project, directory, mode, effective_id)
+VALUES (?, ?, ?, ?, ?) RETURNING generation`, scope.Root, scope.Project, scope.Directory, scope.Mode, scope.EffectiveID).Scan(&admission.generation)
 }
 
 func (scope ManagedRuntimeScope) generationState(tx *sql.Tx, generation int64) (closed, current bool, err error) {

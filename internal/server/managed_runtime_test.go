@@ -17,9 +17,6 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	st := newServerTestStore(t)
 	dir := t.TempDir()
 	mode := store.SessionOwnershipProjectOwned
-	if err := st.CreateSessionWithOwnershipMode("root", "project", dir, mode); err != nil {
-		t.Fatal(err)
-	}
 	body := map[string]any{"root": "root", "effective_id": "root", "directory": dir, "project": "project", "ownership_mode": mode}
 	call := func(s *Server, token, path string, values map[string]any, want int) *httptest.ResponseRecorder {
 		t.Helper()
@@ -42,9 +39,13 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	owned.SetSessionOwnedToken(token)
 	call(shared, token, prefix+"admit", body, 404)
 	call(owned, "invalid", prefix+"admit", body, 401)
+	call(shared, token, prefix+"attach", body, 404)
+	call(owned, "invalid", prefix+"attach", body, 401)
 	if runtime.GOOS != "linux" {
 		body["host"] = map[string]any{"pid": 10, "start": "fixture"}
 		call(owned, token, prefix+"admit", body, 503)
+		body["resume"] = false
+		call(owned, token, prefix+"attach", body, 503)
 		return
 	}
 	// Spawn a child that stays live until the fixture explicitly stops it.
@@ -63,7 +64,20 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	body["host"] = store.ManagedRuntimeHost{PID: host.Process.Pid, Start: start}
-	resp := call(owned, token, prefix+"admit", body, 200)
+	call(owned, token, prefix+"admit", body, 404)
+	call(owned, token, prefix+"attach", body, 400)
+	body["resume"] = false
+	body["effective_id"] = "wrong"
+	call(owned, token, prefix+"attach", body, 409)
+	body["effective_id"] = "root"
+	call(owned, token, prefix+"admit", body, 400)
+	resp := call(owned, token, prefix+"attach", body, 200)
+	retry := call(owned, token, prefix+"attach", body, 200)
+	if retry.Body.String() != resp.Body.String() {
+		t.Fatalf("attachment retry changed receipt: %s and %s", retry.Body, resp.Body)
+	}
+	delete(body, "resume")
+	call(owned, token, prefix+"admit", body, 200)
 	delete(body, "host")
 	roster := call(owned, token, prefix+"hosts", body, 200)
 	var stored struct{ Hosts []store.ManagedRuntimeHost }

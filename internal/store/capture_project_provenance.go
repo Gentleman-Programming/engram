@@ -128,6 +128,6 @@ func (s *Store) RegisterSessionWithProjectProvenance(id, project, directory, mod
 		mode = SessionOwnershipProjectOwned
 	}
 	effective := id
-	err := s.startSessionRegistration(id, project, directory, mode, resume, &effective, isolated, timings, p)
+	err := s.startSessionRegistration(id, project, directory, mode, resume, &effective, isolated, timings, p, nil)
 	return effective, err
 }

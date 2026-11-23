@@ -11,6 +11,73 @@ import (
 var managedTestHostA = ManagedRuntimeHost{PID: 20, Start: "birth-a", Domain: "local-domain"}
 var managedTestHostB = ManagedRuntimeHost{PID: 21, Start: "birth-b", Domain: "local-domain"}
 
+func TestManagedRuntimeAttachRegistersAndAdmitsAtomically(t *testing.T) {
+	st := newTestStore(t)
+	scope := ManagedRuntimeScope{
+		Root: "root", EffectiveID: "root", Project: "project",
+		Directory: t.TempDir(), Mode: SessionOwnershipProjectOwned,
+	}
+	if err := st.EnrollProject(scope.Project); err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
+	if err != nil || first <= 0 {
+		t.Fatalf("first attachment: %d, %v", first, err)
+	}
+	if retry, err := st.AttachManagedRuntime(scope, managedTestHostA, false); err != nil || retry != first {
+		t.Fatalf("reattachment after lost acknowledgement: %d, %v", retry, err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, first, managedTestHostA); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := st.CloseManagedRuntime(scope, first); err != nil || !applied {
+		t.Fatalf("close root: %v, %v", applied, err)
+	}
+	successor := scope
+	successor.EffectiveID = "root:resume:2"
+	replacement := successor
+	replacement.EffectiveID = "root:resume:3"
+	before, err := st.getSyncState(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AttachManagedRuntime(replacement, managedTestHostB, true); !errors.Is(err, ErrRuntimeSessionEffectiveIDMismatch) {
+		t.Fatalf("unexpected continuation selection: %v", err)
+	}
+	if _, err := st.db.Exec(`CREATE TRIGGER fixture_reject_attachment BEFORE INSERT ON managed_runtime_hosts
+		BEGIN SELECT RAISE(ABORT, 'forced attachment failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AttachManagedRuntime(successor, managedTestHostB, true); err == nil || !strings.Contains(err.Error(), "forced attachment failure") {
+		t.Fatalf("did not reach the host write after session registration: %v", err)
+	}
+	var rows, generations int
+	if err := st.db.QueryRow("SELECT count(*) FROM sessions WHERE id<>?", scope.Root).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("refused attachment left a continuation: %d %v", rows, err)
+	}
+	if err := st.db.QueryRow("SELECT count(*) FROM managed_runtime_generations").Scan(&generations); err != nil || generations != 1 {
+		t.Fatalf("refused attachment changed generations: %d %v", generations, err)
+	}
+	after, err := st.getSyncState(DefaultSyncTargetKey)
+	if err != nil || before.LastEnqueuedSeq != after.LastEnqueuedSeq {
+		t.Fatalf("refused attachment changed sync state: %+v %v", after, err)
+	}
+	if _, err := st.db.Exec("DROP TRIGGER fixture_reject_attachment"); err != nil {
+		t.Fatal(err)
+	}
+	next, err := st.AttachManagedRuntime(successor, managedTestHostB, true)
+	if err != nil || next <= first {
+		t.Fatalf("continuation attachment: %d, %v", next, err)
+	}
+	generation, hosts, err := st.ListManagedRuntimeHosts(successor)
+	if err != nil || generation != next || len(hosts) != 1 || hosts[0] != managedTestHostB {
+		t.Fatalf("expected exact persisted membership: %d %+v %v", generation, hosts, err)
+	}
+	if _, err := st.CloseManagedRuntime(successor, next); !errors.Is(err, ErrManagedRuntimeHostsRemain) {
+		t.Fatalf("new host failed to fence close: %v", err)
+	}
+}
+
 func TestManagedRuntimeWriteAndClosureRollback(t *testing.T) {
 	st := newTestStore(t)
 	dir := t.TempDir()
