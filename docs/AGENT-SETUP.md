@@ -378,6 +378,8 @@ Disable leaves user hooks and other settings in place. It can select Bash even i
 
 After updating Engram, rerun the command for your desired mode with the new executable and restart Claude Code. Use `enable` to qualify the new native executable or `disable` to refresh the managed Bash bundle from the new build. Ordinary setup keeps the current managed hook selection and pin. If a Claude command times out during managed setup, Engram stops the command and keeps the profile locked until Windows confirms its processes have exited. Windows can take longer to finish pending I/O. Once setup returns, rerun the desired command to reconcile the profile.
 
+If the managed copy of `engram.exe` is missing and the first prompt no longer loads ToolSearch, rerun `enable` from your verified Engram executable and restart Claude Code. Setup recreates the missing copy. If setup reports `pinned Engram core checksum changed`, use `disable` and restart Claude Code to restore the Bash hook. Resolve the discrepancy in the managed copy before enabling native mode again. Setup preserves the mismatched file for inspection.
+
 For Windows provisioning, run the capability check against the exact executable you intend to pin.
 
 ```powershell
