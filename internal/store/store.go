@@ -4084,23 +4084,26 @@ func (s *Store) ResolveRuntimeSessionWithOwnershipMode(root, project, directory,
 	return id, err
 }
 
-// TryResolveRuntimeSessionByDirectory resolves sessions whose stored directory
-// matches the request for both the root and live session in one read snapshot.
-// A false result leaves directory aliases to normal worktree verification.
-func (s *Store) TryResolveRuntimeSessionByDirectory(ctx context.Context, root, project, directory, mode string) (string, bool, error) {
-	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || strings.TrimSpace(directory) != directory {
-		return "", false, ctx.Err()
+// ResolveRuntimeSessionFromDirectoryContext resolves a caller's directory
+// before checking the stored scope. If Git confirms that the input is already
+// a worktree root, reuse that proof for two identical scopes in one snapshot.
+func (s *Store) ResolveRuntimeSessionFromDirectoryContext(ctx context.Context, root, project, directory, mode string) (string, error) {
+	resolved, found := projectpkg.InspectRuntimeWorktreeDirectory(ctx, directory)
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	id, err := s.readRuntimeSessionSnapshot(ctx, root, project, directory, mode, func(scope string, _ bool) error {
-		if scope != directory {
-			return errRuntimeSessionNeedsWorktree
+	if found && resolved == directory {
+		id, err := s.readRuntimeSessionSnapshot(ctx, root, project, directory, mode, func(scope string, _ bool) error {
+			if scope != directory {
+				return errRuntimeSessionNeedsWorktree
+			}
+			return nil
+		})
+		if err != errRuntimeSessionNeedsWorktree {
+			return id, err
 		}
-		return nil
-	})
-	if err == errRuntimeSessionNeedsWorktree {
-		return "", false, ctx.Err()
 	}
-	return id, true, err
+	return s.ResolveRuntimeSessionWithOwnershipModeContext(ctx, root, project, resolved, mode)
 }
 
 // ResolveRuntimeSessionWithOwnershipModeContext verifies filesystem scopes

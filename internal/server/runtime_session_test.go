@@ -20,18 +20,11 @@ import (
 )
 
 func TestRuntimeSessionResolveReusesExactStoredDirectory(t *testing.T) {
-	git, err := exec.LookPath("git")
+	_, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("Git is required to observe worktree lookups")
 	}
-	directory := t.TempDir()
-	subdirectory := filepath.Join(directory, "nested")
-	if err := os.Mkdir(subdirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if output, err := exec.CommandContext(t.Context(), git, "-C", directory, "init", "--quiet").CombinedOutput(); err != nil {
-		t.Fatalf("initialize fixture checkout: %v\n%s", err, output)
-	}
+	directory, subdirectory := httpHomeSelectionFixture(t)
 	if runtime.GOOS == "windows" {
 		directory = strings.ToLower(directory)
 	}
@@ -71,9 +64,12 @@ func TestRuntimeSessionResolveReusesExactStoredDirectory(t *testing.T) {
 		}
 	}
 	call(project, directory, effective, http.StatusOK)
+	if records, err := os.ReadFile(trace); err != nil || strings.Count(string(records), `"event":"start"`) != 1 {
+		t.Fatalf("an exact persisted scope must use one Git lookup: %v\n%s", err, records)
+	}
 	call("other-project", directory, "", http.StatusConflict)
-	if _, err := os.Stat(trace); !os.IsNotExist(err) {
-		t.Fatalf("an exact persisted scope started Git: %v", err)
+	if err := os.Remove(trace); err != nil {
+		t.Fatal(err)
 	}
 
 	call(project, subdirectory, effective, http.StatusOK)
@@ -87,6 +83,29 @@ func TestRuntimeSessionResolveReusesExactStoredDirectory(t *testing.T) {
 	if _, err := db.DB().Exec("UPDATE sessions SET directory = ? WHERE id = ?", t.TempDir(), effective); err != nil {
 		t.Fatal(err)
 	}
+	call(project, directory, "", http.StatusConflict)
+
+	if _, err := db.DB().Exec("UPDATE sessions SET directory = ? WHERE id = ?", directory, effective); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	nested := filepath.Join(other, "other-nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	httpHomeGit(t, other, "init", "--quiet")
+	httpHomeGit(t, directory, "config", "--local", "core.worktree", nested)
+	// Git maps directory to nested, then maps nested to the other checkout's
+	// root. Equal strings in SQLite must not bypass this scope conflict.
+	call(project, directory, "", http.StatusConflict)
+	httpHomeGit(t, directory, "config", "--local", "--unset", "core.worktree")
+
+	shift := "shift"
+	if err := os.MkdirAll(filepath.Join(directory, shift, shift), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(directory, ".git"))
+	t.Setenv("GIT_WORK_TREE", shift)
 	call(project, directory, "", http.StatusConflict)
 }
 
