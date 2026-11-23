@@ -72,13 +72,15 @@ For versioned mise installations, setup selects the shim directory from an absol
 
 When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also auto-pins `npmCommand` in Pi's `settings.json` to `["mise", "exec", "node@<version>", "--", "npm"]`, preventing Node version drift from silently changing which npm root Pi uses. If `npmCommand` already exists in `settings.json`, the existing value is preserved. This step is a no-op when mise is not installed.
 
-For a manual package upgrade on Engram 3.7.2, run this command and restart Pi. This also helps when an older native `mem_update` tool is still active and its schema lacks `expected_project`.
+For a manual upgrade of the personal Pi package on Engram 3.7.2, run the following command. Use it when an older native `mem_update` tool is still active and its schema lacks `expected_project`.
 
 ```bash
 pi install npm:gentle-engram@0.8.0
 ```
 
-After restarting, check that the native `mem_update` tool exposes `expected_project`. Set it to the observation's existing project when updating.
+An active `gentle-engram` pin in a trusted project's `.pi/settings.json` can override the personal package. If that project has a plain npm pin, run `pi install --local npm:gentle-engram@0.8.0` from the project directory. For a package entry with custom settings, update its `source` pin and keep the other fields. [Pi package scope](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/packages.md#understand-scope-and-identity)
+
+Restart Pi and check that the native `mem_update` tool exposes `expected_project`. Set it to the observation's existing project when updating.
 
 The package has two paths:
 
