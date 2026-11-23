@@ -12,16 +12,13 @@ import (
 
 func TestMemSave_AmbiguousRecoveryIgnoresExcludedGitSiblings(t *testing.T) {
 	parent := t.TempDir()
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(parent, "unused-git-config"))
 	t.Setenv("ENGRAM_PROJECT", "")
 	const wanted = "node_modules"
 	for _, name := range []string{"active-repo", " " + wanted, wanted} {
-		dir := filepath.Join(parent, name)
-		if err := os.Mkdir(dir, 0o700); err != nil {
+		// Child discovery and recovery both identify repositories by this marker.
+		if err := os.MkdirAll(filepath.Join(parent, name, ".git"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		initTestGitRepo(t, dir)
 	}
 	t.Chdir(parent)
 	s := newMCPTestStore(t)
