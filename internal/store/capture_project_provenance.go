@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -99,8 +100,13 @@ func captureProjectProvenanceTx(tx *sql.Tx, kind, id string, p *ProjectProvenanc
 // CaptureProjectProvenance reads local evidence only. Missing metadata returns nil,
 // including for records imported from Cloud or created before this API existed.
 func (s *Store) CaptureProjectProvenance(kind, id string) (*ProjectProvenance, error) {
+	return s.CaptureProjectProvenanceContext(context.Background(), kind, id)
+}
+
+// CaptureProjectProvenanceContext reads local capture evidence using the caller's context.
+func (s *Store) CaptureProjectProvenanceContext(ctx context.Context, kind, id string) (*ProjectProvenance, error) {
 	var p ProjectProvenance
-	err := s.db.QueryRow(`SELECT source, directory, raw_project FROM capture_project_provenance
+	err := s.db.QueryRowContext(ctx, `SELECT source, directory, raw_project FROM capture_project_provenance
 		WHERE entity_kind = ? AND entity_id = ?`, kind, id).Scan(&p.Source, &p.Directory, &p.RawProject)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
