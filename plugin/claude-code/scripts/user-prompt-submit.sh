@@ -587,8 +587,9 @@ if is_windows_bash && [ "${ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE:-auto}" != "0" ]
   STATE_FILE="${STATE_DIR}/${SESSION_KEY}"
 
   if [ ! -f "$STATE_FILE" ]; then
-    : > "$STATE_FILE" 2>/dev/null || true
-    print_toolsearch_message
+    if print_toolsearch_message; then
+      : > "$STATE_FILE" 2>/dev/null || true
+    fi
     exit 0
   fi
 
