@@ -262,13 +262,14 @@ test("pi-engram init replaces legacy package entries without disturbing other pa
 	}
 });
 
-for (const previousVersion of ["0.2.0", "0.3.0", "0.4.0", "0.4.1", "0.4.2", "0.5.0", "0.5.1", "0.6.0", "0.7.0", "0.7.1"]) {
+for (const previousVersion of ["0.1.5", "0.1.6", "0.1.7", "0.1.13", "0.2.0", "0.3.0", "0.4.0", "0.4.1", "0.4.2", "0.5.0", "0.5.1", "0.6.0", "0.7.0", "0.7.1"]) {
 test(`pi-engram init upgrades ${previousVersion} without changing unrelated config and remains idempotent`, () => {
 	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-upgrade-"));
 	try {
 		const settingsPath = join(agentDir, "settings.json");
 		const mcpPath = join(agentDir, "mcp.json");
-		writeFileSync(settingsPath, JSON.stringify({ packages: ["npm:existing", `npm:gentle-engram@${previousVersion}`], custom: true }));
+		const customPackages = ["npm:gentle-engram@0.1.10", { source: `npm:gentle-engram@${previousVersion}`, extensions: ["keep.ts"] }];
+		writeFileSync(settingsPath, JSON.stringify({ packages: ["npm:existing", `npm:gentle-engram@${previousVersion}`, ...customPackages], custom: true }));
 		const originalMcp = JSON.stringify({ mcpServers: { other: { command: "other" } } });
 		writeFileSync(mcpPath, originalMcp);
 		for (const action of ["Added", "Kept"]) {
@@ -286,7 +287,7 @@ test(`pi-engram init upgrades ${previousVersion} without changing unrelated conf
 				"",
 			].join("\n"));
 			assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")), {
-				packages: ["npm:existing", "npm:gentle-engram@0.8.0"], custom: true,
+				packages: ["npm:existing", ...customPackages, "npm:gentle-engram@0.8.0"], custom: true,
 			});
 			assert.equal(readFileSync(mcpPath, "utf8"), originalMcp);
 			if (action === "Kept") assert.equal(readFileSync(settingsPath, "utf8"), before);
