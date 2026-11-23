@@ -686,7 +686,7 @@ func scanChildrenContext(ctx context.Context, dir string) (repos []string, timed
 			return repos, false
 		}
 		entry := entries[0]
-		if !isProjectChildDirectory(entry) {
+		if !IsProjectChildDirectory(entry) {
 			continue
 		}
 		childPath := filepath.Join(dir, entry.Name())
@@ -705,7 +705,9 @@ func scanChildrenContext(ctx context.Context, dir string) (repos []string, timed
 	}
 }
 
-func isProjectChildDirectory(entry os.DirEntry) bool {
+// IsProjectChildDirectory reports whether child repository discovery considers
+// this entry. A matching directory must still have a Git marker.
+func IsProjectChildDirectory(entry os.DirEntry) bool {
 	return entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") && !noiseSet[entry.Name()]
 }
 
@@ -725,7 +727,7 @@ func AmbiguousGitChildProjectCollisions(dir, normalized string) ([]string, error
 	for {
 		entries, err := parent.ReadDir(32)
 		for _, entry := range entries {
-			if !isProjectChildDirectory(entry) {
+			if !IsProjectChildDirectory(entry) {
 				continue
 			}
 			candidate := normalizeAvailableProject(entry.Name())
