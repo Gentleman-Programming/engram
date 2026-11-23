@@ -6165,10 +6165,9 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 
 		tkRows, err := s.db.QueryContext(ctx, tkSQL, tkArgs...)
 		if err == nil {
-			defer tkRows.Close()
 			for tkRows.Next() {
-				if err := ctx.Err(); err != nil {
-					return nil, err
+				if ctx.Err() != nil {
+					break
 				}
 				var sr SearchResult
 				if err := tkRows.Scan(
@@ -6176,17 +6175,16 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 					&sr.ToolName, &sr.Project, &sr.Scope, &sr.Org, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
 					&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt, &sr.SupersededBySyncID,
 				); err != nil {
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return nil, ctxErr
-					}
 					break
 				}
-				if err := ctx.Err(); err != nil {
-					return nil, err
+				if ctx.Err() != nil {
+					break
 				}
 				sr.Rank = -1000
 				directResults = append(directResults, sr)
 			}
+			// The full-text query needs the same connection, even if Scan stopped early.
+			_ = tkRows.Close()
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
@@ -6323,21 +6321,19 @@ func (s *Store) SearchPreviewsContext(ctx context.Context, query string, opts Se
 
 		tkRows, err := s.db.QueryContext(ctx, tkSQL, tkArgs...)
 		if err == nil {
-			defer func() { _ = tkRows.Close() }()
 			for tkRows.Next() {
-				if err := ctx.Err(); err != nil {
-					return nil, err
+				if ctx.Err() != nil {
+					break
 				}
 				var r SearchPreviewResult
 				if err := scanSearchPreviewRow(tkRows, &r, false); err != nil {
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return nil, ctxErr
-					}
 					break
 				}
 				r.Rank = -1000
 				directResults = append(directResults, r)
 			}
+			// The full-text query needs the same connection, even if Scan stopped early.
+			_ = tkRows.Close()
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}

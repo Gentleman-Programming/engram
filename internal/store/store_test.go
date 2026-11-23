@@ -19135,6 +19135,47 @@ func TestSearchCompositeLexicalReranking(t *testing.T) {
 	})
 }
 
+func TestSearchReleasesTopicRowsAfterScanFailure(t *testing.T) {
+	cfg := FallbackConfig(t.TempDir())
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "engram.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	const session, project, topic = "topic-search", "fixture", "native/adapter"
+	if err := s.CreateSession(session, project, ""); err != nil {
+		t.Fatal(err)
+	}
+	legacyID, err := s.AddObservation(AddObservationParams{
+		SessionID: session, Project: project, Type: "discovery", TopicKey: topic,
+		Title: "Historical import", Content: "Retained metadata",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET pinned = 'unreadable' WHERE id = ?`, legacyID); err != nil {
+		t.Fatal(err)
+	}
+	opts := SearchOptions{Project: project, Limit: 3}
+	t.Run("full", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if _, err := s.SearchContext(ctx, topic, opts); err == nil || !strings.Contains(err.Error(), `name "pinned"`) {
+			t.Fatalf("expected a row decoding error after topic scan failure, got %v", err)
+		}
+	})
+	t.Run("preview", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if _, err := s.SearchPreviewsContext(ctx, topic, opts); err == nil || !strings.Contains(err.Error(), `name "pinned"`) {
+			t.Fatalf("expected a row decoding error after topic scan failure, got %v", err)
+		}
+	})
+}
+
 func TestSearchPreviewsContextIncludesTopicKey(t *testing.T) {
 	s := newTestStore(t)
 	const (
