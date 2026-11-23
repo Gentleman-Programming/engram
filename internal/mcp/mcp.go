@@ -3573,7 +3573,7 @@ func resolveAmbiguousChoicePath(ambiguousParent, choice string) string {
 	}
 	matchedPath := ""
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !projectpkg.IsProjectChildDirectory(entry) {
 			continue
 		}
 		// Match the same name shape used by project.DetectProjectFull for
