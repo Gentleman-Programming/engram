@@ -22,9 +22,17 @@ func prepareSQLiteTemp(dataDir string) (release func(), err error) {
 	}
 	// A configured data directory may use a junction. Pin the physical temp
 	// location so SQLite's later opens cannot follow a retargeted alias.
-	root, err := filepath.EvalSymlinks(dataDir)
+	rootHandle, root, err := openSQLiteTempRoot(dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("engram: resolve SQLite temporary storage root: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = windows.CloseHandle(rootHandle)
+		}
+	}()
+	if err := store.ValidateDataDirectory(root); err != nil {
+		return nil, err
 	}
 	parent := filepath.Join(root, "tmp")
 	parentHandle, err := openSQLiteTempDirectory(parent)
@@ -79,7 +87,43 @@ func prepareSQLiteTemp(dataDir string) (release func(), err error) {
 		_ = windows.CloseHandle(marker)
 		_ = windows.CloseHandle(handle)
 		_ = windows.CloseHandle(parentHandle)
+		_ = windows.CloseHandle(rootHandle)
 	}, nil
+}
+
+func openSQLiteTempRoot(path string) (handle windows.Handle, pathName string, err error) {
+	name, err := sqliteTempPath(path)
+	if err != nil {
+		return 0, "", err
+	}
+	opened, err := windows.CreateFile(name, windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return 0, "", err
+	}
+	defer func() {
+		if err != nil {
+			_ = windows.CloseHandle(opened)
+		}
+	}()
+	size := uint32(windows.MAX_PATH)
+	for {
+		buffer := make([]uint16, size)
+		// FILE_NAME_NORMALIZED with VOLUME_NAME_DOS yields the target path
+		// rather than the name of the junction used to open it.
+		n, err := windows.GetFinalPathNameByHandle(opened, &buffer[0], size, 0)
+		if err != nil {
+			return 0, "", err
+		}
+		if n < size {
+			final := windows.UTF16ToString(buffer[:n])
+			if strings.HasPrefix(final, `\\?\UNC\`) {
+				final = `\\` + strings.TrimPrefix(final, `\\?\UNC\`)
+			}
+			return opened, strings.TrimPrefix(final, `\\?\`), nil
+		}
+		size = n + 1
+	}
 }
 
 // The Windows syscall wrapper expects an extended path for long filenames.
