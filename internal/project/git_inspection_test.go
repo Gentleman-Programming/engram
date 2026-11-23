@@ -77,6 +77,39 @@ func TestGitInspectionSeesConfigChanges(t *testing.T) {
 	}
 }
 
+func TestConfiguredDirectorySkipsGit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configDir := filepath.Join(dir, ".engram")
+	if err := os.Mkdir(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(t.TempDir(), "git-trace")
+	t.Setenv("GIT_TRACE", filepath.ToSlash(trace))
+	config := filepath.Join(configDir, "config.json")
+	if err := os.WriteFile(config, []byte(`{"project_name":"configured","org":" team "}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []DetectionOptions{{}, {InspectOnly: true, Context: context.Background()}} {
+		result := DetectProjectFullWithOptions(dir, mode)
+		if result.Error != nil || result.Source != SourceConfig || result.Project != "configured" ||
+			result.Org != "team" || DirectoryIdentity(result.Path) != DirectoryIdentity(dir) {
+			t.Fatalf("configured detection = %+v", result)
+		}
+	}
+	if err := os.WriteFile(config, []byte("invalid JSON"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := DetectProjectFull(dir); !errors.Is(result.Error, ErrInvalidConfig) || result.Source != SourceConfig {
+		t.Fatalf("invalid configured detection = %+v", result)
+	}
+	if raw, err := os.ReadFile(trace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reading the selected config should start no Git process: %v\n%s", err, raw)
+	}
+}
+
 func TestGitInspectionCanceledMetadataCannotReachHistory(t *testing.T) {
 	dir := t.TempDir()
 	initGit(t, dir)

@@ -201,6 +201,11 @@ func detectProjectFull(dir string, options DetectionOptions, historyDirectory st
 		dir = "./" + dir
 	}
 
+	// The requested directory's config wins regardless of the Git root.
+	if res, ok := readConfigAt(configDirectory(dir)); ok {
+		return res
+	}
+
 	inspection := inspectGitCheckoutRoot(ctx, dir)
 	if res, ok := detectFromConfigContext(ctx, dir, inspection); ok {
 		return res
@@ -405,16 +410,19 @@ type configFile struct {
 	Org string `json:"org"`
 }
 
-func detectFromConfigContext(ctx context.Context, dir string, inspection *gitInspection) (DetectionResult, bool) {
-	if err := ctx.Err(); err != nil {
-		return DetectionResult{Error: err}, true
-	}
+func configDirectory(dir string) string {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		absDir = dir
 	}
-	absDir = canonicalizePath(absDir)
+	return canonicalizePath(absDir)
+}
 
+func detectFromConfigContext(ctx context.Context, dir string, inspection *gitInspection) (DetectionResult, bool) {
+	if err := ctx.Err(); err != nil {
+		return DetectionResult{Error: err}, true
+	}
+	absDir := configDirectory(dir)
 	// Project config is a project/repo lock, not a global ancestor setting. When
 	// cwd is inside git, walk upward only within the enclosing repository so a
 	// nearest subproject .engram/config.json can override the repo root without
