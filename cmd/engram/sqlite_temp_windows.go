@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -106,21 +107,39 @@ func openSQLiteTempRoot(path string) (handle windows.Handle, pathName string, er
 			_ = windows.CloseHandle(opened)
 		}
 	}()
+	final, err := sqliteTempRootPath(opened, windows.GetFinalPathNameByHandle)
+	if err != nil {
+		return 0, "", err
+	}
+	return opened, final, nil
+}
+
+func sqliteTempRootPath(handle windows.Handle, lookup func(windows.Handle, *uint16, uint32, uint32) (uint32, error)) (string, error) {
+	const volumeNameGUID = 1
+	var flags uint32
 	size := uint32(windows.MAX_PATH)
 	for {
 		buffer := make([]uint16, size)
 		// FILE_NAME_NORMALIZED with VOLUME_NAME_DOS yields the target path
 		// rather than the name of the junction used to open it.
-		n, err := windows.GetFinalPathNameByHandle(opened, &buffer[0], size, 0)
+		n, err := lookup(handle, &buffer[0], size, flags)
+		if flags == 0 && errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			// A volume mounted at a directory may have no drive letter.
+			flags = volumeNameGUID
+			continue
+		}
 		if err != nil {
-			return 0, "", err
+			return "", err
 		}
 		if n < size {
 			final := windows.UTF16ToString(buffer[:n])
+			if flags == volumeNameGUID {
+				return final, nil
+			}
 			if strings.HasPrefix(final, `\\?\UNC\`) {
 				final = `\\` + strings.TrimPrefix(final, `\\?\UNC\`)
 			}
-			return opened, strings.TrimPrefix(final, `\\?\`), nil
+			return strings.TrimPrefix(final, `\\?\`), nil
 		}
 		size = n + 1
 	}

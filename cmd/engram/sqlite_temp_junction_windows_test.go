@@ -7,9 +7,30 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestSQLiteTempDataRootWithoutDriveLetter(t *testing.T) {
+	const path = `\\?\Volume{11111111-1111-1111-1111-111111111111}\engram`
+	var mode []uint32
+	resolved, err := sqliteTempRootPath(0, func(_ windows.Handle, out *uint16, size, flags uint32) (uint32, error) {
+		mode = append(mode, flags)
+		if flags == 0 {
+			return 0, windows.ERROR_PATH_NOT_FOUND
+		}
+		utf16, err := windows.UTF16FromString(path)
+		if err != nil {
+			return 0, err
+		}
+		copy(unsafe.Slice(out, int(size)), utf16)
+		return uint32(len(utf16) - 1), nil
+	})
+	if err != nil || resolved != path || len(mode) != 2 || mode[1] != 1 {
+		t.Fatalf("resolved = %q, modes = %v, error = %v", resolved, mode, err)
+	}
+}
 
 func TestSQLiteTempRejectsManagedJunctions(t *testing.T) {
 	for _, relative := range []string{"tmp", filepath.Join("tmp", "sqlite")} {
