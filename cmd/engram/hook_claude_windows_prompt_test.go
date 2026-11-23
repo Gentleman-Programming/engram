@@ -158,6 +158,21 @@ func TestClaudeWindowsPromptBootstrapCLI(t *testing.T) {
 	t.Run("malformed input still gets local bootstrap", func(t *testing.T) {
 		assertBootstrap(t, run(t, `{"session_id":`, ""))
 	})
+	t.Run("unlocked reservation leaves first prompt available", func(t *testing.T) {
+		const id = "a3a6310c-b54c-47f2-b963-39490785abba"
+		pending := filepath.Join(root, "engram-claude-"+id+"-tools-loaded.pending")
+		if err := os.WriteFile(pending, []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		input := `{"session_id":"` + id + `"}`
+		assertBootstrap(t, run(t, input, ""))
+		if content, err := os.ReadFile(pending); err != nil || string(content) != "fixture" {
+			t.Fatalf("unowned reservation = %q, %v", content, err)
+		}
+		if got := run(t, input, ""); got != "{}" {
+			t.Fatalf("subsequent prompt returned %q", got)
+		}
+	})
 	if _, err := os.Stat(filepath.Join(root, "must-not-exist")); !os.IsNotExist(err) {
 		t.Fatalf("hook touched an Engram data directory: %v", err)
 	}
