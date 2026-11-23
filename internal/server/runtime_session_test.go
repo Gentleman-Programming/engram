@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
@@ -25,9 +26,7 @@ func TestRuntimeSessionResolveReusesExactStoredDirectory(t *testing.T) {
 		t.Skip("Git is required to observe worktree lookups")
 	}
 	directory, subdirectory := httpHomeSelectionFixture(t)
-	if runtime.GOOS == "windows" {
-		directory = strings.ToLower(directory)
-	}
+	directory = projectpkg.DirectoryIdentity(directory)
 
 	db := newServerTestStore(t)
 	const root, project, mode = "registered-root", "fixture-project", store.SessionOwnershipProjectOwned
