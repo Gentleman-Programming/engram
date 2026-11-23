@@ -30,7 +30,7 @@ func TestSearchCancelsUnknownProjectHint(t *testing.T) {
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/search?q=synthetic&project=missing", nil)
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req.WithContext(cancelAfterProjectLookup{Context: ctx, cancel: cancel}))
+	srv.Handler().ServeHTTP(rec, req.WithContext(cancelAfterFirstQuery{Context: ctx, cancel: cancel}))
 	if ctx.Err() != context.Canceled {
 		t.Fatal("the project existence query did not trigger cancellation")
 	}
@@ -40,16 +40,35 @@ func TestSearchCancelsUnknownProjectHint(t *testing.T) {
 	}
 }
 
-type cancelAfterProjectLookup struct {
+func TestSessionReadCancelsBeforeProvenance(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.StartSession("fixture", "project", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/sessions/fixture", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req.WithContext(cancelAfterFirstQuery{Context: ctx, cancel: cancel}))
+	if ctx.Err() != context.Canceled {
+		t.Fatal("the session query did not trigger cancellation")
+	}
+	if rec.Code != http.StatusInternalServerError || rec.Body.String() != "{\"error\":\"context canceled\"}\n" {
+		t.Fatalf("session after cancellation = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+type cancelAfterFirstQuery struct {
 	context.Context
 	cancel context.CancelFunc
 }
 
 // Hide the embedded cancellation state so database/sql uses AfterFunc when
 // it attaches the cancellation watcher to the first query's rows.
-func (ctx cancelAfterProjectLookup) Value(any) any { return nil }
+func (ctx cancelAfterFirstQuery) Value(any) any { return nil }
 
-func (ctx cancelAfterProjectLookup) AfterFunc(fn func()) func() bool {
+func (ctx cancelAfterFirstQuery) AfterFunc(fn func()) func() bool {
 	stop := context.AfterFunc(ctx.Context, fn)
 	return func() bool {
 		stopped := stop()
@@ -83,6 +102,7 @@ func TestReadCancellationWhileWaitingForConnection(t *testing.T) {
 	const canceledRead = "{\"error\":\"context canceled\"}\n"
 	const canceledProjectLookup = "{\"code\":\"project_resolution_failed\",\"error\":\"project resolution failed: context canceled\"}\n"
 	tests := map[string]struct{ path, errorBody string }{
+		"session-owner":         {"/sessions/synthetic", canceledRead},
 		"search":                {"/search?q=synthetic&all_projects=true", canceledRead},
 		"compact-search":        {"/search?q=synthetic&all_projects=true&response_format=compact", canceledRead},
 		"context-sessions":      {"/context?all_projects=true&pinned=-1&observations=-1&prompts=-1", canceledRead},

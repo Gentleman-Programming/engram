@@ -4261,10 +4261,11 @@ func (s *Store) endSessionSummaryOperation(id string, summary any) func(*sql.Tx)
 }
 
 func (s *Store) GetSession(id string) (*Session, error) {
-	return s.getSessionContext(context.Background(), id)
+	return s.GetSessionContext(context.Background(), id)
 }
 
-func (s *Store) getSessionContext(ctx context.Context, id string) (*Session, error) {
+// GetSessionContext reads a session using the caller's context.
+func (s *Store) GetSessionContext(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary, runtime_lease_expires_at FROM sessions WHERE id = ?`, id,
 	)
@@ -6975,7 +6976,7 @@ func truncateUTF8Prefix(s string, maxBytes int) string {
 // one persisted session. The session's project is derived from the store and
 // is never supplied by the caller. All reads honor ctx.
 func (s *Store) FormatCompactionContext(ctx context.Context, sessionID string) (string, error) {
-	session, err := s.getSessionContext(ctx, sessionID)
+	session, err := s.GetSessionContext(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}

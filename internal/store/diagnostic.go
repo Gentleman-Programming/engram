@@ -42,7 +42,7 @@ func ReadRuntimeSessionDiagnostic(ctx context.Context, dataDir, root string) (Ru
 	}
 	defer func() { _ = db.Close() }()
 	s := &Store{db: db}
-	session, err := s.getSessionContext(ctx, root)
+	session, err := s.GetSessionContext(ctx, root)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RuntimeSessionDiagnosticMissing, nil
 	}
@@ -55,7 +55,7 @@ func ReadRuntimeSessionDiagnostic(ctx context.Context, dataDir, root string) (Ru
 	effective, err := s.ResolveRuntimeSessionWithOwnershipModeContext(ctx, root, session.Project, session.Directory, session.OwnershipMode)
 	if errors.Is(err, sql.ErrNoRows) {
 		// An exact-ID deletion may have removed the root during resolution.
-		current, readErr := s.getSessionContext(ctx, root)
+		current, readErr := s.GetSessionContext(ctx, root)
 		switch {
 		case errors.Is(readErr, sql.ErrNoRows):
 			return RuntimeSessionDiagnosticMissing, nil
