@@ -1652,6 +1652,7 @@ func TestCollectionHandlersReportProjectResolutionErrors(t *testing.T) {
 		{name: "recent observations", path: "/observations/recent"},
 		{name: "recent prompts", path: "/prompts/recent"},
 		{name: "search prompts", path: "/prompts/search?q=identity"},
+		{name: "search observations", path: "/search?q=identity"},
 	}
 	resolutionCases := []struct {
 		name              string
