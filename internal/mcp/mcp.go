@@ -3527,8 +3527,9 @@ func normalizedProjectCollisions(candidates []string, choice string) (string, []
 		return "", nil
 	}
 
+	// The detector reports one choice per repository. Identical display
+	// choices can name different checkouts and still collide in storage.
 	colliding := make([]string, 0, 2)
-	seen := make(map[string]struct{})
 	for _, candidate := range candidates {
 		trimmed := strings.TrimSpace(candidate)
 		if trimmed == "" {
@@ -3538,10 +3539,6 @@ func normalizedProjectCollisions(candidates []string, choice string) (string, []
 		if candidateNormalized != normalized {
 			continue
 		}
-		if _, ok := seen[trimmed]; ok {
-			continue
-		}
-		seen[trimmed] = struct{}{}
 		colliding = append(colliding, trimmed)
 	}
 	if len(colliding) < 2 {
