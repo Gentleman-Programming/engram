@@ -106,6 +106,16 @@ func TestManagedClaudePromptBundlePreservesAssets(t *testing.T) {
 	if bash.version == native.version || bash.folder == native.folder {
 		t.Fatal("Bash and native share a bundle identity")
 	}
+	extended, err := files.stageWithGuardBudget(root, pin, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if extended.version == native.version || extended.folder == native.folder {
+		t.Fatal("default and extended native modes share a bundle identity")
+	}
+	if _, err := files.stageWithGuardBudget(root, "", true); err == nil {
+		t.Fatal("extended PreToolUse accepted an unpinned core")
+	}
 	for i, original := range files {
 		switch original.path {
 		case claudeHooksPath:
@@ -115,6 +125,23 @@ func TestManagedClaudePromptBundlePreservesAssets(t *testing.T) {
 			}
 			if err := json.Unmarshal(native.files[i].data, &nativeManifest); err != nil {
 				t.Fatal(err)
+			}
+			var extendedManifest map[string]any
+			if err := json.Unmarshal(extended.files[i].data, &extendedManifest); err != nil {
+				t.Fatal(err)
+			}
+			nativeGuard := nativeManifest["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
+			extendedGuard := extendedManifest["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
+			if nativeGuard["timeout"] != float64(5) || extendedGuard["timeout"] != float64(10) ||
+				extendedGuard["command"] != pin || extendedGuard["onFailure"] != "block" ||
+				!reflect.DeepEqual(extendedGuard["args"], []any{"hook", "claude-pre-tool-use", ClaudeWindowsExtendedGuardArg}) {
+				t.Fatalf("default guard = %#v, extended guard = %#v", nativeGuard, extendedGuard)
+			}
+			for _, key := range []string{"args", "command", "timeout"} {
+				extendedGuard[key] = nativeGuard[key]
+			}
+			if !reflect.DeepEqual(extendedManifest, nativeManifest) {
+				t.Fatal("extended variant changes an unrelated hook field")
 			}
 			bashHooks := bashManifest["hooks"].(map[string]any)
 			nativeHooks := nativeManifest["hooks"].(map[string]any)

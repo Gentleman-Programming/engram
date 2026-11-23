@@ -127,6 +127,7 @@ var (
 	setupAddClaudeCodeMemoryWriteAllowlist = setup.AddClaudeCodeMemoryWriteAllowlist
 	setupEnsureClaudeCodeUserMCP           = setup.EnsureClaudeCodeUserMCP
 	setupSetClaudeWindowsNativePrompt      = setup.SetClaudeWindowsNativePrompt
+	setupSetClaudeWindowsExtendedGuard     = setup.SetClaudeWindowsNativePromptWithExtendedGuard
 	setupVerifyClaudeCodeSlim              = setup.VerifyClaudeCodeSlimCapability
 	scanInputLine                          = fmt.Scanln
 
@@ -3670,6 +3671,8 @@ func cmdSetup(cfg store.Config) {
 		allowMemoryWrites bool
 		nativePrompt      string
 		nativePromptSeen  bool
+		windowsGuard      string
+		windowsGuardSeen  bool
 		slug              string
 		slugSeen          bool
 		extraBareSeen     bool
@@ -3705,6 +3708,10 @@ func cmdSetup(cfg store.Config) {
 			unknownFlagSeen = unknownFlagSeen || nativePromptSeen
 			nativePromptSeen = true
 			nativePrompt = strings.TrimPrefix(token, "--native-windows-prompt=")
+		case token == "--windows-pretooluse" || strings.HasPrefix(token, "--windows-pretooluse="):
+			unknownFlagSeen = unknownFlagSeen || windowsGuardSeen
+			windowsGuardSeen = true
+			windowsGuard = strings.TrimPrefix(token, "--windows-pretooluse=")
 		case strings.HasPrefix(token, "-"):
 			// Unrecognized hyphen-prefixed token: record it but keep
 			// scanning so a --protocol appearing later is still parsed
@@ -3724,10 +3731,19 @@ func cmdSetup(cfg store.Config) {
 	case helpSeen:
 		printSetupUsage()
 		return
-	case nativePromptSeen:
+	case nativePromptSeen || windowsGuardSeen:
 		if slug != "claude-code" || mcpOnly || allowMemoryWrites || protocolFlag || extraBareSeen || unknownFlagSeen ||
-			(nativePrompt != "enable" && nativePrompt != "disable") {
-			fatal(fmt.Errorf("usage: engram setup claude-code --native-windows-prompt=enable|disable"))
+			(nativePrompt != "enable" && nativePrompt != "disable") ||
+			(windowsGuardSeen && (nativePrompt != "enable" || windowsGuard != "extended")) {
+			fatal(fmt.Errorf("usage: engram setup claude-code --native-windows-prompt=enable|disable [--windows-pretooluse=extended with enable]"))
+			return
+		}
+		if windowsGuardSeen {
+			if err := setupSetClaudeWindowsExtendedGuard(); err != nil {
+				fatal(err)
+				return
+			}
+			fmt.Println("Claude Code Windows native prompt hook and extended PreToolUse deadline enabled.")
 			return
 		}
 		if err := setupSetClaudeWindowsNativePrompt(nativePrompt == "enable"); err != nil {
@@ -3871,6 +3887,9 @@ func printSetupUsage() {
 	fmt.Println("  --native-windows-prompt=enable|disable")
 	fmt.Println("                          Windows Claude Code only. Select the native prompt hook")
 	fmt.Println("                          or return to Bash in the managed user plugin.")
+	fmt.Println("  --windows-pretooluse=extended")
+	fmt.Println("                          With --native-windows-prompt=enable, allow 10 seconds")
+	fmt.Println("                          for Claude and 7 seconds for Engram session confirmation.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 

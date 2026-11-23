@@ -14,6 +14,7 @@ import (
 	"time"
 
 	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
 )
 
 // claudeEngramWriteAndSessionTools is the complete set of Engram MCP tools
@@ -108,7 +109,9 @@ func cmdHook(args []string) {
 		cmdClaudeWindowsUserPromptSubmit(len(args) == 2)
 		return
 	}
-	if len(args) != 1 || (args[0] != "claude-pre-tool-use" && args[0] != "codex-pre-tool-use") {
+	extendedGuard := runtime.GOOS == "windows" && len(args) == 2 &&
+		args[0] == "claude-pre-tool-use" && args[1] == setup.ClaudeWindowsExtendedGuardArg
+	if !extendedGuard && (len(args) != 1 || (args[0] != "claude-pre-tool-use" && args[0] != "codex-pre-tool-use")) {
 		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|claude-bind-session|claude-session-context|claude-windows-user-prompt-submit|codex-pre-tool-use|codex-user-prompt-submit|resolve-hook-project")
 		exitFunc(1)
 		return
@@ -127,6 +130,8 @@ func cmdHook(args []string) {
 		if err == nil {
 			response = guardCodexPreToolUse(input)
 		}
+	} else if err == nil && extendedGuard {
+		response = guardClaudePreToolUseWithin(input, setup.ClaudeWindowsExtendedGuardConfirmation)
 	} else if err == nil {
 		response = guardClaudePreToolUse(input)
 	}
@@ -144,6 +149,10 @@ func runningUnderPi() bool {
 // guardClaudePreToolUse confirms the host session before binding a mutating tool.
 // Read-only and non-Engram calls never contact the server.
 func guardClaudePreToolUse(input []byte) []byte {
+	return guardClaudePreToolUseWithin(input, hookSessionConfirmationBudget())
+}
+
+func guardClaudePreToolUseWithin(input []byte, budget time.Duration) []byte {
 	var payload map[string]json.RawMessage
 	if json.Unmarshal(input, &payload) != nil || payload == nil {
 		return claudePreToolUseDeny("malformed authoritative Claude hook input")
@@ -175,7 +184,7 @@ func guardClaudePreToolUse(input []byte) []byte {
 	if !idOK || !cwdOK {
 		return claudePreToolUseDeny("Claude " + errHookSessionUnconfirmed.Error())
 	}
-	effective, err := confirmHookSession(id, cwd, true)
+	effective, err := confirmHookSessionWithin(id, cwd, true, runtime.GOOS, budget)
 	if err != nil {
 		return hookSessionConfirmationDeny("Claude", err)
 	}
@@ -204,17 +213,8 @@ func hookSessionConfirmationDeny(agent string, err error) []byte {
 	return claudePreToolUseDeny(agent + " " + err.Error())
 }
 
-// confirmHookSession returns the session ID writes must use: the host ID, or
+// confirmHookSessionWithin returns the session ID writes must use: the host ID, or
 // the live continuation that SessionStart registered after a resume (#1624).
-func confirmHookSession(id, cwd string, projectOwned bool) (effective string, confirmationErr error) {
-	return confirmHookSessionForPlatform(id, cwd, projectOwned, runtime.GOOS)
-}
-
-// Keep the platform seam private; production always supplies runtime.GOOS.
-func confirmHookSessionForPlatform(id, cwd string, projectOwned bool, platform string) (effective string, confirmationErr error) {
-	return confirmHookSessionWithin(id, cwd, projectOwned, platform, hookSessionConfirmationBudget())
-}
-
 func confirmHookSessionWithin(id, cwd string, projectOwned bool, platform string, budget time.Duration) (effective string, confirmationErr error) {
 	base, client := hookEndpointClient("")
 	if base == "" {

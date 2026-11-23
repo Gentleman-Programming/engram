@@ -62,6 +62,7 @@ func TestCmdSetupNativePromptRejectsConflictingOptions(t *testing.T) {
 		return nil
 	}
 	enable := "--native-windows-prompt=enable"
+	extended := "--windows-pretooluse=extended"
 	for _, args := range [][]string{
 		{"codex", enable},
 		{"claude-code", "--native-windows-prompt"},
@@ -71,6 +72,11 @@ func TestCmdSetupNativePromptRejectsConflictingOptions(t *testing.T) {
 		{"claude-code", enable, "--protocol=slim"},
 		{"claude-code", enable, "--allow-memory-writes"},
 		{"claude-code", enable, "--wrong"},
+		{"claude-code", extended},
+		{"claude-code", "--native-windows-prompt=disable", extended},
+		{"claude-code", enable, "--windows-pretooluse"},
+		{"claude-code", enable, "--windows-pretooluse=invalid"},
+		{"claude-code", enable, extended, extended},
 	} {
 		calls = 0
 		withArgs(t, append([]string{"engram", "setup"}, args...)...)
@@ -81,6 +87,24 @@ func TestCmdSetupNativePromptRejectsConflictingOptions(t *testing.T) {
 		if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "engram setup claude-code --native-windows-prompt=enable|disable") {
 			t.Fatalf("args=%v: expected validation error, panic=%v stderr=%q", args, recovered, stderr)
 		}
+	}
+}
+
+func TestCmdSetupNativePromptWithExtendedGuardDispatch(t *testing.T) {
+	stubRuntimeHooks(t)
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	oldSetter := setupSetClaudeWindowsExtendedGuard
+	t.Cleanup(func() { setupSetClaudeWindowsExtendedGuard = oldSetter })
+	calls := 0
+	setupSetClaudeWindowsExtendedGuard = func() error {
+		calls++
+		return nil
+	}
+	withArgs(t, "engram", "setup", "claude-code", "--windows-pretooluse=extended", "--native-windows-prompt=enable")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+	if calls != 1 || recovered != nil || stderr != "" || !strings.Contains(stdout, "extended PreToolUse deadline enabled") {
+		t.Fatalf("extended guard setup = (%d calls, %q, %q, %v)", calls, stdout, stderr, recovered)
 	}
 }
 

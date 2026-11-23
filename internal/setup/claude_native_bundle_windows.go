@@ -102,12 +102,19 @@ func (b claudeBundle) verify(root string, githubCheckout bool) error {
 }
 
 func (b claudeBundle) stage(root, pin string) (stagedClaudeBundle, error) {
+	return b.stageWithGuardBudget(root, pin, false)
+}
+
+func (b claudeBundle) stageWithGuardBudget(root, pin string, extendedGuard bool) (stagedClaudeBundle, error) {
 	files := append(claudeBundle(nil), b...)
 	hash := sha256.New()
 	for _, file := range b {
 		fmt.Fprintf(hash, "%s\x00%x\n", file.path, sha256.Sum256(file.data))
 	}
 	fmt.Fprintf(hash, "engram-managed-claude-v1\x00%s", pin)
+	if extendedGuard {
+		_, _ = hash.Write([]byte("\x00extended-pretooluse-v1"))
+	}
 	id := hex.EncodeToString(hash.Sum(nil))
 	bundle := stagedClaudeBundle{
 		files: files, pin: pin, source: "./bundles/" + id,
@@ -129,7 +136,7 @@ func (b claudeBundle) stage(root, pin string) (stagedClaudeBundle, error) {
 			manifest["version"], _ = json.Marshal(bundle.version)
 			files[index].data, _ = json.MarshalIndent(manifest, "", "  ")
 		case claudeHooksPath:
-			hooks, err := claudePromptVariant(file.data, pin)
+			hooks, err := claudePromptVariant(file.data, pin, extendedGuard)
 			if err != nil {
 				return bundle, err
 			}
@@ -172,7 +179,7 @@ func (b claudeBundle) stage(root, pin string) (stagedClaudeBundle, error) {
 	return bundle, files.verify(bundle.folder, false)
 }
 
-func claudePromptVariant(data []byte, pin string) ([]byte, error) {
+func claudePromptVariant(data []byte, pin string, extendedGuard bool) ([]byte, error) {
 	var manifest map[string]json.RawMessage
 	var events map[string]json.RawMessage
 	var groups []map[string]json.RawMessage
@@ -189,14 +196,47 @@ func claudePromptVariant(data []byte, pin string) ([]byte, error) {
 		return nil, errors.New("unexpected bundled Engram Bash prompt command")
 	}
 	if pin == "" {
+		if extendedGuard {
+			return nil, errors.New("extended Claude PreToolUse requires a pinned Engram core")
+		}
 		return data, nil
 	}
 	hooks[0]["command"], _ = json.Marshal(pin)
 	hooks[0]["args"], _ = json.Marshal([]string{"hook", claudeNativePromptHook})
 	groups[0]["hooks"], _ = json.Marshal(hooks)
 	events["UserPromptSubmit"], _ = json.Marshal(groups)
+	if extendedGuard {
+		if err := extendClaudePreToolUse(events, pin); err != nil {
+			return nil, err
+		}
+	}
 	manifest["hooks"], _ = json.Marshal(events)
 	return json.MarshalIndent(manifest, "", "  ")
+}
+
+func extendClaudePreToolUse(events map[string]json.RawMessage, pin string) error {
+	var groups []map[string]json.RawMessage
+	var hooks []map[string]json.RawMessage
+	if json.Unmarshal(events["PreToolUse"], &groups) != nil || len(groups) != 1 ||
+		json.Unmarshal(groups[0]["hooks"], &hooks) != nil || len(hooks) != 1 {
+		return errors.New("bundled Engram plugin must have one PreToolUse hook")
+	}
+	hook := hooks[0]
+	var kind, command, failure string
+	var args []string
+	if json.Unmarshal(hook["type"], &kind) != nil || kind != "command" ||
+		json.Unmarshal(hook["command"], &command) != nil || command != "engram" ||
+		json.Unmarshal(hook["args"], &args) != nil || len(args) != 2 ||
+		args[0] != "hook" || args[1] != "claude-pre-tool-use" ||
+		json.Unmarshal(hook["onFailure"], &failure) != nil || failure != "block" {
+		return errors.New("unexpected bundled Engram PreToolUse command")
+	}
+	hook["command"], _ = json.Marshal(pin)
+	hook["args"], _ = json.Marshal(append(args, ClaudeWindowsExtendedGuardArg))
+	hook["timeout"] = json.RawMessage("10")
+	groups[0]["hooks"], _ = json.Marshal(hooks)
+	events["PreToolUse"], _ = json.Marshal(groups)
+	return nil
 }
 
 func (b stagedClaudeBundle) publish(root string) error {

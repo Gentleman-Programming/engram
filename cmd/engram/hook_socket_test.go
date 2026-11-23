@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -72,7 +73,7 @@ func TestNativeHooksSocket(t *testing.T) {
 		}
 	})
 	t.Run("claude", func(t *testing.T) {
-		if _, err := confirmHookSession("host", "/work", true); err != nil {
+		if _, err := confirmHookSessionWithin("host", "/work", true, runtime.GOOS, hookSessionConfirmationBudget()); err != nil {
 			t.Fatal(err)
 		}
 	})
