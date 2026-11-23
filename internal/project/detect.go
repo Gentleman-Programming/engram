@@ -686,19 +686,10 @@ func scanChildrenContext(ctx context.Context, dir string) (repos []string, timed
 			return repos, false
 		}
 		entry := entries[0]
-		if !entry.IsDir() {
+		if !isProjectChildDirectory(entry) {
 			continue
 		}
-		name := entry.Name()
-		// Skip hidden directories (prefix ".").
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		// Skip known noise directories.
-		if noiseSet[name] {
-			continue
-		}
-		childPath := filepath.Join(dir, name)
+		childPath := filepath.Join(dir, entry.Name())
 		// Check if this child is a git repo (has a .git entry).
 		gitPath := filepath.Join(childPath, ".git")
 		if _, err := os.Stat(gitPath); err == nil {
@@ -710,6 +701,51 @@ func scanChildrenContext(ctx context.Context, dir string) (repos []string, timed
 			if len(repos) > 1 {
 				return repos, false
 			}
+		}
+	}
+}
+
+func isProjectChildDirectory(entry os.DirEntry) bool {
+	return entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") && !noiseSet[entry.Name()]
+}
+
+// AmbiguousGitChildProjectCollisions checks the requested storage label after
+// discovery already found an ambiguous parent. Discovery stops at two roots
+// for ordinary callers. A write may need to account for an unlisted sibling
+// with the same normalized name, so inspect Git metadata only for names
+// that could collide with the requested label.
+func AmbiguousGitChildProjectCollisions(dir, normalized string) ([]string, error) {
+	parent, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = parent.Close() }()
+
+	var colliding []string
+	for {
+		entries, err := parent.ReadDir(32)
+		for _, entry := range entries {
+			if !isProjectChildDirectory(entry) {
+				continue
+			}
+			candidate := normalizeAvailableProject(entry.Name())
+			if CanonicalizeProjectName(candidate) != normalized {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(dir, entry.Name(), ".git")); err != nil {
+				continue
+			}
+			colliding = append(colliding, candidate)
+			if len(colliding) == 2 {
+				slices.Sort(colliding)
+				return colliding, nil
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 }

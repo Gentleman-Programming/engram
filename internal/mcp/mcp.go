@@ -3178,12 +3178,8 @@ func resolveWriteProjectWithChoiceAtDirectory(s *store.Store, projectChoice, rea
 			AvailableProjects: res.AvailableProjects,
 		}
 	}
-	if normalized, colliding := normalizedProjectCollisions(res.AvailableProjects, choice); len(colliding) > 1 {
-		return res, &normalizedProjectCollisionError{
-			Name:              choice,
-			Normalized:        normalized,
-			CollidingProjects: colliding,
-		}
+	if err := ambiguousProjectChoiceCollision(res, choice); err != nil {
+		return res, err
 	}
 	provided, valid := false, false
 	if validateToken != nil {
@@ -3294,12 +3290,8 @@ func resolveSaveWriteProjectForSession(s *store.Store, projectChoice string, exp
 				return cwdRes, cwdErr
 			}
 			if errors.Is(cwdErr, projectpkg.ErrAmbiguousProject) {
-				if normalized, colliding := normalizedProjectCollisions(cwdRes.AvailableProjects, trimmedProjectChoice); len(colliding) > 1 {
-					return cwdRes, &normalizedProjectCollisionError{
-						Name:              trimmedProjectChoice,
-						Normalized:        normalized,
-						CollidingProjects: colliding,
-					}
+				if err := ambiguousProjectChoiceCollision(cwdRes, trimmedProjectChoice); err != nil {
+					return cwdRes, err
 				}
 			} else {
 				return cwdRes, cwdErr
@@ -3519,6 +3511,28 @@ func containsProjectChoice(available []string, choice string) bool {
 		}
 	}
 	return false
+}
+
+func ambiguousProjectChoiceCollision(res projectpkg.DetectionResult, choice string) error {
+	normalized, colliding := normalizedProjectCollisions(res.AvailableProjects, choice)
+	if normalized == "" {
+		return nil
+	}
+	if len(colliding) < 2 {
+		var err error
+		colliding, err = projectpkg.AmbiguousGitChildProjectCollisions(res.Path, normalized)
+		if err != nil {
+			return fmt.Errorf("%w: verify colliding Git checkout names: %v", projectpkg.ErrAmbiguousProject, err)
+		}
+	}
+	if len(colliding) > 1 {
+		return &normalizedProjectCollisionError{
+			Name:              choice,
+			Normalized:        normalized,
+			CollidingProjects: colliding,
+		}
+	}
+	return nil
 }
 
 func normalizedProjectCollisions(candidates []string, choice string) (string, []string) {
