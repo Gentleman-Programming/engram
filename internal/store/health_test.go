@@ -6,7 +6,37 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestCheckReadinessConnectionIsReadOnlyAndCancellable(t *testing.T) {
+	s, err := New(Config{DataDir: filepath.Join(t.TempDir(), "store # path")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err = s.CheckReadiness(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	db := s.readinessDB
+	if _, err = db.ExecContext(t.Context(), "CREATE TABLE invalid_readiness_write (id INTEGER)"); err == nil {
+		t.Fatal("readiness connection accepted a write")
+	}
+	held, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	before := db.Stats().WaitCount
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	if err = s.CheckReadiness(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("readiness waiting on its own pool: %v", err)
+	}
+	if db.Stats().WaitCount <= before {
+		t.Fatal("readiness did not enter its own pool wait")
+	}
+}
 
 func TestCheckReadinessCoreSchema(t *testing.T) {
 	for _, broken := range []string{"", "sessions", "observations", "user_prompts", "project", "created_at", "deleted_at"} {

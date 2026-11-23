@@ -930,6 +930,7 @@ type Store struct {
 	instanceID              string
 	generation              *databaseGeneration
 	hooks                   storeHooks
+	readinessDB             *sql.DB
 
 	repairMu        sync.Mutex
 	repairDone      bool
@@ -1197,6 +1198,14 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The Store owns both pools for its entire lifetime. The readiness pool
+	// opens its single physical connection only when it receives a query.
+	readinessDB, err := openGenerationDB(readinessDSN(dbPath), generation, true)
+	if err != nil {
+		return nil, fmt.Errorf("engram: create readiness pool: %w", err)
+	}
+	readinessDB.SetMaxOpenConns(1)
+	s.readinessDB = readinessDB
 	succeeded = true
 	trace.Mark("store-ready")
 	return s, nil
@@ -1204,10 +1213,15 @@ func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bo
 
 func (s *Store) Close() error {
 	s.compatibilityClosed.Store(true)
+	if s.readinessDB != nil {
+		return errors.Join(s.readinessDB.Close(), s.db.Close())
+	}
 	return s.db.Close()
 }
 
 // ─── Migrations ──────────────────────────────────────────────────────────────
+
+const sqliteBusyTimeout = "busy_timeout(5000)"
 
 // storeDSN builds the modernc.org/sqlite DSN for dbPath with the session
 // pragmas encoded as _pragma query parameters. The driver applies these to
@@ -1223,7 +1237,7 @@ func storeDSN(dbPath string) string {
 	q := url.Values{}
 	q.Set("_txlock", "immediate")
 	for _, p := range []string{
-		"busy_timeout(5000)",
+		sqliteBusyTimeout,
 		"journal_mode(WAL)",
 		// Leave room for SQLite's default 1,000-frame checkpoint interval
 		// at the largest page size. SQLite applies the limit on safe reuse
