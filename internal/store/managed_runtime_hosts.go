@@ -43,7 +43,7 @@ func (s *Store) ListManagedRuntimeHosts(scope ManagedRuntimeScope) (int64, []Man
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var host ManagedRuntimeHost
 			if err := rows.Scan(&host.PID, &host.Start, &host.Domain); err != nil {
