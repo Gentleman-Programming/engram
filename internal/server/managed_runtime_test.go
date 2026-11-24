@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -10,8 +11,63 @@ import (
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/hostbind"
+	"github.com/Gentleman-Programming/engram/v3/internal/project"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
+
+func TestManagedRuntimeScopeInventory(t *testing.T) {
+	st := newServerTestStore(t)
+	const token = "scope-inventory-owner"
+	const path = "/internal/managed-runtime/scopes"
+	shared, owned := New(st, 0), New(st, 0)
+	owned.SetSessionOwnedToken(token)
+	get := func(s *Server, bearer, target string, want int) []byte {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("GET %s got %d %s, want %d", target, w.Code, w.Body, want)
+		}
+		return w.Body.Bytes()
+	}
+	get(shared, token, path, http.StatusNotFound)
+	get(owned, "wrong-token", path, http.StatusUnauthorized)
+	get(owned, token, path+"?project=other", http.StatusBadRequest)
+	if body := get(owned, token, path, http.StatusOK); strings.TrimSpace(string(body)) != `{"scopes":[]}` {
+		t.Fatalf("fresh inventory must return an empty array: %s", body)
+	}
+
+	dir := project.RuntimeWorktreeDirectory(t.TempDir())
+	scope := store.ManagedRuntimeScope{Root: "root", Project: "project", Directory: dir, Mode: store.SessionOwnershipProjectOwned}
+	host := store.ManagedRuntimeHost{PID: 123, Start: "fixture-start", Domain: "fixture-domain"}
+	effective, generation, err := st.AttachManagedRuntime(scope, host, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope.EffectiveID = effective
+	var got struct {
+		Scopes []map[string]string `json:"scopes"`
+	}
+	body := get(owned, token, path, http.StatusOK)
+	want := map[string]string{"root": scope.Root, "effective_id": scope.EffectiveID,
+		"project": scope.Project, "directory": dir, "ownership_mode": scope.Mode}
+	if err := json.Unmarshal(body, &got); err != nil || len(got.Scopes) != 1 || !maps.Equal(got.Scopes[0], want) {
+		t.Fatalf("scope inventory response: %s (%v)", body, err)
+	}
+	get(shared, token, path, http.StatusNotFound)
+	get(owned, "wrong-token", path, http.StatusUnauthorized)
+	if err := st.RetireManagedRuntimeHost(scope, generation, host); err != nil {
+		t.Fatal(err)
+	}
+	if closed, err := st.CloseManagedRuntime(scope, generation); !closed || err != nil {
+		t.Fatalf("close managed scope: %v %v", closed, err)
+	}
+	if body := get(owned, token, path, http.StatusOK); strings.TrimSpace(string(body)) != `{"scopes":[]}` {
+		t.Fatalf("closed inventory must return an empty array: %s", body)
+	}
+}
 
 func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	st := newServerTestStore(t)

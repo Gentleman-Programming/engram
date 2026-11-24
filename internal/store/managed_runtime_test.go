@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -710,6 +711,18 @@ func TestManagedRuntimeContinuationWaitsForEndedHostRetirement(t *testing.T) {
 
 func TestManagedRuntimeKeepsPriorContinuationAdmissions(t *testing.T) {
 	st := newTestStore(t)
+	checkInventory := func(want ...ManagedRuntimeScope) {
+		t.Helper()
+		got, err := st.ListManagedRuntimeScopes(t.Context())
+		if err != nil || got == nil || !slices.Equal(got, want) {
+			t.Fatalf("managed scope inventory: got %+v, want %+v (%v)", got, want, err)
+		}
+	}
+	checkInventory()
+	var tables int
+	if err := st.db.QueryRow("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'managed_runtime_%'").Scan(&tables); err != nil || tables != 0 {
+		t.Fatalf("inventory initialized the optional catalog: %d %v", tables, err)
+	}
 	scope := ManagedRuntimeScope{Root: "root", EffectiveID: "root", Project: "project",
 		Directory: project.RuntimeWorktreeDirectory(t.TempDir()), Mode: SessionOwnershipProjectOwned}
 	_, oldGeneration, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
@@ -723,6 +736,8 @@ func TestManagedRuntimeKeepsPriorContinuationAdmissions(t *testing.T) {
 	if err := st.EndSession(scope.EffectiveID, "explicit close"); err != nil {
 		t.Fatal(err)
 	}
+	// The journal still needs to reconcile hosts after an external end.
+	checkInventory(scope)
 	if err := st.RetireManagedRuntimeHost(scope, oldGeneration, managedTestHostA); err != nil {
 		t.Fatal(err)
 	}
@@ -740,9 +755,17 @@ func TestManagedRuntimeKeepsPriorContinuationAdmissions(t *testing.T) {
 		t.Fatalf("retry of an already admitted host changed: %q generation=%d err=%v", id, gen, err)
 	}
 	newPeer := ManagedRuntimeHost{PID: 22, Start: "birth-c", Domain: "local-domain"}
-	if id, gen, err := st.AttachManagedRuntime(next, newPeer, true); err != nil || id != effective || gen <= generation {
-		t.Fatalf("joining the current continuation changed: %q generation=%d err=%v", id, gen, err)
+	id, peerGeneration, err := st.AttachManagedRuntime(next, newPeer, true)
+	if err != nil || id != effective || peerGeneration <= generation {
+		t.Fatalf("joining the current continuation changed: %q generation=%d err=%v", id, peerGeneration, err)
 	}
+	next.EffectiveID = effective
+	other := ManagedRuntimeScope{Root: "other", EffectiveID: "other", Project: "project",
+		Directory: scope.Directory, Mode: scope.Mode}
+	if _, _, err := st.AttachManagedRuntime(other, managedTestHostA, false); err != nil {
+		t.Fatal(err)
+	}
+	checkInventory(other, next)
 	if _, _, err := st.ListManagedRuntimeHosts(scope); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("current host lookup accepted a historical binding: %v", err)
 	}
@@ -771,6 +794,25 @@ func TestManagedRuntimeKeepsPriorContinuationAdmissions(t *testing.T) {
 	if err := st.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM managed_runtime_writes
 		WHERE operation_id='old-pending' AND effective_id='root' AND confirmed=0 AND observation_payload IS NOT NULL)`).Scan(&pending); err != nil || !pending {
 		t.Fatalf("historical retirement changed the old pending write: %v %v", pending, err)
+	}
+	for _, host := range []ManagedRuntimeHost{managedTestHostB, newPeer} {
+		if err := st.RetireManagedRuntimeHost(next, peerGeneration, host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if closed, err := st.CloseManagedRuntime(next, peerGeneration); !closed || err != nil {
+		t.Fatalf("close current continuation: %v %v", closed, err)
+	}
+	checkInventory(other)
+}
+
+func TestManagedRuntimeScopeInventoryRejectsIncompleteCatalog(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.db.Exec("CREATE TABLE managed_runtime_generations (generation INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.ListManagedRuntimeScopes(t.Context()); got != nil || !errors.Is(err, errManagedRuntimeSchemaIncomplete) {
+		t.Fatalf("partial catalog looked like an empty inventory: %+v %v", got, err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
@@ -23,6 +24,41 @@ func (scope ManagedRuntimeScope) latestOpenGeneration(tx *sql.Tx, generation *in
 		WHERE root=? AND project=? AND directory=? AND mode=? AND effective_id=? AND closed=0
 		AND generation=(SELECT max(generation) FROM managed_runtime_generations WHERE root=?)`,
 		scope.Root, scope.Project, scope.Directory, scope.Mode, scope.EffectiveID, scope.Root).Scan(generation)
+}
+
+// ListManagedRuntimeScopes enumerates the current open binding for each root.
+// An explicit session end leaves that binding open for host reconciliation.
+func (s *Store) ListManagedRuntimeScopes(ctx context.Context) ([]ManagedRuntimeScope, error) {
+	scopes := make([]ManagedRuntimeScope, 0)
+	err := s.withReadTxContext(ctx, func(tx *sql.Tx) error {
+		tables, err := managedRuntimeTableCount(tx)
+		if err != nil || tables == 0 {
+			return err
+		}
+		if tables != 3 {
+			return errManagedRuntimeSchemaIncomplete
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT root, effective_id, project, directory, mode
+			FROM managed_runtime_generations AS current
+			WHERE closed=0 AND generation=(SELECT max(generation) FROM managed_runtime_generations WHERE root=current.root)
+			ORDER BY root`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var scope ManagedRuntimeScope
+			if err := rows.Scan(&scope.Root, &scope.EffectiveID, &scope.Project, &scope.Directory, &scope.Mode); err != nil {
+				return err
+			}
+			scopes = append(scopes, scope)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return scopes, nil
 }
 
 func (scope ManagedRuntimeScope) latestOpenBindingGeneration(tx *sql.Tx, generation *int64) error {
