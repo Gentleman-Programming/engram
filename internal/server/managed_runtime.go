@@ -12,6 +12,23 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
+func (s *Server) handleManagedRuntimeScopes(w http.ResponseWriter, r *http.Request) {
+	if authorized, _ := r.Context().Value(ownedAuthKey{}).(bool); !authorized {
+		http.NotFound(w, r)
+		return
+	}
+	if r.URL.RawQuery != "" {
+		jsonError(w, http.StatusBadRequest, "managed runtime scope enumeration takes no arguments")
+		return
+	}
+	scopes, err := s.store.ListManagedRuntimeScopes(r.Context())
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "managed runtime enumeration failed")
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"scopes": scopes})
+}
+
 func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 	// Only the private Core owner uses these routes. The supervisor keeps its
 	// owner bearer out of the managed host and separately verifies process exit.

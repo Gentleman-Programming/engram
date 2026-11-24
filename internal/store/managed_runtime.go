@@ -62,7 +62,11 @@ var (
 // ManagedRuntimeScope is the exact runtime identity expected by an owned
 // supervisor.
 type ManagedRuntimeScope struct {
-	Root, EffectiveID, Project, Directory, Mode string
+	Root        string `json:"root"`
+	EffectiveID string `json:"effective_id,omitempty"`
+	Project     string `json:"project"`
+	Directory   string `json:"directory"`
+	Mode        string `json:"ownership_mode"`
 }
 
 func (scope ManagedRuntimeScope) normalized() (ManagedRuntimeScope, error) {
