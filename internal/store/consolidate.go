@@ -50,6 +50,10 @@ var (
 // always rides the content, independent of the column provenance).
 const consolidatedFromMarker = "## consolidated_from"
 
+// ConsolidatedFromMarker exposes the provenance footer marker so callers that
+// draft survivor content (engram dream) can reject drafts that forge it.
+const ConsolidatedFromMarker = consolidatedFromMarker
+
 // consolidateFingerprintVersion namespaces the plan fingerprint format so a
 // future formula change cannot silently confirm against old fingerprints.
 const consolidateFingerprintVersion = "consolidate:v2"
