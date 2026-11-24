@@ -705,3 +705,36 @@ func TestManagedRuntimeContinuationWaitsForEndedHostRetirement(t *testing.T) {
 		})
 	}
 }
+
+func TestManagedRuntimeKeepsPriorContinuationAdmissions(t *testing.T) {
+	st := newTestStore(t)
+	scope := ManagedRuntimeScope{Root: "root", EffectiveID: "root", Project: "project",
+		Directory: project.RuntimeWorktreeDirectory(t.TempDir()), Mode: SessionOwnershipProjectOwned}
+	_, oldGeneration, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EndSession(scope.EffectiveID, "explicit close"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, oldGeneration, managedTestHostA); err != nil {
+		t.Fatal(err)
+	}
+	next := scope
+	next.EffectiveID = ""
+	effective, generation, err := st.AttachManagedRuntime(next, managedTestHostB, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Recreate a roster persisted before the earlier-host admission fence.
+	if _, err := st.db.Exec("UPDATE managed_runtime_hosts SET retired=0 WHERE root=? AND effective_id=?", scope.Root, scope.EffectiveID); err != nil {
+		t.Fatal(err)
+	}
+	if id, gen, err := st.AttachManagedRuntime(next, managedTestHostB, true); err != nil || id != effective || gen != generation {
+		t.Fatalf("retry of an already admitted host changed: %q generation=%d err=%v", id, gen, err)
+	}
+	newPeer := ManagedRuntimeHost{PID: 22, Start: "birth-c", Domain: "local-domain"}
+	if id, gen, err := st.AttachManagedRuntime(next, newPeer, true); err != nil || id != effective || gen <= generation {
+		t.Fatalf("joining the current continuation changed: %q generation=%d err=%v", id, gen, err)
+	}
+}

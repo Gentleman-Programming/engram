@@ -226,10 +226,6 @@ func (s *Store) admitManagedRuntimeTx(tx *sql.Tx, admission *managedRuntimeAdmis
 	if otherBinding {
 		return ErrManagedRuntimeGeneration
 	}
-	// Keep the old generation current until its hosts can be retired.
-	if previousHosts {
-		return ErrManagedRuntimeHostsRemain
-	}
 	var retired bool
 	err = tx.QueryRow(`SELECT retired FROM managed_runtime_hosts
 		WHERE root=? AND effective_id=? AND pid=? AND start=? AND domain=?`,
@@ -242,6 +238,17 @@ func (s *Store) admitManagedRuntimeTx(tx *sql.Tx, admission *managedRuntimeAdmis
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
+	}
+	// Only a new binding would strand hosts in the previous generation.
+	if previousHosts {
+		var current int64
+		err := scope.latestOpenGeneration(tx, &current)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrManagedRuntimeHostsRemain
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if _, err := s.execHook(tx, `INSERT INTO managed_runtime_hosts(root,effective_id,pid,start,domain)
 		VALUES (?,?,?,?,?)`, scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain); err != nil {
