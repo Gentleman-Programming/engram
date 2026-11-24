@@ -7,8 +7,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
@@ -79,17 +81,23 @@ func (r *defaultCloudRuntime) Start(startup *cloudserver.StartupListener) error 
 }
 
 var newCloudRuntime = func(ctx context.Context, cfg cloud.Config) (cloudServerRuntime, error) {
+	return newCloudRuntimeWithReceipt(ctx, cfg, cloudstore.NewProtectedStartupReceiptVerifier(cfg.StartupReceiptDir))
+}
+
+func newCloudRuntimeWithReceipt(ctx context.Context, cfg cloud.Config, verifier *cloudstore.StartupReceiptVerifier) (cloudServerRuntime, error) {
 	started := time.Now()
 	fmt.Fprintln(os.Stderr, "engram cloud startup: initializing PostgreSQL store and session index")
-	cs, err := cloudstore.NewContext(ctx, cfg)
+	allowedProjects := normalizeAllowedProjects(cfg.AllowedProjects)
+	cs, covered, err := cloudstore.NewRuntimeContext(ctx, cfg, allowedProjects, verifier)
 	if err != nil {
 		return nil, err
 	}
 	fmt.Fprintf(os.Stderr, "engram cloud startup: PostgreSQL store and session index initialized elapsed=%s\n", time.Since(started).Round(time.Millisecond))
-	allowedProjects := normalizeAllowedProjects(cfg.AllowedProjects)
-	if err := backfillAllowedProjectMutationChunks(ctx, cs, allowedProjects); err != nil {
-		_ = cs.Close()
-		return nil, err
+	if !covered {
+		if err := backfillAllowedProjectMutationChunks(ctx, cs, allowedProjects); err != nil {
+			_ = cs.Close()
+			return nil, err
+		}
 	}
 	token := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN"))
 	cs.SetDashboardAllowedProjects(allowedProjects)
@@ -274,13 +282,18 @@ func cmdCloud(cfg store.Config) {
 func cmdCloudRepair() {
 	if len(os.Args) < 4 || os.Args[3] == "--help" || os.Args[3] == "-h" || os.Args[3] == "help" {
 		fmt.Println("usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Println("       engram cloud repair prepare-startup-receipt")
 		fmt.Println("repairs existing cloud_mutations into compatible cloud_chunks without deleting remote data")
 		return
 	}
 	command := strings.TrimSpace(strings.ToLower(os.Args[3]))
+	if command == "prepare-startup-receipt" {
+		cmdCloudPrepareStartupReceipt(os.Args[4:])
+		return
+	}
 	if command != "materialize-mutations" {
 		fmt.Fprintf(os.Stderr, "unknown cloud repair command: %s\n", command)
-		fmt.Fprintln(os.Stderr, "supported cloud repair commands: materialize-mutations")
+		fmt.Fprintln(os.Stderr, "supported cloud repair commands: materialize-mutations, prepare-startup-receipt")
 		exitFunc(1)
 		return
 	}
@@ -317,6 +330,30 @@ func cmdCloudRepair() {
 		return
 	}
 	fmt.Println(string(encoded))
+}
+
+func cmdCloudPrepareStartupReceipt(args []string) {
+	const usage = "usage: engram cloud repair prepare-startup-receipt"
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Println(usage)
+		fmt.Println("Set ENGRAM_DATABASE_URL, ENGRAM_CLOUD_ALLOWED_PROJECTS and ENGRAM_CLOUD_STARTUP_RECEIPT_DIR.")
+		return
+	}
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		exitFunc(1)
+		return
+	}
+	if strings.TrimSpace(os.Getenv("ENGRAM_DATABASE_URL")) == "" {
+		fatal(fmt.Errorf("cloud startup receipt requires ENGRAM_DATABASE_URL"))
+		return
+	}
+	cfg := cloud.ConfigFromEnv()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := cloudstore.PrepareProtectedStartupReceipt(ctx, cfg, normalizeAllowedProjects(cfg.AllowedProjects)); err != nil {
+		fatal(err)
+	}
 }
 
 func cmdCloudUpgrade(cfg store.Config) {

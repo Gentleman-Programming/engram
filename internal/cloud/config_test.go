@@ -2,6 +2,17 @@ package cloud
 
 import "testing"
 
+func TestConfigFromEnvStartupReceiptDir(t *testing.T) {
+	t.Setenv("ENGRAM_CLOUD_STARTUP_RECEIPT_DIR", " ")
+	if got := ConfigFromEnv().StartupReceiptDir; got != "" {
+		t.Fatalf("blank configuration should disable receipt reuse, got %q", got)
+	}
+	t.Setenv("ENGRAM_CLOUD_STARTUP_RECEIPT_DIR", " /var/lib/engram/receipts ")
+	if got := ConfigFromEnv().StartupReceiptDir; got != "/var/lib/engram/receipts" {
+		t.Fatalf("receipt directory = %q", got)
+	}
+}
+
 func TestConfigFromEnvCloudHost(t *testing.T) {
 	t.Run("default bind host stays loopback", func(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_HOST", "")
