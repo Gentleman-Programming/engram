@@ -74,6 +74,7 @@ func TestServeOwnedRejectsBeforeStore(t *testing.T) {
 		{name: "blank env port", env: "ENGRAM_PORT="},
 		{name: "env socket", env: "ENGRAM_SOCKET=x"},
 		{name: "URL", env: "ENGRAM_URL=http://127.0.0.1:7437"},
+		{name: "invalid inherited descriptor", env: "ENGRAM_OWNED_LISTENER_FD=7"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd, dir := ownedCommand(t, tc.args...)
@@ -233,6 +234,9 @@ func TestServeOwnedReadinessAuthAndEOF(t *testing.T) {
 	}
 	if ready.Protocol != "engram-session-owned-v1" || ready.PID != cmd.Process.Pid || len(ready.InstanceID) != 32 || !strings.HasPrefix(ready.Endpoint, "http://127.0.0.1:") || len(line) > 1024 || strings.Contains(line, strings.Repeat("a", 64)) {
 		t.Fatalf("unsafe readiness: %s", line)
+	}
+	if strings.Contains(line, "exclusive_store") {
+		t.Fatalf("plain session-owned Core claimed a store lease: %s", line)
 	}
 	client := http.Client{Timeout: 2 * time.Second}
 	for _, path := range []string{"/health", "/stats", "/sessions", "/unknown"} {

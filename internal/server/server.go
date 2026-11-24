@@ -126,6 +126,11 @@ func New(s *store.Store, port int) *Server {
 // Configure before Start; the private token is immutable for this child's lifetime.
 func (s *Server) SetSessionOwnedToken(token string) { s.sessionOwnedToken = token }
 
+// UseSessionOwnedListener supplies the validated listener before Start.
+func (s *Server) UseSessionOwnedListener(listener net.Listener) {
+	s.listen = func(string, string) (net.Listener, error) { return listener, nil }
+}
+
 // SetOnReady publishes the bound listener before serving, never before bind succeeds.
 func (s *Server) SetOnReady(fn func(net.Addr) error) { s.onReady = fn }
 
@@ -335,7 +340,7 @@ func (s *Server) Start() error {
 			return err
 		}
 	}
-	log.Printf("[engram] HTTP server listening on %s", addr)
+	log.Printf("[engram] HTTP server listening on %s", ln.Addr())
 	err = serveFn(ln, s.Handler())
 	if errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed) {
 		return nil

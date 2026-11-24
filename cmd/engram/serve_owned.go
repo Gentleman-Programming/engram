@@ -7,9 +7,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 )
 
 const sessionOwnedProtocol = "engram-session-owned-v1"
+const ownedListenerEnv = "ENGRAM_OWNED_LISTENER_FD"
 
 // Presence is intentional: even a blank explicit transport is a conflict.
 func validateSessionOwned(args []string) (bool, error) {
@@ -21,6 +23,9 @@ func validateSessionOwned(args []string) (bool, error) {
 	}
 	if !owned {
 		return false, nil
+	}
+	if fd, present := os.LookupEnv(ownedListenerEnv); present && (runtime.GOOS != "linux" || fd != "3") {
+		return true, fmt.Errorf("session-owned listener inheritance requires Linux descriptor 3")
 	}
 	for _, key := range []string{"ENGRAM_URL", "ENGRAM_PORT", "ENGRAM_SOCKET"} {
 		if _, ok := os.LookupEnv(key); ok {
@@ -50,12 +55,15 @@ func watchOwnedParent(input io.Reader, cancel func()) <-chan struct{} {
 	return done
 }
 
-func emitOwnedReadiness(addr net.Addr, instanceID string) error {
-	record := struct {
-		Protocol   string `json:"protocol"`
-		Endpoint   string `json:"endpoint"`
-		PID        int    `json:"pid"`
-		InstanceID string `json:"instance_id"`
-	}{sessionOwnedProtocol, "http://" + addr.String(), os.Getpid(), instanceID}
+type ownedReadiness struct {
+	Protocol       string `json:"protocol"`
+	Endpoint       string `json:"endpoint"`
+	PID            int    `json:"pid"`
+	InstanceID     string `json:"instance_id"`
+	ExclusiveStore bool   `json:"exclusive_store,omitempty"`
+}
+
+func emitOwnedReadiness(addr net.Addr, instanceID string, exclusiveStore bool) error {
+	record := ownedReadiness{sessionOwnedProtocol, "http://" + addr.String(), os.Getpid(), instanceID, exclusiveStore}
 	return json.NewEncoder(os.Stdout).Encode(record)
 }
