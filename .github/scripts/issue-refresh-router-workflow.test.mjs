@@ -79,12 +79,13 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // #2240 disables only Windows test-result caching; build caches and issue guards stay exact.
   // #2352 changes only current Go toolchain pins/guards to security patch 1.26.11.
   // #2355 adds only the two-line dependency/cancellation preamble to three full suites.
+  // #2485 updates only the Lint action pin to the native Node.js 24 release.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '57fecdfa8eda8c3495c68068f8358da8bf74fe362ef569b50517e2a4dab9cd58',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': '2095b687e2d6ee755164140969e9acf7bd731b1df62a88de0f158a459513f687',
+    '.github/workflows/ci.yml': '46c3407f989af94942439254931a261d995ddc28fb9c73cc8c21e217c17308b0',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);
