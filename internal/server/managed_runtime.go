@@ -53,6 +53,8 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := store.ManagedRuntimeScope{Root: body.Root, EffectiveID: body.EffectiveID, Project: body.Project, Directory: body.Directory, Mode: body.Mode}
 	var observation store.AddObservationResult
+	var recovered int
+	var moreWrites bool
 	var err error
 	if observation := body.Observation; observation != nil {
 		if !save && r.URL.Path != "/internal/managed-runtime/write-intent" {
@@ -136,6 +138,15 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		if err == nil && !observation.Replayed {
 			s.notifyWrite()
 		}
+	case "/internal/managed-runtime/recover-writes":
+		if body.Generation <= 0 || body.OperationID != "" {
+			jsonError(w, http.StatusBadRequest, "write recovery requires the current generation")
+			return
+		}
+		recovered, moreWrites, err = s.store.RecoverManagedRuntimeObservations(scope, body.Generation)
+		if recovered > 0 {
+			s.notifyWrite()
+		}
 	case "/internal/managed-runtime/close":
 		if body.Generation <= 0 || body.OperationID != "" {
 			jsonError(w, http.StatusBadRequest, "close requires the terminal generation")
@@ -171,6 +182,11 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 	if save {
 		jsonResponse(w, http.StatusCreated, map[string]any{"id": observation.ID, "status": "saved", "replayed": observation.Replayed})
+		return
+	}
+	if r.URL.Path == "/internal/managed-runtime/recover-writes" {
+		jsonResponse(w, http.StatusOK, map[string]any{"effective_id": scope.EffectiveID, "generation": body.Generation,
+			"recovered": recovered, "more": moreWrites})
 		return
 	}
 	response := map[string]any{"effective_id": scope.EffectiveID, "generation": body.Generation}

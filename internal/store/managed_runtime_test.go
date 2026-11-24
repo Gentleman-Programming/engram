@@ -1,8 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,6 +73,167 @@ func TestManagedRuntimeObservationIntentPinsCanonicalPayloadAndCatalog(t *testin
 	var retained int
 	if err := st.db.QueryRow("SELECT count(*) FROM managed_runtime_writes WHERE observation_payload IS NOT NULL").Scan(&retained); err != nil || retained != 0 {
 		t.Fatalf("confirmed writes retained staged payloads: %d, %v", retained, err)
+	}
+}
+
+func TestManagedRuntimeRecoveryPreservesAdmissionOrderAndPreparedContent(t *testing.T) {
+	cfg := FallbackConfig(t.TempDir())
+	cfg.MaxObservationLength = 4
+	st, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	scope := ManagedRuntimeScope{
+		Root: "root", EffectiveID: "root", Project: "project",
+		Directory: project.RuntimeWorktreeDirectory(t.TempDir()), Mode: SessionOwnershipProjectOwned,
+	}
+	_, generation, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := AddObservationParams{Title: "First", Content: "abc☃<private>one-secret</private>", TopicKey: "topic"}
+	second := AddObservationParams{Title: "Second", Content: "def☃<private>two-secret</private>", TopicKey: "topic"}
+	if err := st.RecordManagedRuntimeObservation(scope, generation, "first", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordManagedRuntimeObservation(scope, generation, "second", second); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordManagedRuntimeWrite(scope, generation, "opaque"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordManagedRuntimeObservation(scope, generation, "blocked", second); !errors.Is(err, ErrManagedRuntimeWriteUnresolved) {
+		t.Fatalf("accepted a new write behind an opaque pending intent: %v", err)
+	}
+	other := scope
+	other.Root, other.EffectiveID = "other", "other"
+	_, otherGeneration, err := st.AttachManagedRuntime(other, managedTestHostB, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated := AddObservationParams{OperationID: "unrelated", Title: "Unrelated", Content: "other data"}
+	if err := st.RecordManagedRuntimeObservation(other, otherGeneration, unrelated.OperationID, unrelated); err != nil {
+		t.Fatalf("opaque intent affected a different cohort: %v", err)
+	}
+	if _, err := st.SaveManagedRuntimeObservation(other, otherGeneration, unrelated); err != nil {
+		t.Fatal(err)
+	}
+	var payload []byte
+	if err := st.db.QueryRow("SELECT observation_payload FROM managed_runtime_writes WHERE operation_id='second'").Scan(&payload); err != nil ||
+		bytes.Contains(payload, []byte("two-secret")) {
+		t.Fatalf("pending row contains unredacted content or could not be read: %v", err)
+	}
+	second.OperationID = "second"
+	if _, err := st.SaveManagedRuntimeObservation(scope, generation, second); !errors.Is(err, ErrManagedRuntimeWriteUnresolved) {
+		t.Fatalf("later write overtook an earlier pending save: %v", err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, generation, managedTestHostA); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxObservationLength = 2 // Recovery uses the already prepared bytes.
+	st, err = New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`CREATE TRIGGER fixture_fail_confirm BEFORE UPDATE OF confirmed ON managed_runtime_writes
+		BEGIN SELECT RAISE(ABORT,'forced recovery confirmation failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if applied, _, err := st.RecoverManagedRuntimeObservations(scope, generation); applied != 0 ||
+		err == nil || !strings.Contains(err.Error(), "forced recovery confirmation failure") {
+		t.Fatalf("failed recovery: applied=%d err=%v", applied, err)
+	}
+	if id, err := st.GetObservationSaveResult("first"); err != nil || id != 0 {
+		t.Fatalf("failed recovery left a committed receipt: id=%d err=%v", id, err)
+	}
+	if _, err := st.db.Exec("DROP TRIGGER fixture_fail_confirm"); err != nil {
+		t.Fatal(err)
+	}
+	if applied, more, err := st.RecoverManagedRuntimeObservations(scope, generation); err != nil || applied != 2 || more {
+		t.Fatalf("recovery: applied=%d more=%v err=%v", applied, more, err)
+	}
+	id, err := st.GetObservationSaveResult("second")
+	if err != nil || id <= 0 {
+		t.Fatalf("missing committed result: %d %v", id, err)
+	}
+	row, err := st.GetObservation(id)
+	if err != nil || row.Title != second.Title || row.Content != "def"+observationTruncationMarker {
+		t.Fatalf("recovery changed order or re-truncated the prepared payload: %+v %v", row, err)
+	}
+	var retained int
+	if err := st.db.QueryRow("SELECT count(*) FROM managed_runtime_writes WHERE observation_payload IS NOT NULL").Scan(&retained); err != nil || retained != 0 {
+		t.Fatalf("committed receipts retained %d staged payloads: %v", retained, err)
+	}
+	if _, err := st.CloseManagedRuntime(scope, generation); !errors.Is(err, ErrManagedRuntimeWriteUnresolved) {
+		t.Fatalf("automatic recovery cleared an opaque pending intent: %v", err)
+	}
+	if _, err := st.SaveManagedRuntimeObservation(scope, generation, AddObservationParams{
+		OperationID: "opaque", Title: "Explicit recovery", Content: "text",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := st.CloseManagedRuntime(scope, generation); err != nil || !applied {
+		t.Fatalf("explicit recovery did not release the close fence: applied=%v err=%v", applied, err)
+	}
+}
+
+func TestManagedRuntimeRecoveryBatchesAndCoalescesConcurrentDrains(t *testing.T) {
+	st := newTestStore(t)
+	scope := ManagedRuntimeScope{
+		Root: "root", EffectiveID: "root", Project: "project",
+		Directory: project.RuntimeWorktreeDirectory(t.TempDir()), Mode: SessionOwnershipProjectOwned,
+	}
+	_, generation, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := managedRuntimeRecoveryBatch + 1
+	for i := 1; i <= count; i++ {
+		id := fmt.Sprintf("save-%d", i)
+		params := AddObservationParams{Title: id, Content: id}
+		if err := st.RecordManagedRuntimeObservation(scope, generation, id, params); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if applied, more, err := st.RecoverManagedRuntimeObservations(scope, generation); err != nil || applied != count-1 || !more {
+		t.Fatalf("first batch = %d more=%v err=%v", applied, more, err)
+	}
+	last := fmt.Sprintf("save-%d", count)
+	if id, err := st.GetObservationSaveResult(last); err != nil || id != 0 {
+		t.Fatalf("last operation left the batch early: %d, %v", id, err)
+	}
+	type result struct {
+		applied int
+		more    bool
+		err     error
+	}
+	begin := make(chan struct{})
+	results := make(chan result, 2)
+	for range cap(results) {
+		go func() {
+			<-begin
+			applied, more, err := st.RecoverManagedRuntimeObservations(scope, generation)
+			results <- result{applied, more, err}
+		}()
+	}
+	close(begin)
+	var total int
+	for range cap(results) {
+		got := <-results
+		if got.err != nil || got.more {
+			t.Fatalf("last batch: %+v", got)
+		}
+		total += got.applied
+	}
+	if total != 1 {
+		t.Fatalf("concurrent drains recovered %d writes, want 1", total)
+	}
+	if id, err := st.GetObservationSaveResult(last); err != nil || id <= 0 {
+		t.Fatalf("last operation has no committed receipt: %d, %v", id, err)
 	}
 }
 
