@@ -42,7 +42,7 @@ func (s *DashboardScopedStore) ListAuthenticatedChunkSubmitters(ctx context.Cont
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []DashboardSubmitterRow
 	for rows.Next() {
