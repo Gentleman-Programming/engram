@@ -531,6 +531,12 @@ nav [role="tab"][aria-selected="true"]::after {
 	font-weight: 600;
 }
 
+.contributor-view-nav {
+	display: flex;
+	justify-content: flex-end;
+	margin-bottom: 0.55rem;
+}
+
 /* ─── Main / footer ───────────────────────────────────────────────────────── */
 
 .shell-main {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
@@ -43,10 +44,10 @@ func TestCloudRuntimeRecordsManagedChunkSubmitter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	managed := func(name string) (principal, bearer string) {
+	managed := func(name, role string) (principal, bearer string) {
 		t.Helper()
 		u, err := runtime.store.CreateHumanUser(ctx, cloudstore.CreateHumanUserParams{
-			Username: name, Email: name + "@example.invalid", DisplayName: display, Role: cloudstore.PrincipalRoleAdmin,
+			Username: name, Email: name + "@example.invalid", DisplayName: display, Role: role,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -71,8 +72,8 @@ func TestCloudRuntimeRecordsManagedChunkSubmitter(t *testing.T) {
 		}
 		return u.PrincipalID, token.Raw
 	}
-	firstID, first := managed("fixture-first")
-	secondID, second := managed("fixture-second")
+	firstID, first := managed("fixture-first", cloudstore.PrincipalRoleAdmin)
+	secondID, second := managed("fixture-second", cloudstore.PrincipalRoleAdmin)
 	post := func(token, path string, payload any, want int) {
 		t.Helper()
 		body, err := json.Marshal(payload)
@@ -162,6 +163,10 @@ func TestCloudRuntimeRecordsManagedChunkSubmitter(t *testing.T) {
 			t.Fatal("manifest credit changed")
 		}
 	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, submitted_by_principal_id)
+		VALUES ('outside-grant', 'hidden-chunk', 'hidden-author', '{}', $1::bigint)`, firstID); err != nil {
+		t.Fatal(err)
+	}
 	view, err := runtime.store.DashboardStoreForProjectsContext(ctx, []string{project})
 	if err != nil {
 		t.Fatal(err)
@@ -181,5 +186,28 @@ func TestCloudRuntimeRecordsManagedChunkSubmitter(t *testing.T) {
 	}
 	if rows, err := emptyView.ListAuthenticatedChunkSubmitters(ctx); err != nil || len(rows) != 0 {
 		t.Fatalf("view without grants: %v, %v", rows, err)
+	}
+
+	const submissionsPath = "/dashboard/contributors/views/submissions"
+	page := func(bearer, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(dashboardLoginCookie(t, handler, bearer))
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+	contributors := page(first, "/dashboard/contributors")
+	if contributors.Code != http.StatusOK || !strings.Contains(contributors.Body.String(), submissionsPath) {
+		t.Fatalf("managed admin could not find the submissions view: %d", contributors.Code)
+	}
+	submissions := page(first, submissionsPath)
+	if body := submissions.Body.String(); submissions.Code != http.StatusOK ||
+		!strings.Contains(body, "@fixture-first") || !strings.Contains(body, "@fixture-second") || strings.Contains(body, "hidden-author") {
+		t.Fatalf("unexpected submissions view: %d %s", submissions.Code, body)
+	}
+	_, member := managed("fixture-member", cloudstore.PrincipalRoleMember)
+	if res := page(member, submissionsPath); res.Code != http.StatusForbidden {
+		t.Fatalf("expected member access to be forbidden: %d", res.Code)
 	}
 }

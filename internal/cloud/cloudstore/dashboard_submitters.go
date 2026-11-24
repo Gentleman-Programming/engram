@@ -29,10 +29,10 @@ func (s *DashboardScopedStore) ListAuthenticatedChunkSubmitters(ctx context.Cont
 		SELECT p.id, p.display_name, COALESCE(u.username, ''), c.chunks, c.projects, c.last_chunk_at
 		FROM (
 			SELECT submitted_by_principal_id, count(*) AS chunks,
-				count(DISTINCT project_name) AS projects, max(created_at) AS last_chunk_at
+				count(DISTINCT project_name COLLATE pg_catalog."C") AS projects, max(created_at) AS last_chunk_at
 			FROM cloud_chunks
 			WHERE submitted_by_principal_id IS NOT NULL
-				AND ($1 OR project_name = ANY($2::text[]))
+				AND ($1 OR project_name COLLATE pg_catalog."C" OPERATOR(pg_catalog.=) ANY($2::pg_catalog.text[]))
 			GROUP BY submitted_by_principal_id
 		) c
 		JOIN cloud_principals p ON p.id = c.submitted_by_principal_id

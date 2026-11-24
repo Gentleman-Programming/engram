@@ -4,10 +4,12 @@ import "fmt"
 import "github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 
 templ ContributorsWithSubmissionsPage(search string) {
-	<nav aria-label="Contributor views" class="admin-nav">
-		<a href="/dashboard/contributors/views/submissions">Authenticated submissions</a>
-	</nav>
-	@ContributorsPage(search)
+	<div>
+		<nav aria-label="Contributor views" class="contributor-view-nav">
+			<a href="/dashboard/contributors/views/submissions">Authenticated submissions</a>
+		</nav>
+		@ContributorsPage(search)
+	</div>
 }
 
 templ ContributorSubmissionsPage(rows []cloudstore.DashboardSubmitterRow) {
