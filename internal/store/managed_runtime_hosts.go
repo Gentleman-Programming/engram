@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 )
 
@@ -78,7 +79,7 @@ func (s *Store) RetireManagedRuntimeHost(scope ManagedRuntimeScope, generation i
 		if !current || closed {
 			return ErrManagedRuntimeGeneration
 		}
-		if err := scope.verifyLive(tx); err != nil {
+		if err := scope.verifyLiveOrEnded(tx); err != nil && !errors.Is(err, ErrManagedRuntimeScopeEnded) {
 			return err
 		}
 		result, err := s.execHook(tx, `UPDATE managed_runtime_hosts SET retired=1

@@ -51,6 +51,7 @@ const managedRuntimePayloadMigration = "ALTER TABLE managed_runtime_writes ADD C
 
 var (
 	ErrManagedRuntimeGeneration              = errors.New("managed runtime generation is not current")
+	ErrManagedRuntimeScopeEnded              = errors.New("managed runtime effective session has ended")
 	ErrManagedRuntimeCloseRequiresGeneration = errors.New("managed runtime close requires a cohort generation")
 	ErrManagedRuntimeWriteUnresolved         = errors.New("managed runtime has an unresolved observation write")
 	ErrManagedRuntimeHostsRemain             = errors.New("managed runtime hosts have not been retired")
@@ -110,6 +111,25 @@ func (scope ManagedRuntimeScope) verifyLive(tx *sql.Tx) error {
 		return ErrRuntimeSessionScopeConflict
 	}
 	return nil
+}
+
+// verifyLiveOrEnded distinguishes a positively identified ended session
+// from a missing or different runtime binding.
+func (scope ManagedRuntimeScope) verifyLiveOrEnded(tx *sql.Tx) error {
+	liveErr := scope.verifyLive(tx)
+	if !errors.Is(liveErr, sql.ErrNoRows) && !errors.Is(liveErr, ErrRuntimeSessionEffectiveIDMismatch) {
+		return liveErr
+	}
+	var ended bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sessions
+		WHERE id=? AND project=? AND directory=? AND ownership_mode=? AND ended_at IS NOT NULL)`,
+		scope.EffectiveID, scope.Project, scope.Directory, scope.Mode).Scan(&ended); err != nil {
+		return err
+	}
+	if ended {
+		return ErrManagedRuntimeScopeEnded
+	}
+	return liveErr
 }
 
 type managedRuntimeAdmission struct {
@@ -195,14 +215,20 @@ func (s *Store) admitManagedRuntimeTx(tx *sql.Tx, admission *managedRuntimeAdmis
 	if otherRoot {
 		return ErrRuntimeSessionScopeConflict
 	}
-	var otherBinding bool
-	if err := tx.QueryRow(`SELECT EXISTS(
-		SELECT 1 FROM managed_runtime_hosts WHERE root=? AND effective_id<>? AND pid=? AND start=? AND domain=?
-	)`, scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain).Scan(&otherBinding); err != nil {
+	var otherBinding, previousHosts bool
+	if err := tx.QueryRow(`SELECT
+		EXISTS(SELECT 1 FROM managed_runtime_hosts WHERE root=? AND effective_id<>? AND pid=? AND start=? AND domain=?),
+		EXISTS(SELECT 1 FROM managed_runtime_hosts WHERE root=? AND effective_id<>? AND retired=0)`,
+		scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain,
+		scope.Root, scope.EffectiveID).Scan(&otherBinding, &previousHosts); err != nil {
 		return err
 	}
 	if otherBinding {
 		return ErrManagedRuntimeGeneration
+	}
+	// Keep the old generation current until its hosts can be retired.
+	if previousHosts {
+		return ErrManagedRuntimeHostsRemain
 	}
 	var retired bool
 	err = tx.QueryRow(`SELECT retired FROM managed_runtime_hosts
@@ -461,8 +487,9 @@ func (s *Store) CloseManagedRuntime(scope ManagedRuntimeScope, generation int64)
 		if !current {
 			return ErrManagedRuntimeGeneration
 		}
-		if err := scope.verifyLive(tx); err != nil {
-			return err
+		scopeErr := scope.verifyLiveOrEnded(tx)
+		if scopeErr != nil && !errors.Is(scopeErr, ErrManagedRuntimeScopeEnded) {
+			return scopeErr
 		}
 		var hostsRemain bool
 		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM managed_runtime_hosts
@@ -471,6 +498,9 @@ func (s *Store) CloseManagedRuntime(scope ManagedRuntimeScope, generation int64)
 		}
 		if hostsRemain {
 			return ErrManagedRuntimeHostsRemain
+		}
+		if scopeErr != nil {
+			return scopeErr
 		}
 		var pending bool
 		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM managed_runtime_writes WHERE root=? AND effective_id=? AND confirmed=0)`,

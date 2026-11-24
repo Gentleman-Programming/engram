@@ -643,3 +643,65 @@ func TestManagedRuntimeRecoversHostsAfterReopen(t *testing.T) {
 		t.Fatalf("terminal close: %v %v", applied, err)
 	}
 }
+
+func TestManagedRuntimeContinuationWaitsForEndedHostRetirement(t *testing.T) {
+	for _, tryEarly := range []bool{true, false} {
+		t.Run(fmt.Sprintf("early-attach-%t", tryEarly), func(t *testing.T) {
+			st := newTestStore(t)
+			scope := ManagedRuntimeScope{Root: "root", EffectiveID: "root", Project: "project",
+				Directory: project.RuntimeWorktreeDirectory(t.TempDir()), Mode: SessionOwnershipProjectOwned}
+			_, generation, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.RecordManagedRuntimeObservation(scope, generation, "old-operation",
+				AddObservationParams{Title: "Pending", Content: "keep in the old scope"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.EndSession(scope.EffectiveID, "explicit close"); err != nil {
+				t.Fatal(err)
+			}
+			next := scope
+			next.EffectiveID = ""
+			if tryEarly {
+				id, gen, err := st.AttachManagedRuntime(next, managedTestHostB, true)
+				if !errors.Is(err, ErrManagedRuntimeHostsRemain) || id != "" || gen != 0 {
+					t.Fatalf("early attachment bypassed old host: %q generation=%d err=%v", id, gen, err)
+				}
+				if _, err := st.GetSession("root:resume:2"); !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("rejected attachment left a continuation: %v", err)
+				}
+			}
+			current, hosts, err := st.ListManagedRuntimeHosts(scope)
+			if err != nil || current != generation || len(hosts) != 1 || hosts[0] != managedTestHostA {
+				t.Fatalf("old roster changed: generation=%d hosts=%v err=%v", current, hosts, err)
+			}
+			if applied, err := st.CloseManagedRuntime(scope, generation); applied || !errors.Is(err, ErrManagedRuntimeHostsRemain) {
+				t.Fatalf("external end bypassed host retirement: applied=%v err=%v", applied, err)
+			}
+			if err := st.RetireManagedRuntimeHost(scope, generation, managedTestHostA); err != nil {
+				t.Fatalf("retire exact old host: %v", err)
+			}
+			if applied, err := st.CloseManagedRuntime(scope, generation); applied || !errors.Is(err, ErrManagedRuntimeScopeEnded) {
+				t.Fatalf("external end acquired a managed close receipt: applied=%v err=%v", applied, err)
+			}
+			id, gen, err := st.AttachManagedRuntime(next, managedTestHostB, true)
+			if err != nil || id != "root:resume:2" || gen <= generation {
+				t.Fatalf("attachment after retirement: %q generation=%d err=%v", id, gen, err)
+			}
+			next.EffectiveID = id
+			if err := st.RecordManagedRuntimeObservation(next, gen, "next-operation",
+				AddObservationParams{Title: "New scope", Content: "can still save"}); err != nil {
+				t.Fatal(err)
+			}
+			if applied, more, err := st.RecoverManagedRuntimeObservations(next, gen); applied != 1 || more || err != nil {
+				t.Fatalf("new continuation recovery: applied=%d more=%v err=%v", applied, more, err)
+			}
+			var pending int
+			if err := st.db.QueryRow(`SELECT count(*) FROM managed_runtime_writes
+				WHERE operation_id='old-operation' AND effective_id='root' AND confirmed=0 AND observation_payload IS NOT NULL`).Scan(&pending); err != nil || pending != 1 {
+				t.Fatalf("recovery changed the old pending write: count=%d err=%v", pending, err)
+			}
+		})
+	}
+}

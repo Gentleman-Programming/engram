@@ -187,3 +187,56 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	body["project"] = "other"
 	call(owned, token, prefix+"close", body, 404)
 }
+
+func TestManagedRuntimeRecoveryDistinguishesExactEndedSession(t *testing.T) {
+	st := newServerTestStore(t)
+	scope := store.ManagedRuntimeScope{
+		Root: "ended-root", EffectiveID: "ended-root", Project: "project",
+		Directory: t.TempDir(), Mode: store.SessionOwnershipProjectOwned,
+	}
+	host := store.ManagedRuntimeHost{PID: 20, Start: "test-start", Domain: "test-domain"}
+	_, generation, err := st.AttachManagedRuntime(scope, host, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordManagedRuntimeObservation(scope, generation, "staged",
+		store.AddObservationParams{Title: "Pending", Content: "keep this pending"}); err != nil {
+		t.Fatal(err)
+	}
+
+	const token = "owned-test-token"
+	s := New(st, 0)
+	s.SetSessionOwnedToken(token)
+	call := func(path string, data any, wantStatus int) string {
+		t.Helper()
+		content, err := json.Marshal(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(content)))
+		request.Header.Set("Authorization", "Bearer "+token)
+		result := httptest.NewRecorder()
+		s.Handler().ServeHTTP(result, request)
+		if result.Code != wantStatus {
+			t.Fatalf("%s got %d %s, want %d", path, result.Code, result.Body, wantStatus)
+		}
+		return result.Body.String()
+	}
+	call("/sessions/ended-root/end", map[string]string{"summary": "closed explicitly"}, http.StatusOK)
+	body := map[string]any{
+		"root": scope.Root, "effective_id": scope.EffectiveID, "project": scope.Project,
+		"directory": scope.Directory, "ownership_mode": scope.Mode, "generation": generation,
+	}
+	const recover = "/internal/managed-runtime/recover-writes"
+	if result := call(recover, body, http.StatusConflict); !strings.Contains(result, "managed_runtime_scope_ended") {
+		t.Fatalf("exact terminal evidence missing: %s", result)
+	}
+	body["project"] = "other"
+	result := call(recover, body, http.StatusNotFound)
+	if strings.Contains(result, "managed_runtime_scope_ended") {
+		t.Fatalf("scope mismatch received terminal evidence: %s", result)
+	}
+	if id, err := st.GetObservationSaveResult("staged"); err != nil || id != 0 {
+		t.Fatalf("recovery settled an ended scope's pending write: %d %v", id, err)
+	}
+}

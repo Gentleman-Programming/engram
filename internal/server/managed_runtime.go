@@ -162,6 +162,8 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, store.ErrManagedRuntimeHostIdentity):
 			jsonError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, store.ErrManagedRuntimeScopeEnded):
+			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "managed_runtime_scope_ended"})
 		case errors.Is(err, store.ErrManagedRuntimeHostsRemain):
 			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "managed_runtime_hosts_remain"})
 		case errors.Is(err, store.ErrManagedRuntimeWriteUnresolved):
