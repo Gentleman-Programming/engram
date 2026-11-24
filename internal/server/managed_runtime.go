@@ -33,11 +33,15 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		Host        *store.ManagedRuntimeHost   `json:"host"`
 		Resume      *bool                       `json:"resume"`
 	}
-	requestBody := r.Body
-	if !save {
-		requestBody = http.MaxBytesReader(w, requestBody, 8<<10)
+	var input io.Reader = r.Body
+	switch r.URL.Path {
+	case "/internal/managed-runtime/write-intent", "/internal/managed-runtime/save":
+		// Use the same wire allowance as ordinary observation saves, so
+		// the Store can perform its normal redaction and truncation.
+	default:
+		input = http.MaxBytesReader(w, r.Body, 8<<10)
 	}
-	decoder := json.NewDecoder(requestBody)
+	decoder := json.NewDecoder(input)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil || decoder.Decode(new(any)) != io.EOF ||
 		strings.TrimSpace(body.Root) == "" ||
@@ -50,9 +54,15 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 	scope := store.ManagedRuntimeScope{Root: body.Root, EffectiveID: body.EffectiveID, Project: body.Project, Directory: body.Directory, Mode: body.Mode}
 	var observation store.AddObservationResult
 	var err error
-	if body.Observation != nil && !save {
-		jsonError(w, http.StatusBadRequest, "observation is only accepted when saving")
-		return
+	if observation := body.Observation; observation != nil {
+		if !save && r.URL.Path != "/internal/managed-runtime/write-intent" {
+			jsonError(w, http.StatusBadRequest, "observation is only accepted for a managed write")
+			return
+		}
+		if observation.OperationID != "" || observation.SessionID != "" || observation.Project != "" {
+			jsonError(w, http.StatusBadRequest, "observation identity comes from its managed scope")
+			return
+		}
 	}
 	var hosts []store.ManagedRuntimeHost
 	if attach != (body.Resume != nil) {
@@ -111,10 +121,13 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, http.StatusBadRequest, "write intent requires a generation and an operation ID")
 			return
 		}
-		err = s.store.RecordManagedRuntimeWrite(scope, body.Generation, body.OperationID)
+		if body.Observation == nil {
+			err = s.store.RecordManagedRuntimeWrite(scope, body.Generation, body.OperationID)
+		} else {
+			err = s.store.RecordManagedRuntimeObservation(scope, body.Generation, body.OperationID, *body.Observation)
+		}
 	case "/internal/managed-runtime/save":
-		if body.Generation <= 0 || strings.TrimSpace(body.OperationID) == "" || body.Observation == nil ||
-			body.Observation.OperationID != "" || body.Observation.SessionID != "" || body.Observation.Project != "" {
+		if body.Generation <= 0 || strings.TrimSpace(body.OperationID) == "" || body.Observation == nil {
 			jsonError(w, http.StatusBadRequest, "managed save requires a scoped intent and an observation")
 			return
 		}
@@ -148,7 +161,7 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, store.ErrObservationTitleRequired), errors.Is(err, store.ErrObservationContentRequired):
 			jsonError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, store.ErrObservationOperationConflict):
-			jsonError(w, http.StatusConflict, err.Error())
+			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "managed_runtime_write_conflict"})
 		case errors.Is(err, sql.ErrNoRows):
 			jsonError(w, http.StatusNotFound, "managed runtime scope not found")
 		default:
@@ -157,7 +170,7 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if save {
-		jsonResponse(w, http.StatusCreated, map[string]any{"id": observation.ID, "status": "saved"})
+		jsonResponse(w, http.StatusCreated, map[string]any{"id": observation.ID, "status": "saved", "replayed": observation.Replayed})
 		return
 	}
 	response := map[string]any{"effective_id": scope.EffectiveID, "generation": body.Generation}

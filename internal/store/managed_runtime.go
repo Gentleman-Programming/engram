@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -44,6 +45,9 @@ CREATE INDEX IF NOT EXISTS idx_managed_runtime_generation_root ON managed_runtim
 CREATE INDEX IF NOT EXISTS idx_managed_runtime_effective ON managed_runtime_generations(effective_id, root, closed);
 CREATE INDEX IF NOT EXISTS idx_managed_runtime_pending ON managed_runtime_writes(root, effective_id, confirmed);
 `
+
+const managedRuntimeFingerprintMigration = "ALTER TABLE managed_runtime_writes ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''"
+const managedRuntimePayloadMigration = "ALTER TABLE managed_runtime_writes ADD COLUMN observation_payload BLOB"
 
 var (
 	ErrManagedRuntimeGeneration              = errors.New("managed runtime generation is not current")
@@ -260,12 +264,41 @@ WHERE root=? AND generation=? AND project=? AND directory=? AND mode=? AND effec
 // RecordManagedRuntimeWrite persists intent before dispatch. Outstanding
 // writes remain attached to the effective session across admission changes.
 func (s *Store) RecordManagedRuntimeWrite(scope ManagedRuntimeScope, generation int64, operationID string) error {
+	return s.recordManagedRuntimeWrite(scope, generation, operationID, nil)
+}
+
+// RecordManagedRuntimeObservation validates the requested observation before
+// creating a save fence. Only validated, redacted content is recoverable.
+func (s *Store) RecordManagedRuntimeObservation(scope ManagedRuntimeScope, generation int64, operationID string, observation AddObservationParams) error {
+	return s.recordManagedRuntimeWrite(scope, generation, operationID, &observation)
+}
+
+func (s *Store) recordManagedRuntimeWrite(scope ManagedRuntimeScope, generation int64, operationID string, observation *AddObservationParams) error {
 	scope, err := scope.normalized()
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(operationID) == "" {
 		return ErrManagedRuntimeWriteUnresolved
+	}
+	fingerprint := ""
+	var payload []byte
+	if observation != nil {
+		observation.Project, observation.SessionID = scope.Project, scope.EffectiveID
+		if err := observation.ProjectProvenance.Validate(); err != nil {
+			return err
+		}
+		title, content, err := s.prepareObservationBody(*observation)
+		if err != nil {
+			return err
+		}
+		fingerprint = managedObservationFingerprint(*observation, title, content, normalizeScope(observation.Scope), normalizeTopicKey(observation.TopicKey))
+		observation.Title, observation.Content = title, content
+		observation.OperationID = operationID
+		payload, err = json.Marshal(observation)
+		if err != nil {
+			return err
+		}
 	}
 	return s.withTx(func(tx *sql.Tx) error {
 		closed, current, err := scope.generationState(tx, generation)
@@ -278,6 +311,21 @@ func (s *Store) RecordManagedRuntimeWrite(scope ManagedRuntimeScope, generation 
 		if err := scope.verifyLive(tx); err != nil {
 			return err
 		}
+		if err := s.ensureManagedRuntimeWriteColumns(tx); err != nil {
+			return err
+		}
+		var root, effective, prior string
+		err = tx.QueryRow(`SELECT root,effective_id,request_fingerprint FROM managed_runtime_writes WHERE operation_id=?`,
+			operationID).Scan(&root, &effective, &prior)
+		if err == nil {
+			if root != scope.Root || effective != scope.EffectiveID || prior != fingerprint {
+				return ErrObservationOperationConflict
+			}
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		var enrolled bool
 		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM managed_runtime_hosts
 			WHERE root=? AND effective_id=? AND retired=0)`, scope.Root, scope.EffectiveID).Scan(&enrolled); err != nil {
@@ -286,11 +334,20 @@ func (s *Store) RecordManagedRuntimeWrite(scope ManagedRuntimeScope, generation 
 		if !enrolled {
 			return ErrManagedRuntimeHostIdentity
 		}
+		var opaquePending bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM managed_runtime_writes
+			WHERE root=? AND effective_id=? AND confirmed=0 AND observation_payload IS NULL)`,
+			scope.Root, scope.EffectiveID).Scan(&opaquePending); err != nil {
+			return err
+		}
+		if opaquePending {
+			return ErrManagedRuntimeWriteUnresolved
+		}
 		result, err := s.execHook(tx, `
-INSERT INTO managed_runtime_writes(operation_id,root,effective_id)
-SELECT ?,?,? WHERE NOT EXISTS (
+INSERT INTO managed_runtime_writes(operation_id,root,effective_id,request_fingerprint,observation_payload)
+SELECT ?,?,?,?,? WHERE NOT EXISTS (
 	SELECT 1 FROM observation_save_operations WHERE operation_id=?
-) ON CONFLICT(operation_id) DO NOTHING`, operationID, scope.Root, scope.EffectiveID, operationID)
+) ON CONFLICT(operation_id) DO NOTHING`, operationID, scope.Root, scope.EffectiveID, fingerprint, payload, operationID)
 		if err != nil {
 			return err
 		}
@@ -302,6 +359,40 @@ SELECT ?,?,? WHERE NOT EXISTS (
 	})
 }
 
+func managedRuntimeWriteColumns(tx *sql.Tx) (fingerprint, payload bool, err error) {
+	err = tx.QueryRow(`SELECT
+		EXISTS(SELECT 1 FROM pragma_table_info('managed_runtime_writes') WHERE name='request_fingerprint'),
+		EXISTS(SELECT 1 FROM pragma_table_info('managed_runtime_writes') WHERE name='observation_payload')
+	`).Scan(&fingerprint, &payload)
+	return
+}
+
+func (s *Store) ensureManagedRuntimeWriteColumns(tx *sql.Tx) error {
+	fingerprint, payload, err := managedRuntimeWriteColumns(tx)
+	if err != nil {
+		return err
+	}
+	if !fingerprint {
+		if _, err := s.execHook(tx, managedRuntimeFingerprintMigration); err != nil {
+			return err
+		}
+	}
+	if !payload {
+		_, err := s.execHook(tx, managedRuntimePayloadMigration)
+		return err
+	}
+	return nil
+}
+
+func managedObservationFingerprint(p AddObservationParams, title, content, scope, topicKey string) string {
+	provenance := p.ProjectProvenance
+	if provenance == nil {
+		return observationSaveFingerprint(p, title, content, p.Project, scope, topicKey, p.Org)
+	}
+	return observationSaveFingerprint(p, title, content, p.Project, scope, topicKey,
+		p.Org, provenance.Source, provenance.Directory, provenance.RawProject)
+}
+
 type managedRuntimeWrite struct {
 	scope      ManagedRuntimeScope
 	generation int64
@@ -309,6 +400,7 @@ type managedRuntimeWrite struct {
 
 // SaveManagedRuntimeObservation requires a recorded write intent. The intent is
 // confirmed inside the same transaction as the operation ledger and observation.
+// Deduplication and topic updates use the Store's usual project boundaries.
 func (s *Store) SaveManagedRuntimeObservation(scope ManagedRuntimeScope, generation int64, params AddObservationParams) (AddObservationResult, error) {
 	scope, err := scope.normalized()
 	if err != nil {
@@ -319,7 +411,7 @@ func (s *Store) SaveManagedRuntimeObservation(scope ManagedRuntimeScope, generat
 	return s.AddObservationWithResult(params)
 }
 
-func (w managedRuntimeWrite) intentState(tx *sql.Tx, operationID string) (bool, error) {
+func (w managedRuntimeWrite) intentState(tx *sql.Tx, operationID, fingerprint string) (bool, error) {
 	closed, current, err := w.scope.generationState(tx, w.generation)
 	if err != nil {
 		return false, err
@@ -331,9 +423,21 @@ func (w managedRuntimeWrite) intentState(tx *sql.Tx, operationID string) (bool, 
 		return false, err
 	}
 	var confirmed bool
-	err = tx.QueryRow(`SELECT confirmed FROM managed_runtime_writes
-		WHERE operation_id=? AND root=? AND effective_id=?`, operationID, w.scope.Root, w.scope.EffectiveID).Scan(&confirmed)
+	var prior string
+	var earlier bool
+	err = tx.QueryRow(`SELECT current.confirmed,current.request_fingerprint, EXISTS(
+		SELECT 1 FROM managed_runtime_writes AS pending
+		WHERE pending.root=current.root AND pending.effective_id=current.effective_id
+		AND pending.confirmed=0 AND pending.rowid<current.rowid
+	) FROM managed_runtime_writes AS current
+		WHERE current.operation_id=? AND current.root=? AND current.effective_id=?`, operationID, w.scope.Root, w.scope.EffectiveID).Scan(&confirmed, &prior, &earlier)
 	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrManagedRuntimeWriteUnresolved
+	}
+	if err == nil && prior != "" && prior != fingerprint {
+		return false, ErrObservationOperationConflict
+	}
+	if err == nil && !confirmed && earlier {
 		return false, ErrManagedRuntimeWriteUnresolved
 	}
 	return confirmed, err
