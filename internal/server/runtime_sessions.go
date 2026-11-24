@@ -73,7 +73,8 @@ func (s *Server) handleRuntimeSession(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, sql.ErrNoRows) {
 			status = http.StatusNotFound
 		}
-		if errors.Is(err, store.ErrRuntimeSessionScopeConflict) || errors.Is(err, store.ErrRuntimeSessionEffectiveIDMismatch) {
+		if errors.Is(err, store.ErrRuntimeSessionScopeConflict) || errors.Is(err, store.ErrRuntimeSessionEffectiveIDMismatch) ||
+			errors.Is(err, store.ErrManagedRuntimeCloseRequiresGeneration) {
 			status = http.StatusConflict
 		}
 		jsonError(w, status, err.Error())

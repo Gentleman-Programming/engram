@@ -326,7 +326,8 @@ type AddObservationParams struct {
 	OperationID       string             `json:"operation_id,omitempty"`
 	Timings           *WriteTimings      `json:"-"`
 	// Org is a free-text grouping axis orthogonal to Scope (#776). Empty means unset.
-	Org string `json:"org,omitempty"`
+	Org            string `json:"org,omitempty"`
+	managedRuntime *managedRuntimeWrite
 }
 
 // WriteTimings collects one write operation's local database stages. It holds
@@ -3645,13 +3646,13 @@ func (s *Store) StartSession(id, project, directory string) error {
 // lease. It preserves the existing session identity and refuses to reopen an
 // ended session; EndSession remains terminal truth.
 func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode string) error {
-	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, nil)
+	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, nil, nil, nil)
 }
 
 // StartSessionWithOwnershipModeTimed records database-stage timings without
 // changing session-registration behavior.
 func (s *Store) StartSessionWithOwnershipModeTimed(id, project, directory, mode string, timings *WriteTimings) error {
-	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, timings)
+	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, timings, nil, nil)
 }
 
 // ResumeSessionWithOwnershipMode atomically selects and registers a live runtime
@@ -3664,7 +3665,7 @@ func (s *Store) ResumeSessionWithOwnershipMode(id, project, directory, mode stri
 // changing runtime-session continuation selection.
 func (s *Store) ResumeSessionWithOwnershipModeTimed(id, project, directory, mode string, timings *WriteTimings) (string, error) {
 	effective := id
-	err := s.startSessionRegistration(id, project, directory, mode, true, &effective, false, timings)
+	err := s.startSessionRegistration(id, project, directory, mode, true, &effective, false, timings, nil, nil)
 	if err != nil {
 		return "", err
 	}
@@ -3688,7 +3689,7 @@ func (s *Store) RegisterIsolatedSession(id, project string, resume bool) (string
 // isolated-session validation or persistence.
 func (s *Store) RegisterIsolatedSessionTimed(id, project string, resume bool, timings *WriteTimings) (string, error) {
 	effective := id
-	if err := s.startSessionRegistration(id, project, "", SessionOwnershipProjectOwned, resume, &effective, true, timings); err != nil {
+	if err := s.startSessionRegistration(id, project, "", SessionOwnershipProjectOwned, resume, &effective, true, timings, nil, nil); err != nil {
 		return "", err
 	}
 	return effective, nil
@@ -3804,11 +3805,7 @@ func (s *Store) TryRefreshProjectOwnedSession(ctx context.Context, id, project s
 	return err == nil, err
 }
 
-func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool, timings *WriteTimings, evidence ...*ProjectProvenance) error {
-	var provenance *ProjectProvenance
-	if len(evidence) != 0 {
-		provenance = evidence[0]
-	}
+func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool, timings *WriteTimings, provenance *ProjectProvenance, managed *managedRuntimeAdmission) error {
 	if err := provenance.Validate(); err != nil {
 		return err
 	}
@@ -3896,6 +3893,9 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			}
 			*effective = id
 		}
+		if managed != nil && managed.scope.EffectiveID != "" && id != managed.scope.EffectiveID {
+			return ErrRuntimeSessionEffectiveIDMismatch
+		}
 		if id != root {
 			if err := validateIsolation(id); err != nil {
 				return err
@@ -3912,6 +3912,9 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 				return err
 			}
 			if endedAt != nil {
+				if managed != nil {
+					return ErrSessionAlreadyEnded
+				}
 				// Preserve the same child-ownership invariant as write adoption.
 				_, foreignOwner, err := foreignRecordOwnerTx(tx, id, project)
 				if err != nil {
@@ -3971,6 +3974,14 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 		}
 		if err := s.startSessionTx(tx, id, registrationProject, registrationDirectory, registrationMode); err != nil {
 			return err
+		}
+		if managed != nil {
+			selected := *managed
+			selected.scope.EffectiveID = id
+			if err := s.admitManagedRuntimeTx(tx, &selected); err != nil {
+				return err
+			}
+			managed.generation = selected.generation
 		}
 		if !found && (provenance == nil || !provenance.rootRegistrationOnly || id == root) {
 			if err := captureProjectProvenanceTx(tx, "session", id, provenance); err != nil {
@@ -4198,6 +4209,9 @@ func (s *Store) endRuntimeSession(root, project, directory, mode, summary, expec
 		}
 		if expectedID != "" && currentID != expectedID {
 			return ErrRuntimeSessionEffectiveIDMismatch
+		}
+		if err := requireUnmanagedRuntimeCloseTx(tx, currentID); err != nil {
+			return err
 		}
 		id = currentID
 		return s.endSessionOperation(id, summary)(tx)
@@ -4668,6 +4682,14 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 	replayed := false
 	err := s.withWriteTimings(p.Timings, func(tx *sql.Tx) error {
 		replayed = false
+		var managedConfirmed bool
+		if p.managedRuntime != nil {
+			var err error
+			managedConfirmed, err = p.managedRuntime.intentState(tx, p.OperationID)
+			if err != nil {
+				return err
+			}
+		}
 		// If the caller supplied an operation ID, check for a committed result first
 		// so a replay can return the original outcome without repeating mutations.
 		// The check runs inside the transaction so it races safely with concurrent
@@ -4683,6 +4705,9 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 				p.OperationID,
 			).Scan(&committedID, &committedFingerprint)
 			if err == nil {
+				if p.managedRuntime != nil && !managedConfirmed {
+					return ErrObservationOperationConflict
+				}
 				if !strings.HasPrefix(committedFingerprint, "v1:") {
 					return ErrObservationOperationExpired
 				}
@@ -4697,6 +4722,11 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 				return ErrObservationOperationConflict
 			}
 			if err != sql.ErrNoRows {
+				return err
+			}
+		}
+		if p.managedRuntime != nil {
+			if _, err := s.execHook(tx, "UPDATE managed_runtime_writes SET confirmed=1 WHERE operation_id=?", p.OperationID); err != nil {
 				return err
 			}
 		}

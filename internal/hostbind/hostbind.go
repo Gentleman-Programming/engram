@@ -24,6 +24,9 @@ import (
 	"time"
 )
 
+// ErrProcessDomainUnavailable reports that process identity cannot be qualified locally.
+var ErrProcessDomainUnavailable = errors.New("hostbind: process domain unavailable")
+
 const dirName = "host-sessions"
 
 // processStart returns an opaque token that changes whenever a PID is reused.

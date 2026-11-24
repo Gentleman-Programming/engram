@@ -403,6 +403,12 @@ func copyValidateDB(db *sql.DB, diagnoseV340 bool) error {
 		return errors.Join(e, ref.Close())
 	}
 	current, e := copyCatalog(ref)
+	var managed map[string]copyCatalogObject
+	if _, hasManaged := actual["managed_runtime_generations"]; e == nil && hasManaged {
+		if _, e = ref.Exec(managedRuntimeSchema); e == nil {
+			managed, e = copyCatalog(ref)
+		}
+	}
 	e = errors.Join(e, ref.Close())
 	if e != nil {
 		return e
@@ -420,6 +426,14 @@ func copyValidateDB(db *sql.DB, diagnoseV340 bool) error {
 	if reflect.DeepEqual(actual, current) {
 		return nil
 	}
+	for name, object := range managed {
+		object.SQL = copyNormalizeDDL(object.SQL)
+		managed[name] = object
+	}
+	if managed != nil && reflect.DeepEqual(actual, managed) {
+		return nil
+	}
+
 	// The immediately preceding catalog differs only by this derived index.
 	// Compare whole catalogs, never admit arbitrary optional objects.
 	withoutEvidence := maps.Clone(current)
