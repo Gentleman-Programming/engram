@@ -36,7 +36,8 @@ func inheritedOwnedListener() (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read inherited session-owned listener protocol: %w", err)
 	}
-	if protocol != unix.IPPROTO_TCP {
+	// Go's TCP listener can use MPTCP when the kernel supports it.
+	if protocol != unix.IPPROTO_TCP && protocol != unix.IPPROTO_MPTCP {
 		return nil, fmt.Errorf("inherited session-owned listener must use TCP (got protocol %d)", protocol)
 	}
 	file := os.NewFile(descriptor, "session-owned listener")

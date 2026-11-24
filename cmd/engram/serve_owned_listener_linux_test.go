@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestServeOwnedInheritedRejectsNonListenerBeforeStore(t *testing.T) {
@@ -135,6 +137,11 @@ func startInheritedCore(t *testing.T, data string) inheritedCoreFixture {
 		t.Fatal(err)
 	}
 	defer func() { _ = fd.Close() }()
+	protocol, err := unix.GetsockoptInt(int(fd.Fd()), unix.SOL_SOCKET, unix.SO_PROTOCOL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("passing a loopback listener with IP protocol %d", protocol)
 	cmd, _ := ownedCommand(t)
 	cmd.Env = append(cmd.Env, "ENGRAM_DATA_DIR="+data, "ENGRAM_OWNED_LISTENER_FD=3")
 	cmd.ExtraFiles = []*os.File{fd}
