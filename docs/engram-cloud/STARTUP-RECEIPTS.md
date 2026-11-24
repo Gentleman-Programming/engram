@@ -52,6 +52,12 @@ connection available for audit maintenance. Set Cloud's connection to the
 restricted runtime role and verify normal serving before installing the
 startup audit.
 
+## Refresh enrollment after a source schema change
+
+A migration that changes a protected table's definition can make an existing enrollment ineligible for receipt reuse. For example, adding `cloud_chunks.submitted_by_principal_id` changes the fingerprint recorded at enrollment. Cloud starts with ordinary repair in that case, and preparing another receipt against the old enrollment fails.
+
+After the upgrade has run its migration, follow [Remove enrollment](#remove-enrollment) and then [Install and prepare](#install-and-prepare) using the upgraded checkout. The new enrollment records the updated schema. Preparing a fresh receipt makes eligible restarts use the audit again.
+
 ## Remove enrollment
 
 Unset `ENGRAM_CLOUD_STARTUP_RECEIPT_DIR` and restart Cloud normally. Use the administrator connection to remove the named audit objects. The operation runs as one transaction and fails if an unexpected dependency requires removal.
