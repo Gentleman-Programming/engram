@@ -174,12 +174,28 @@ func TestManagedRuntimeWriteAndClosureRollback(t *testing.T) {
 	params := AddObservationParams{
 		OperationID: "save", Title: "Managed write", Content: "fixture contents", Type: "manual", Scope: "project", TopicKey: "fixture-topic",
 	}
+	sequence := func() int64 {
+		t.Helper()
+		state, err := st.getSyncState(DefaultSyncTargetKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state.LastEnqueuedSeq
+	}
+	beforeSave := sequence()
 	if _, err := st.db.Exec(`CREATE TRIGGER fixture_fail_save BEFORE INSERT ON observation_save_operations
 	BEGIN SELECT RAISE(ABORT,'forced save failure'); END;`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.SaveManagedRuntimeObservation(scope, second, params); err == nil {
-		t.Fatal("expected failed write")
+	if _, err := st.SaveManagedRuntimeObservation(scope, second, params); err == nil || !strings.Contains(err.Error(), "forced save failure") {
+		t.Fatalf("unexpected write result: %v", err)
+	}
+	var observations int
+	if err := st.db.QueryRow(`SELECT count(*) FROM observations WHERE session_id = ? AND topic_key = ?`, effective, params.TopicKey).Scan(&observations); err != nil || observations != 0 {
+		t.Fatalf("failed save left observations: %d, %v", observations, err)
+	}
+	if after := sequence(); after != beforeSave {
+		t.Fatalf("failed save advanced sync sequence: %d -> %d", beforeSave, after)
 	}
 	if _, err := st.CloseManagedRuntime(scope, second); !errors.Is(err, ErrManagedRuntimeWriteUnresolved) {
 		t.Fatalf("rolled-back save released terminal gate: %v", err)
@@ -206,14 +222,6 @@ func TestManagedRuntimeWriteAndClosureRollback(t *testing.T) {
 	}
 	if _, err := st.db.Exec("UPDATE sessions SET summary='retained summary' WHERE id=?", effective); err != nil {
 		t.Fatal(err)
-	}
-	sequence := func() int64 {
-		t.Helper()
-		state, err := st.getSyncState(DefaultSyncTargetKey)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return state.LastEnqueuedSeq
 	}
 	before := sequence()
 	if _, err := st.db.Exec(`CREATE TRIGGER fixture_interrupt BEFORE UPDATE ON managed_runtime_generations

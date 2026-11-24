@@ -20,6 +20,7 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	attach := r.URL.Path == "/internal/managed-runtime/attach"
+	save := r.URL.Path == "/internal/managed-runtime/save"
 	var body struct {
 		Root        string                      `json:"root"`
 		EffectiveID string                      `json:"effective_id"`
@@ -32,7 +33,11 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		Host        *store.ManagedRuntimeHost   `json:"host"`
 		Resume      *bool                       `json:"resume"`
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+	requestBody := r.Body
+	if !save {
+		requestBody = http.MaxBytesReader(w, requestBody, 8<<10)
+	}
+	decoder := json.NewDecoder(requestBody)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil || decoder.Decode(new(any)) != io.EOF ||
 		strings.TrimSpace(body.Root) == "" ||
@@ -45,7 +50,7 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 	scope := store.ManagedRuntimeScope{Root: body.Root, EffectiveID: body.EffectiveID, Project: body.Project, Directory: body.Directory, Mode: body.Mode}
 	var observation store.AddObservationResult
 	var err error
-	if body.Observation != nil && r.URL.Path != "/internal/managed-runtime/save" {
+	if body.Observation != nil && !save {
 		jsonError(w, http.StatusBadRequest, "observation is only accepted when saving")
 		return
 	}
@@ -151,7 +156,7 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if r.URL.Path == "/internal/managed-runtime/save" {
+	if save {
 		jsonResponse(w, http.StatusCreated, map[string]any{"id": observation.ID, "status": "saved"})
 		return
 	}

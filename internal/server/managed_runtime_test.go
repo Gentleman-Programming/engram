@@ -129,7 +129,25 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	body["observation"] = map[string]any{"title": "Managed observation", "content": "content"}
 	call(owned, token, prefix+"save", body, 409)
 	body["operation_id"] = "managed-save"
-	call(owned, token, prefix+"save", body, 201)
+	body["observation"] = map[string]any{"title": "Managed observation", "content": ""}
+	call(owned, token, prefix+"save", body, 400)
+	delete(body, "operation_id")
+	delete(body, "observation")
+	stillPending := call(owned, token, prefix+"close", body, 409)
+	if !strings.Contains(stillPending.Body.String(), "managed_runtime_write_unresolved") {
+		t.Fatal(stillPending.Body)
+	}
+	body["operation_id"] = "managed-save"
+	content := strings.Repeat("x", 9<<10)
+	body["observation"] = map[string]any{"title": "Managed observation", "content": content}
+	saved := call(owned, token, prefix+"save", body, 201)
+	var receipt struct{ ID int64 }
+	if err := json.Unmarshal(saved.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if row, err := st.GetObservation(receipt.ID); err != nil || row.Content != content {
+		t.Fatalf("managed observation content did not round-trip: %v", err)
+	}
 	delete(body, "operation_id")
 	delete(body, "observation")
 	call(owned, token, prefix+"close", body, 200)
