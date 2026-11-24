@@ -107,6 +107,17 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	delete(body, "host")
 
 	call(owned, token, prefix+"write-intent", body, 400)
+	body["operation_id"] = "recoverable-save"
+	content := strings.Repeat("x", 9<<10)
+	body["observation"] = map[string]any{"title": "Recoverable observation", "content": content, "project": "other"}
+	call(owned, token, prefix+"write-intent", body, 400)
+	body["observation"] = map[string]any{"title": "Recoverable observation", "content": content}
+	call(owned, token, prefix+"write-intent", body, 200)
+	body["observation"] = map[string]any{"title": "Recoverable observation", "content": "changed"}
+	call(owned, token, prefix+"save", body, 409)
+	body["observation"] = map[string]any{"title": "Recoverable observation", "content": content}
+	call(owned, token, prefix+"save", body, 201)
+	delete(body, "observation")
 	body["operation_id"] = "managed-save"
 	call(owned, token, prefix+"write-intent", body, 200)
 	delete(body, "operation_id")
@@ -138,7 +149,6 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 		t.Fatal(stillPending.Body)
 	}
 	body["operation_id"] = "managed-save"
-	content := strings.Repeat("x", 9<<10)
 	body["observation"] = map[string]any{"title": "Managed observation", "content": content}
 	saved := call(owned, token, prefix+"save", body, 201)
 	var receipt struct{ ID int64 }

@@ -404,9 +404,21 @@ func copyValidateDB(db *sql.DB, diagnoseV340 bool) error {
 	}
 	current, e := copyCatalog(ref)
 	var managed map[string]copyCatalogObject
+	var managedWithFingerprint map[string]copyCatalogObject
+	var managedWithPayload map[string]copyCatalogObject
 	if _, hasManaged := actual["managed_runtime_generations"]; e == nil && hasManaged {
 		if _, e = ref.Exec(managedRuntimeSchema); e == nil {
 			managed, e = copyCatalog(ref)
+		}
+		if e == nil {
+			if _, e = ref.Exec(managedRuntimeFingerprintMigration); e == nil {
+				managedWithFingerprint, e = copyCatalog(ref)
+			}
+		}
+		if e == nil {
+			if _, e = ref.Exec(managedRuntimePayloadMigration); e == nil {
+				managedWithPayload, e = copyCatalog(ref)
+			}
 		}
 	}
 	e = errors.Join(e, ref.Close())
@@ -426,12 +438,14 @@ func copyValidateDB(db *sql.DB, diagnoseV340 bool) error {
 	if reflect.DeepEqual(actual, current) {
 		return nil
 	}
-	for name, object := range managed {
-		object.SQL = copyNormalizeDDL(object.SQL)
-		managed[name] = object
-	}
-	if managed != nil && reflect.DeepEqual(actual, managed) {
-		return nil
+	for _, profile := range []map[string]copyCatalogObject{managed, managedWithFingerprint, managedWithPayload} {
+		for name, object := range profile {
+			object.SQL = copyNormalizeDDL(object.SQL)
+			profile[name] = object
+		}
+		if profile != nil && reflect.DeepEqual(actual, profile) {
+			return nil
+		}
 	}
 
 	// The immediately preceding catalog differs only by this derived index.

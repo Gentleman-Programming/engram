@@ -4562,10 +4562,10 @@ func ValidateObservationTitle(title string) error {
 // effect-bearing inputs for an observation save. It must include every input
 // that would change the persisted state if it differed, and it must be
 // computed from normalized request fields, before resolving session ownership.
-func observationSaveFingerprint(p AddObservationParams, title, content, project, scope, topicKey string) string {
+func observationSaveFingerprint(p AddObservationParams, title, content, project, scope, topicKey string, extra ...string) string {
 	h := sha256.New()
 	var length [8]byte
-	for _, v := range []string{p.SessionID, p.Type, title, content, p.ToolName, project, scope, topicKey} {
+	for _, v := range append([]string{p.SessionID, p.Type, title, content, p.ToolName, project, scope, topicKey}, extra...) {
 		binary.BigEndian.PutUint64(length[:], uint64(len(v)))
 		h.Write(length[:])
 		h.Write([]byte(v))
@@ -4649,15 +4649,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	return result.ID, err
 }
 
-// AddObservationWithResult persists an observation or returns an exact replay
-// outcome from the operation ledger in the same transaction.
-func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservationResult, error) {
-	if err := p.ProjectProvenance.Validate(); err != nil {
-		return AddObservationResult{}, err
-	}
-	// Normalize project name (lowercase + trim) before any persistence
-	p.Project, _ = NormalizeProject(p.Project)
-
+func (s *Store) prepareObservationBody(p AddObservationParams) (string, string, error) {
 	// Strip <private>...</private> tags before persisting ANYTHING.
 	title := stripPrivateTags(p.Title)
 	content, _ := s.prepareStoredContent(p.Content)
@@ -4667,12 +4659,29 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 	// observation also enqueues a cloud upsert that the sync validators reject,
 	// which blocks every later mutation for the project (#459).
 	if err := ValidateObservationTitle(title); err != nil {
-		return AddObservationResult{}, err
+		return "", "", err
 	}
 	if content == "" {
-		return AddObservationResult{}, ErrObservationContentRequired
+		return "", "", ErrObservationContentRequired
 	}
+	return title, content, nil
+}
 
+// AddObservationWithResult persists an observation or returns an exact replay
+// outcome from the operation ledger in the same transaction.
+func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservationResult, error) {
+	if err := p.ProjectProvenance.Validate(); err != nil {
+		return AddObservationResult{}, err
+	}
+	p.Project, _ = NormalizeProject(p.Project)
+	title, content, err := s.prepareObservationBody(p)
+	if err != nil {
+		return AddObservationResult{}, err
+	}
+	return s.addPreparedObservation(p, title, content)
+}
+
+func (s *Store) addPreparedObservation(p AddObservationParams, title, content string) (AddObservationResult, error) {
 	scope := normalizeScope(p.Scope)
 	normHash := hashNormalized(content)
 	topicKey := normalizeTopicKey(p.TopicKey)
@@ -4684,8 +4693,11 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 		replayed = false
 		var managedConfirmed bool
 		if p.managedRuntime != nil {
+			if err := s.ensureManagedRuntimeWriteColumns(tx); err != nil {
+				return err
+			}
 			var err error
-			managedConfirmed, err = p.managedRuntime.intentState(tx, p.OperationID)
+			managedConfirmed, err = p.managedRuntime.intentState(tx, p.OperationID, managedObservationFingerprint(p, title, content, scope, topicKey))
 			if err != nil {
 				return err
 			}
@@ -4726,7 +4738,7 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 			}
 		}
 		if p.managedRuntime != nil {
-			if _, err := s.execHook(tx, "UPDATE managed_runtime_writes SET confirmed=1 WHERE operation_id=?", p.OperationID); err != nil {
+			if _, err := s.execHook(tx, "UPDATE managed_runtime_writes SET confirmed=1, observation_payload=NULL WHERE operation_id=?", p.OperationID); err != nil {
 				return err
 			}
 		}

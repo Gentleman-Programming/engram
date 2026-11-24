@@ -6,10 +6,73 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/project"
 )
 
 var managedTestHostA = ManagedRuntimeHost{PID: 20, Start: "birth-a", Domain: "local-domain"}
 var managedTestHostB = ManagedRuntimeHost{PID: 21, Start: "birth-b", Domain: "local-domain"}
+
+func TestManagedRuntimeObservationIntentPinsCanonicalPayloadAndCatalog(t *testing.T) {
+	st := newTestStore(t)
+	scope := ManagedRuntimeScope{
+		Root: "root", EffectiveID: "root", Project: "project",
+		Directory: project.RuntimeWorktreeDirectory(t.TempDir()), Mode: SessionOwnershipProjectOwned,
+	}
+	_, generation, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copyValidateDB(st.db, false); err != nil {
+		t.Fatalf("previous optional managed catalog: %v", err)
+	}
+	if _, err := st.db.Exec(managedRuntimeFingerprintMigration); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyValidateDB(st.db, false); err != nil {
+		t.Fatalf("fingerprint-only managed catalog: %v", err)
+	}
+	original := AddObservationParams{Title: "Title", Content: "Visible <private>first secret</private>", Org: "test"}
+	if err := st.RecordManagedRuntimeObservation(scope, generation, "save", original); err != nil {
+		t.Fatal(err)
+	}
+	var staged int
+	if err := st.db.QueryRow("SELECT count(*) FROM managed_runtime_writes WHERE operation_id='save' AND observation_payload IS NOT NULL").Scan(&staged); err != nil || staged != 1 {
+		t.Fatalf("recorded save did not stage its payload: %d, %v", staged, err)
+	}
+	if err := copyValidateDB(st.db, false); err != nil {
+		t.Fatalf("new optional managed catalog: %v", err)
+	}
+	changed := original
+	changed.Content = "different"
+	if err := st.RecordManagedRuntimeObservation(scope, generation, "save", changed); !errors.Is(err, ErrObservationOperationConflict) {
+		t.Fatalf("changed input was accepted for an existing intent: %v", err)
+	}
+	retry := original
+	retry.Content = "Visible <private>different secret</private>"
+	if err := st.RecordManagedRuntimeObservation(scope, generation, "save", retry); err != nil {
+		t.Fatalf("redacted data affected intent identity: %v", err)
+	}
+	retry.OperationID = "save"
+	saved, err := st.SaveManagedRuntimeObservation(scope, generation, retry)
+	if err != nil || saved.ID <= 0 {
+		t.Fatalf("save: %+v, %v", saved, err)
+	}
+	row, err := st.GetObservation(saved.ID)
+	if err != nil || strings.Contains(row.Content, "secret") {
+		t.Fatalf("stored observation contains redacted content: %+v, %v", row, err)
+	}
+	if err := st.RecordManagedRuntimeWrite(scope, generation, "opaque"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordManagedRuntimeObservation(scope, generation, "blocked", original); !errors.Is(err, ErrManagedRuntimeWriteUnresolved) {
+		t.Fatalf("existing opaque intent did not fence new admission: %v", err)
+	}
+	var retained int
+	if err := st.db.QueryRow("SELECT count(*) FROM managed_runtime_writes WHERE observation_payload IS NOT NULL").Scan(&retained); err != nil || retained != 0 {
+		t.Fatalf("confirmed writes retained staged payloads: %d, %v", retained, err)
+	}
+}
 
 func TestManagedRuntimeAttachRegistersAndAdmitsAtomically(t *testing.T) {
 	st := newTestStore(t)
