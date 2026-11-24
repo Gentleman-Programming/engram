@@ -26,7 +26,7 @@ func (s *Store) RecoverManagedRuntimeObservations(scope ManagedRuntimeScope, gen
 		if !current || closed {
 			return ErrManagedRuntimeGeneration
 		}
-		if err := scope.verifyLive(tx); err != nil {
+		if err := scope.verifyLiveOrEnded(tx); err != nil {
 			return err
 		}
 		_, hasPayload, err := managedRuntimeWriteColumns(tx)
