@@ -528,6 +528,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /internal/managed-runtime/retire", s.handleManagedRuntime)
 	s.mux.HandleFunc("POST /internal/managed-runtime/write-intent", s.handleManagedRuntime)
 	s.mux.HandleFunc("POST /internal/managed-runtime/save", s.handleManagedRuntime)
+	s.mux.HandleFunc("POST /internal/managed-runtime/update", s.handleManagedObservationUpdate)
 	s.mux.HandleFunc("POST /internal/managed-runtime/recover-writes", s.handleManagedRuntime)
 	s.mux.HandleFunc("POST /internal/managed-runtime/close", s.handleManagedRuntime)
 	s.mux.HandleFunc("GET /compatibility", requireAuth(s.handleCompatibility))

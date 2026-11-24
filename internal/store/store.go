@@ -4736,6 +4736,11 @@ func (s *Store) addPreparedObservation(p AddObservationParams, title, content st
 			if err != sql.ErrNoRows {
 				return err
 			}
+			if p.managedRuntime == nil {
+				if err := rejectManagedUpdateOperation(tx, p.OperationID); err != nil {
+					return err
+				}
+			}
 		}
 		if p.managedRuntime != nil {
 			if _, err := s.execHook(tx, "UPDATE managed_runtime_writes SET confirmed=1, observation_payload=NULL WHERE operation_id=?", p.OperationID); err != nil {
@@ -5777,127 +5782,142 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 }
 
 func (s *Store) updateObservation(id int64, p UpdateObservationParams, expected *string) (*Observation, error) {
+	if err := s.validateObservationUpdate(p); err != nil {
+		return nil, err
+	}
+	var updated *Observation
+	err := s.withTx(func(tx *sql.Tx) error {
+		var err error
+		updated, err = s.updateObservationTx(tx, id, p, expected)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func (s *Store) validateObservationUpdate(p UpdateObservationParams) error {
 	// Admission runs before the transaction so a rejected update opens no
 	// transaction, touches no row and enqueues no sync mutation. The title is
 	// checked post-strip so redaction cannot smuggle an empty one through.
 	hasFindReplace := p.Find != nil || p.Replace != nil
 	if hasFindReplace && (p.Find == nil || p.Replace == nil) {
-		return nil, ErrObservationFindReplacePairRequired
+		return ErrObservationFindReplacePairRequired
 	}
 	if hasFindReplace && p.Content != nil {
-		return nil, ErrObservationFindReplaceContentConflict
+		return ErrObservationFindReplaceContentConflict
 	}
 	if hasFindReplace && (len(*p.Find) > s.cfg.MaxObservationLength || len(*p.Replace) > s.cfg.MaxObservationLength) {
-		return nil, ErrObservationFindReplaceInputTooLarge
+		return ErrObservationFindReplaceInputTooLarge
 	}
 	if p.Title != nil {
 		if err := ValidateObservationTitle(stripPrivateTags(*p.Title)); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if p.Content != nil && stripPrivateTags(*p.Content) == "" {
-		return nil, ErrObservationContentRequired
+		return ErrObservationContentRequired
 	}
 
+	return nil
+}
+
+func (s *Store) updateObservationTx(tx *sql.Tx, id int64, p UpdateObservationParams, expected *string) (*Observation, error) {
 	hasMetadata := p.Type != nil || p.Title != nil || p.Project != nil || p.Scope != nil || p.TopicKey != nil
-	var updated *Observation
-	err := s.withTx(func(tx *sql.Tx) error {
-		obs, err := s.getObservationTx(tx, id)
-		if errors.Is(err, sql.ErrNoRows) && expected != nil {
-			return ErrObservationNotFound
-		}
-		if err != nil {
-			return err
-		}
-
-		if err := checkExpectedObservationProject(obs, expected); err != nil {
-			return err
-		}
-
-		typ := obs.Type
-		title := obs.Title
-		content := obs.Content
-		project := derefString(obs.Project)
-		if strings.TrimSpace(project) == "" {
-			return ErrProjectRequired
-		}
-		scope := obs.Scope
-		topicKey := derefString(obs.TopicKey)
-
-		if p.Type != nil {
-			typ = *p.Type
-		}
-		if p.Title != nil {
-			title = stripPrivateTags(*p.Title)
-		}
-		if p.Content != nil {
-			content, _ = s.prepareStoredContent(*p.Content)
-		}
-		if hasFindReplace {
-			var contentNoop bool
-			content, contentNoop, err = replaceObservationContent(content, *p.Find, *p.Replace, s.cfg.MaxObservationLength)
-			if err != nil {
-				return err
-			}
-			if contentNoop && !hasMetadata {
-				updated = obs
-				return nil
-			}
-		}
-		if p.Project != nil {
-			requestedProject, _ := NormalizeProject(*p.Project)
-			if requestedProject != project {
-				return ErrObservationProjectImmutable
-			}
-		}
-		if p.Scope != nil {
-			scope = normalizeScope(*p.Scope)
-		}
-		if p.TopicKey != nil {
-			topicKey = normalizeTopicKey(*p.TopicKey)
-		}
-
-		// Capture the pre-update state when the user-visible content (title or
-		// body) actually changes (#184). Metadata-only updates (type, scope,
-		// topic_key) do not create a version entry.
-		if title != obs.Title || content != obs.Content {
-			if err := s.captureObservationVersionTx(tx, obs); err != nil {
-				return err
-			}
-		}
-
-		if _, err := s.execHook(tx,
-			`UPDATE observations
-			 SET type = ?,
-			     title = ?,
-			     content = ?,
-			     project = CAST(? AS TEXT),
-			     scope = ?,
-			     topic_key = ?,
-			     normalized_hash = ?,
-			     revision_count = revision_count + 1,
-			     updated_at = ?
-			 WHERE id = ? AND deleted_at IS NULL`,
-			typ,
-			title,
-			content,
-			nullableString(project),
-			scope,
-			nullableString(topicKey),
-			hashNormalized(content),
-			Now(),
-			id,
-		); err != nil {
-			return err
-		}
-
-		updated, err = s.getObservationTx(tx, id)
-		if err != nil {
-			return err
-		}
-		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, updated.SyncID, SyncOpUpsert, observationPayloadFromObservation(updated))
-	})
+	obs, err := s.getObservationTx(tx, id)
+	if errors.Is(err, sql.ErrNoRows) && expected != nil {
+		return nil, ErrObservationNotFound
+	}
 	if err != nil {
+		return nil, err
+	}
+
+	if err := checkExpectedObservationProject(obs, expected); err != nil {
+		return nil, err
+	}
+
+	typ := obs.Type
+	title := obs.Title
+	content := obs.Content
+	project := derefString(obs.Project)
+	if strings.TrimSpace(project) == "" {
+		return nil, ErrProjectRequired
+	}
+	scope := obs.Scope
+	topicKey := derefString(obs.TopicKey)
+
+	if p.Type != nil {
+		typ = *p.Type
+	}
+	if p.Title != nil {
+		title = stripPrivateTags(*p.Title)
+	}
+	if p.Content != nil {
+		content, _ = s.prepareStoredContent(*p.Content)
+	}
+	if p.Find != nil {
+		var contentNoop bool
+		content, contentNoop, err = replaceObservationContent(content, *p.Find, *p.Replace, s.cfg.MaxObservationLength)
+		if err != nil {
+			return nil, err
+		}
+		if contentNoop && !hasMetadata {
+			return obs, nil
+		}
+	}
+	if p.Project != nil {
+		requestedProject, _ := NormalizeProject(*p.Project)
+		if requestedProject != project {
+			return nil, ErrObservationProjectImmutable
+		}
+	}
+	if p.Scope != nil {
+		scope = normalizeScope(*p.Scope)
+	}
+	if p.TopicKey != nil {
+		topicKey = normalizeTopicKey(*p.TopicKey)
+	}
+
+	// Capture the pre-update state when the user-visible content (title or
+	// body) actually changes (#184). Metadata-only updates (type, scope,
+	// topic_key) do not create a version entry.
+	if title != obs.Title || content != obs.Content {
+		if err := s.captureObservationVersionTx(tx, obs); err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := s.execHook(tx,
+		`UPDATE observations
+		 SET type = ?,
+		     title = ?,
+		     content = ?,
+		     project = CAST(? AS TEXT),
+		     scope = ?,
+		     topic_key = ?,
+		     normalized_hash = ?,
+		     revision_count = revision_count + 1,
+		     updated_at = ?
+		 WHERE id = ? AND deleted_at IS NULL`,
+		typ,
+		title,
+		content,
+		nullableString(project),
+		scope,
+		nullableString(topicKey),
+		hashNormalized(content),
+		Now(),
+		id,
+	); err != nil {
+		return nil, err
+	}
+
+	updated, err := s.getObservationTx(tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, updated.SyncID, SyncOpUpsert, observationPayloadFromObservation(updated)); err != nil {
 		return nil, err
 	}
 	return updated, nil
