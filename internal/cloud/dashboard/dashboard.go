@@ -172,6 +172,7 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("GET /dashboard/projects/{project}", h.requireScopedSession((*handlers).handleProjectDetail))
 	mux.HandleFunc("GET /dashboard/contributors", h.requireScopedSession((*handlers).handleContributors))
 	mux.HandleFunc("GET /dashboard/contributors/list", h.requireScopedSession((*handlers).handleContributorsList))
+	mux.HandleFunc("GET /dashboard/contributors/views/submissions", h.requireScopedSession((*handlers).handleContributorSubmissions))
 	mux.HandleFunc("GET /dashboard/contributors/{contributor}", h.requireScopedSession((*handlers).handleContributorDetail))
 	mux.HandleFunc("GET /dashboard/admin", h.requireScopedSession((*handlers).handleAdmin))
 	mux.HandleFunc("GET /dashboard/admin/projects", h.requireScopedSession((*handlers).handleAdminProjectControls))
@@ -605,12 +606,39 @@ func (h *handlers) handleContributors(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	// R6-1: serve only the shell; the list is loaded via HTMX from /dashboard/contributors/list.
 	// This mirrors the ProjectsPage pattern — no store call at the shell level.
+	_, hasSubmissions := h.cfg.Store.(dashboardChunkSubmitters)
 	component := ContributorsPage(query)
+	if p.IsAdmin() && hasSubmissions {
+		component = ContributorsWithSubmissionsPage(query)
+	}
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return
 	}
 	renderComponent(w, r, Layout("Contributors", p.DisplayName(), "contributors", p.IsAdmin(), h.cfg.Version, component))
+}
+
+type dashboardChunkSubmitters interface {
+	ListAuthenticatedChunkSubmitters(context.Context) ([]cloudstore.DashboardSubmitterRow, error)
+}
+
+func (h *handlers) handleContributorSubmissions(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	submitters, ok := h.cfg.Store.(dashboardChunkSubmitters)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	rows, err := submitters.ListAuthenticatedChunkSubmitters(r.Context())
+	if err != nil {
+		h.renderStoreError(w, r, "contributors", "Authenticated submissions", err)
+		return
+	}
+	renderComponent(w, r, Layout("Authenticated submissions", p.DisplayName(), "contributors", p.IsAdmin(), h.cfg.Version, ContributorSubmissionsPage(rows)))
 }
 
 // handleContributorsList handles GET /dashboard/contributors/list.

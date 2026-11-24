@@ -1,0 +1,51 @@
+package dashboard
+
+import "fmt"
+import "github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+
+templ ContributorsWithSubmissionsPage(search string) {
+	<div>
+		<nav aria-label="Contributor views" class="contributor-view-nav">
+			<a href="/dashboard/contributors/views/submissions">Authenticated submissions</a>
+		</nav>
+		@ContributorsPage(search)
+	</div>
+}
+
+templ ContributorSubmissionsPage(rows []cloudstore.DashboardSubmitterRow) {
+	<section class="frame-section">
+		<div class="section-header">
+			<div>
+				<h2>Authenticated submissions</h2>
+				<p class="muted">Chunks received using each managed identity. Imported chunks retain their original author credit.</p>
+			</div>
+			<a href="/dashboard/contributors">Chunk authors</a>
+		</div>
+		if len(rows) == 0 {
+			@EmptyState("No authenticated submissions", "New chunks received with managed credentials will appear here.")
+		} else {
+			<table class="data-table">
+				<thead>
+					<tr><th>Submitter</th><th>Chunks</th><th>Projects</th><th>Last submission</th></tr>
+				</thead>
+				<tbody>
+					for _, row := range rows {
+						<tr>
+							<td>
+								{ row.DisplayName }
+								if row.Username != "" {
+									<span class="muted">{ "@" + row.Username }</span>
+								} else {
+									<span class="muted">{ "#" + fmt.Sprint(row.PrincipalID) }</span>
+								}
+							</td>
+							<td>{ fmt.Sprint(row.Chunks) }</td>
+							<td>{ fmt.Sprint(row.Projects) }</td>
+							<td>{ row.LastChunkAt.UTC().Format("2006-01-02 15:04 UTC") }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	</section>
+}
