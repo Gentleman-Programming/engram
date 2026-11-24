@@ -15,7 +15,7 @@ func TestHealthDoesNotCalculateStatistics(t *testing.T) {
 	original := loadServerStats
 	t.Cleanup(func() { loadServerStats = original })
 	calls := 0
-	loadServerStats = func(*store.Store) (*store.Stats, error) {
+	loadServerStats = func(*store.Store, context.Context) (*store.Stats, error) {
 		calls++
 		return nil, errors.New("statistics must not run for health")
 	}
