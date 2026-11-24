@@ -73,7 +73,7 @@ func TestLabProtectedScopeReceipt(t *testing.T) {
 	}
 }
 
-func openProtectedAppendFixture(t *testing.T, ctx context.Context) *CloudStore {
+func openProtectedAppendFixture(t *testing.T, ctx context.Context) (*CloudStore, *sql.DB) {
 	t.Helper()
 	dsn := os.Getenv("CLOUDSTORE_TEST_PROTECTED_DELTA_DSN")
 	if dsn == "" {
@@ -135,6 +135,20 @@ func openProtectedAppendFixture(t *testing.T, ctx context.Context) *CloudStore {
 			}
 		})
 	}
+	t.Run("reject overlapping retention role", func(t *testing.T) {
+		tx, err := admin.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, `GRANT cloud_delta_retention_operator TO cloud_delta_owner WITH INHERIT FALSE, SET TRUE`); err != nil {
+			t.Fatal(err)
+		}
+		var pgErr *pgconn.PgError
+		if err := install(tx); !errors.As(err, &pgErr) || pgErr.Message != "startup receipt needs separate existing Cloud runtime and retention roles" {
+			t.Fatalf("expected overlapping role rejection, got %v", err)
+		}
+	})
 	tx, err := admin.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -158,14 +172,38 @@ func openProtectedAppendFixture(t *testing.T, ctx context.Context) *CloudStore {
 			t.Fatalf("ordinary source role must be denied %q, got %v", disallowed, err)
 		}
 	}
-	return cs
+	return cs, admin
 }
 
 func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cs := openProtectedAppendFixture(t, ctx)
-	baseline := func(project string) protectedReceipt {
+	cs, admin := openProtectedAppendFixture(t, ctx)
+	t.Run("reject shadowed project equality", func(t *testing.T) {
+		// Keep the custom search path on the same isolated database connection.
+		cs.db.SetMaxOpenConns(1)
+		t.Cleanup(func() {
+			if _, err := cs.db.ExecContext(ctx, `RESET search_path; DROP OPERATOR public.= (text,text); DROP FUNCTION public.fixture_equal(text,text)`); err != nil {
+				t.Error(err)
+			}
+			cs.db.SetMaxOpenConns(0)
+		})
+		if _, err := cs.db.ExecContext(ctx, `
+			CREATE FUNCTION public.fixture_equal(text,text) RETURNS boolean LANGUAGE sql IMMUTABLE
+			AS 'SELECT pg_catalog.lower($1) OPERATOR(pg_catalog.=) pg_catalog.lower($2)';
+			CREATE OPERATOR public.= (FUNCTION=public.fixture_equal, LEFTARG=text, RIGHTARG=text);
+			SET search_path TO public, pg_catalog`); err != nil {
+			t.Fatal(err)
+		}
+		var aliasesEqual bool
+		if err := cs.db.QueryRowContext(ctx, `SELECT 'alpha'::text = 'ALPHA'::text`).Scan(&aliasesEqual); err != nil || !aliasesEqual {
+			t.Fatalf("expected ordinary project equality to use the custom operator: %v (%v)", aliasesEqual, err)
+		}
+		if _, err := captureProtectedReceipt(ctx, cs.db, []string{"alpha"}); err == nil {
+			t.Fatal("receipt prepared with different project equality")
+		}
+	})
+	baseline := func(t *testing.T, project string) protectedReceipt {
 		t.Helper()
 		receipt, err := captureProtectedReceipt(ctx, cs.db, []string{project})
 		if err != nil {
@@ -178,7 +216,7 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 			continue
 		}
 		t.Run("reject reuse with "+source.name, func(t *testing.T) {
-			prior := baseline("source-eligibility")
+			prior := baseline(t, "source-eligibility")
 			if _, err := cs.db.ExecContext(ctx, source.change); err != nil {
 				t.Fatal(err)
 			}
@@ -205,6 +243,33 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 		return seq[0]
 	}
 	const insertUncovered = `INSERT INTO cloud_mutations(project, entity, entity_key, op, payload) VALUES ($1,'observation',$2,'upsert',$3) RETURNING seq`
+	t.Run("replica mode records a destructive event", func(t *testing.T) {
+		const project = "replica-audit"
+		prior := baseline(t, project)
+		tx, err := admin.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, `SET LOCAL session_replication_role TO replica`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, insertUncovered, project, "replica-audit-row", receiptAppendObservation("replica-audit-row", "unmaterialized")); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		next, events, err := tryProtectedDelta(ctx, cs.db, prior)
+		if !errors.Is(err, errReceiptAppendUnproven) || !sameLabProtectedReceipt(prior, next) ||
+			!slices.ContainsFunc(events, func(e receiptAppendEvent) bool { return e.kind == "destructive" }) {
+			t.Fatalf("replica write must mark previous proof unproven: %+v (%v)", events, err)
+		}
+		report, err := cs.BackfillMutationChunks(ctx, project, true)
+		if err != nil || report.ChunksInserted != 1 {
+			t.Fatalf("ordinary repair must insert the missing chunk: %+v (%v)", report, err)
+		}
+	})
 	insertMissing := func(db *sql.DB, project, id string) int64 {
 		t.Helper()
 		var seq int64
@@ -223,14 +288,14 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 		if err != nil || report.ChunksPlanned != 1 || report.ChunksInserted != 1 {
 			t.Fatalf("ordinary fallback for %q failed: %+v, %v", prior.projects[0], report, err)
 		}
-		repaired := baseline(prior.projects[0])
+		repaired := baseline(t, prior.projects[0])
 		if _, events, err := tryProtectedDelta(ctx, cs.db, repaired); err != nil || len(events) != 0 {
 			t.Fatalf("post-repair receipt must verify with zero events: %+v (%v)", events, err)
 		}
 		t.Logf("%s event %s -> legacy planned and inserted one chunk -> zero-event recovery", prior.projects[0], kind)
 	}
 
-	healthy := baseline("healthy")
+	healthy := baseline(t, "healthy")
 	// Rerun the actual schema initialization to check its idempotent DDL and
 	// zero-row updates leave the protected warm receipt usable.
 	if err := cs.migrate(ctx); err != nil {
@@ -251,7 +316,7 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 	testLabProtectedWitness(t, ctx, cs.db, healthy, advanced)
 	t.Log("healthy append accepted three actual events, then zero after receipt advance")
 
-	missing := baseline("missing")
+	missing := baseline(t, "missing")
 	assertLegacyFallback(missing, "journal", insertMissing(cs.db, "missing", "missing-observation"))
 
 	// Keep the lower journal INSERT uncommitted until a later normal writer is
@@ -266,7 +331,7 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	highSeq := appendBatch("late", store.SyncEntityObservation, "higher-observation", receiptAppendObservation("higher-observation", "visible"))
-	late := baseline("late")
+	late := baseline(t, "late")
 	if _, events, err := tryProtectedDelta(ctx, cs.db, late); err != nil || len(events) != 0 {
 		t.Fatalf("current still-invisible pending transaction: events=%+v (%v)", events, err)
 	}
@@ -289,7 +354,7 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 	assertLegacyFallback(late, "journal", lowSeq)
 
 	appendBatch("ddl", store.SyncEntityObservation, "legacy-raw", receiptAppendObservation("legacy-raw", "original"))
-	drift := baseline("ddl")
+	drift := baseline(t, "ddl")
 	if _, err := cs.db.ExecContext(ctx, `BEGIN;
 		ALTER TABLE cloud_mutations DISABLE TRIGGER receipt_update;
 		UPDATE cloud_mutations SET payload = jsonb_set(payload,'{content}','"changed during DDL"') WHERE project='ddl';
@@ -301,7 +366,7 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 	// catalog-dirty event (the row UPDATE trigger did not fire).
 	assertLegacyFallback(drift, "catalog-dirty", 0)
 
-	capReceipt := baseline("overflow")
+	capReceipt := baseline(t, "overflow")
 	if _, err := cs.db.ExecContext(ctx, `INSERT INTO cloud_mutations(project,entity,entity_key,op,payload)
 		SELECT 'overflow','ignored',i::text,'upsert','{}'::jsonb FROM generate_series(1,$1) i`, receiptAppendEventCap+5); err != nil {
 		t.Fatal(err)
@@ -309,7 +374,7 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 	if next, events, err := tryProtectedDelta(ctx, cs.db, capReceipt); !sameLabProtectedReceipt(next, capReceipt) || !errors.Is(err, errReceiptAppendUnproven) || len(events) != receiptAppendEventCap+1 {
 		t.Fatalf("select at most cap+1 before fallback: events=%d (%v)", len(events), err)
 	}
-	future := baseline("currently-invisible")
+	future := baseline(t, "currently-invisible")
 	active, err := cs.db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -326,11 +391,11 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	retained := baseline("retained-query")
+	retained := baseline(t, "retained-query")
 	prunedSeq := insertMissing(cs.db, "retained-query", "pruned-observation")
 	testLabConcurrentRetentionQuery(t, ctx, cs, retained, prunedSeq)
 
-	outside := baseline("healthy")
+	outside := baseline(t, "healthy")
 	if _, err := cs.db.ExecContext(ctx, `INSERT INTO cloud_chunks(project_name,chunk_id,created_by,payload)
 		VALUES ('outside-repair','new','fixture','{"sessions":[{"id":" opaque outside "}]}')`); err != nil {
 		t.Fatal(err)

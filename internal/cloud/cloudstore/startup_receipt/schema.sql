@@ -5,12 +5,16 @@ SET LOCAL search_path=pg_catalog,pg_temp;
 DO $$
 DECLARE runtime_role text := current_setting('engram.startup_receipt_runtime_role');
 DECLARE retention_role text := current_setting('engram.startup_receipt_retention_role');
+DECLARE runtime_oid oid;
+DECLARE retention_oid oid;
 BEGIN
-  IF runtime_role=retention_role OR NOT EXISTS (
-    SELECT FROM pg_catalog.pg_roles WHERE rolname=runtime_role
-      AND NOT (rolsuper OR rolcreaterole OR rolreplication OR rolbypassrls)
-  ) OR NOT EXISTS (
-    SELECT FROM pg_catalog.pg_roles WHERE rolname=retention_role
+  SELECT oid INTO runtime_oid FROM pg_catalog.pg_roles WHERE rolname=runtime_role
+    AND NOT (rolsuper OR rolcreaterole OR rolreplication OR rolbypassrls);
+  SELECT oid INTO retention_oid FROM pg_catalog.pg_roles WHERE rolname=retention_role;
+  IF runtime_oid IS NULL OR retention_oid IS NULL OR EXISTS (
+    SELECT FROM pg_catalog.pg_roles r
+    WHERE (r.oid=runtime_oid OR pg_catalog.pg_has_role(runtime_oid,r.oid,'SET'))
+      AND pg_catalog.pg_has_role(r.oid,retention_oid,'USAGE')
   ) THEN
     RAISE EXCEPTION 'startup receipt needs separate existing Cloud runtime and retention roles';
   END IF;
@@ -52,7 +56,7 @@ END $$;
 
 CREATE FUNCTION receipt_audit.record_other() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 BEGIN
-  IF TG_OP='TRUNCATE' THEN
+  IF TG_LEVEL='ROW' OR TG_OP='TRUNCATE' THEN
     INSERT INTO receipt_audit.events VALUES(pg_current_xact_id(),'destructive',NULL,NULL,NULL);
   ELSIF EXISTS(SELECT FROM old_rows) THEN
     INSERT INTO receipt_audit.events VALUES(pg_current_xact_id(),'destructive',NULL,NULL,NULL);
@@ -69,12 +73,16 @@ BEGIN
     EXECUTE format('CREATE TRIGGER receipt_delete AFTER DELETE ON public.%I REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION receipt_audit.record_other()',source);
     EXECUTE format('CREATE TRIGGER receipt_truncate AFTER TRUNCATE ON public.%I FOR EACH STATEMENT EXECUTE FUNCTION receipt_audit.record_other()',source);
     EXECUTE format('ALTER TABLE public.%I ENABLE ALWAYS TRIGGER receipt_insert, ENABLE ALWAYS TRIGGER receipt_update, ENABLE ALWAYS TRIGGER receipt_delete, ENABLE ALWAYS TRIGGER receipt_truncate',source);
+    -- Ongoing logical apply uses row triggers for DML. Invalidate the receipt
+    -- on those changes without invoking a row trigger on ordinary Cloud writes.
+    EXECUTE format('CREATE TRIGGER receipt_replica_change AFTER INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION receipt_audit.record_other()',source);
+    EXECUTE format('ALTER TABLE public.%I ENABLE REPLICA TRIGGER receipt_replica_change',source);
   END LOOP;
 END $$;
 
 -- The audit only covers writes to these three tables. Their rows must also
 -- survive recovery and have identical visibility for the proof and repair.
-CREATE FUNCTION receipt_audit.catalog() RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+CREATE FUNCTION receipt_audit.catalog_v4() RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
   SELECT jsonb_agg(jsonb_build_array(source.name,c.oid,c.relnamespace,c.relfilenode,c.relpersistence,c.relkind,c.relrowsecurity,
     (SELECT jsonb_agg(jsonb_build_array(a.attnum,a.attname,a.atttypid,a.attcollation,a.attnotnull,a.attgenerated,pg_get_expr(d.adbin,d.adrelid)) ORDER BY a.attnum)
       FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
@@ -90,11 +98,11 @@ CREATE FUNCTION receipt_audit.catalog() RETURNS jsonb LANGUAGE sql STABLE SECURI
 $$;
 DO $$
 BEGIN
-  IF receipt_audit.catalog() IS NULL THEN
+  IF receipt_audit.catalog_v4() IS NULL THEN
     RAISE EXCEPTION 'startup receipt requires ordinary permanent source tables without row security or inheritance';
   END IF;
 END $$;
-INSERT INTO receipt_audit.enrollment SELECT receipt_audit.catalog(),gen_random_uuid(),'0'::xid8;
+INSERT INTO receipt_audit.enrollment SELECT receipt_audit.catalog_v4(),gen_random_uuid(),'0'::xid8;
 
 CREATE FUNCTION receipt_audit.identity() RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
   SELECT system_identifier::text || ':' || database.oid::text || ':' || enrollment.epoch::text
@@ -104,14 +112,14 @@ $$;
 
 CREATE FUNCTION receipt_audit.record_catalog() RETURNS event_trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 BEGIN
-  IF (SELECT receipt_audit.catalog()=expected FROM receipt_audit.enrollment) IS NOT TRUE THEN
+  IF (SELECT receipt_audit.catalog_v4()=expected FROM receipt_audit.enrollment) IS NOT TRUE THEN
     INSERT INTO receipt_audit.events VALUES(pg_current_xact_id(),'catalog-dirty',NULL,NULL,NULL);
   END IF;
 END $$;
 REVOKE EXECUTE ON FUNCTION receipt_audit.record_catalog() FROM PUBLIC;
 CREATE EVENT TRIGGER receipt_catalog_ddl ON ddl_command_end EXECUTE FUNCTION receipt_audit.record_catalog();
 ALTER EVENT TRIGGER receipt_catalog_ddl ENABLE ALWAYS;
-REVOKE EXECUTE ON FUNCTION receipt_audit.identity(), receipt_audit.catalog() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION receipt_audit.identity(), receipt_audit.catalog_v4() FROM PUBLIC;
 
 -- Retention uses MVCC DELETE. A proof already in flight can finish with its
 -- old enrollment/event snapshot, and later reads observe its floor or epoch.
@@ -146,7 +154,7 @@ DECLARE retention_role text := current_setting('engram.startup_receipt_retention
 BEGIN
   EXECUTE format('GRANT USAGE ON SCHEMA receipt_audit TO %I, %I',runtime_role,retention_role);
   EXECUTE format('GRANT SELECT ON receipt_audit.events, receipt_audit.enrollment, receipt_audit.witnesses TO %I',runtime_role);
-  EXECUTE format('GRANT EXECUTE ON FUNCTION receipt_audit.identity(), receipt_audit.catalog(), receipt_audit.save_witness(text) TO %I',runtime_role);
+  EXECUTE format('GRANT EXECUTE ON FUNCTION receipt_audit.identity(), receipt_audit.catalog_v4(), receipt_audit.save_witness(text) TO %I',runtime_role);
   EXECUTE format('GRANT EXECUTE ON FUNCTION receipt_audit.prune_prefix(xid8),receipt_audit.reset_log() TO %I',retention_role);
 END $$;
 
@@ -177,7 +185,7 @@ BEGIN
     CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
     WHERE p.pronamespace=audit_oid AND a.grantee<>p.proowner
       AND (a.privilege_type<>'EXECUTE' OR a.is_grantable OR NOT (
-        (a.grantee=runtime_oid AND p.proname IN ('identity','catalog','save_witness')) OR
+        (a.grantee=runtime_oid AND p.proname IN ('identity','catalog_v4','save_witness')) OR
         (a.grantee=retention_oid AND p.proname IN ('prune_prefix','reset_log'))
       ))
   ) THEN

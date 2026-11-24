@@ -100,12 +100,16 @@ func readAppendChunkMembership(ctx context.Context, tx *sql.Tx, chunks []receipt
 	for _, event := range chunks {
 		projects, ids = append(projects, event.project), append(ids, event.id)
 	}
+	// Enforce the transfer budget in SQL too. Closing the result may drain
+	// remaining rows even after the verifier sees one it cannot accept.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT c.project_name, c.chunk_id,
-		       CASE WHEN octet_length(c.payload::text) <= $3 THEN c.payload::text END
+		       CASE WHEN octet_length(c.payload::text) <= $3
+		                  AND sum(octet_length(c.payload::text)) OVER (ORDER BY requested.position ROWS UNBOUNDED PRECEDING) <= $4
+		            THEN c.payload::text END
 		FROM unnest($1::text[], $2::text[]) WITH ORDINALITY requested(project, id, position)
 		JOIN cloud_chunks c ON c.project_name=requested.project AND c.chunk_id=requested.id
-		ORDER BY requested.position`, projects, ids, receiptAppendRowBytes)
+		ORDER BY requested.position`, projects, ids, receiptAppendRowBytes, *remaining)
 	if err != nil {
 		return err
 	}
@@ -163,12 +167,15 @@ func checkAppendJournal(ctx context.Context, tx *sql.Tx, journal []receiptAppend
 	for _, event := range journal {
 		seqs = append(seqs, event.seq)
 	}
+	// Reuse the remaining budget after accounting for the chunk response.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT m.seq, m.project, m.entity, m.entity_key, m.op,
-		       CASE WHEN octet_length(m.payload::text) <= $2 THEN m.payload::text END
+		       CASE WHEN octet_length(m.payload::text) <= $2
+		                  AND sum(octet_length(m.payload::text)) OVER (ORDER BY requested.position ROWS UNBOUNDED PRECEDING) <= $3
+		            THEN m.payload::text END
 		FROM unnest($1::bigint[]) WITH ORDINALITY requested(seq, position)
 		JOIN cloud_mutations m ON m.seq=requested.seq
-		ORDER BY requested.position`, seqs, receiptAppendRowBytes)
+		ORDER BY requested.position`, seqs, receiptAppendRowBytes, *remaining)
 	if err != nil {
 		return err
 	}

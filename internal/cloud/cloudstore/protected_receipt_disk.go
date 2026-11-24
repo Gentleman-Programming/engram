@@ -75,12 +75,17 @@ func PrepareProtectedStartupReceipt(ctx context.Context, cfg cloud.Config, proje
 		return fmt.Errorf("cloud startup receipt could not open PostgreSQL")
 	}
 	defer func() { _ = cs.Close() }()
-	if err := captureProtectedDiskReceipt(ctx, cs.db, projects, root); err != nil {
+	receipt, err := captureProtectedReceipt(ctx, cs.db, projects)
+	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return fmt.Errorf("cloud startup receipt could not prove coverage for the configured projects")
 	}
+	if err := writeProtectedDiskReceipt(root, protectedReceiptName, receipt); err != nil {
+		return fmt.Errorf("cloud startup receipt could not store the verified receipt in the configured directory")
+	}
+	fmt.Fprintln(os.Stderr, "engram cloud startup: stored protected no-op receipt")
 	return nil
 }
 
@@ -123,18 +128,6 @@ func reuseProtectedDiskReceipt(ctx context.Context, db *sql.DB, projects []strin
 	}
 	fmt.Fprintf(os.Stderr, "engram cloud startup: protected receipt reused (events=%d)\n", len(events))
 	return true
-}
-
-func captureProtectedDiskReceipt(ctx context.Context, db *sql.DB, projects []string, root *os.Root) error {
-	receipt, err := captureProtectedReceipt(ctx, db, projects)
-	if err != nil {
-		return err
-	}
-	if err := writeProtectedDiskReceipt(root, protectedReceiptName, receipt); err != nil {
-		return err
-	}
-	fmt.Fprintln(os.Stderr, "engram cloud startup: stored protected no-op receipt")
-	return nil
 }
 
 func readProtectedDiskReceipt(root *os.Root, name string) (protectedReceipt, error) {

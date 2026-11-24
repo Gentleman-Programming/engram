@@ -21,7 +21,7 @@ WITH attainable AS (
     -- Exact record_catalog body in startup_receipt/schema.sql (LF normalized).
     AND pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
       pg_catalog.replace(r.prosrc,E'\r\n',E'\n'),'UTF8')),'hex')
-      ='3cbfa1a75cbc013d2bc935f7dc77aa5f60db98f699b844b28908566ecd45de32'
+      ='6482f5bae6c1b9d012436039efa9d292008019da53be009262989976977f67e6'
 ), protected AS (
   SELECT (SELECT oid FROM tables WHERE relname='events') AS events,
          (SELECT oid FROM tables WHERE relname='enrollment') AS enrollment,
@@ -29,7 +29,7 @@ WITH attainable AS (
          (SELECT oid FROM routines WHERE proname='reset_log' AND pronargs=0) AS reset,
          (SELECT oid FROM routines WHERE proname='prune_prefix' AND pronargs=1 AND proargtypes[0]='pg_catalog.xid8'::pg_catalog.regtype) AS prune,
          (SELECT oid FROM routines WHERE proname='identity' AND pronargs=0) AS identity,
-         (SELECT oid FROM routines WHERE proname='catalog' AND pronargs=0) AS catalog,
+         (SELECT oid FROM routines WHERE proname='catalog_v4' AND pronargs=0) AS catalog,
          (SELECT oid FROM routines WHERE proname='save_witness' AND pronargs=1
             AND proargtypes[0]='pg_catalog.text'::pg_catalog.regtype) AS save_witness,
          (SELECT oid FROM audit) AS ns

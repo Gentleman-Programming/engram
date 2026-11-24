@@ -4,7 +4,7 @@ An enrolled Engram Cloud operator can prepare a local receipt before restarting 
 
 This opt-in expects a Linux Cloud process, PostgreSQL 16 or later, and a finite `ENGRAM_CLOUD_ALLOWED_PROJECTS` list. Use an existing private directory owned by the Cloud process user for `ENGRAM_CLOUD_STARTUP_RECEIPT_DIR`. The process needs to read and write the directory. Use storage local to the Cloud deployment with persistent space for the receipt. Each directory serves one configured PostgreSQL database and project list.
 
-The `cloud_mutations`, `cloud_chunks` and `cloud_project_sessions` tables in `public` must be ordinary permanent tables without row security or inheritance. Enrollment rejects unsupported sources. After enrollment, startup uses ordinary repair whenever source eligibility cannot be verified.
+The `cloud_mutations`, `cloud_chunks` and `cloud_project_sessions` tables in `public` must be ordinary permanent tables without row security or inheritance. Enrollment rejects unsupported sources. After enrollment, startup uses ordinary repair whenever source eligibility cannot be verified or a replicated write needs verification through the full scan.
 
 ## Install and prepare
 
@@ -26,7 +26,7 @@ The `cloud_mutations`, `cloud_chunks` and `cloud_project_sessions` tables in `pu
    engram cloud repair prepare-startup-receipt
    ```
 
-   The command verifies an existing PostgreSQL snapshot without changing application rows. It commits a witness in the audit schema in that same transaction before storing `startup-receipt-v3.json` in the private directory. If preparation reports incomplete coverage, start normally so Engram can run repair, then prepare again.
+   The command verifies an existing PostgreSQL snapshot without changing application rows. It commits a witness in the audit schema in that same transaction before storing `startup-receipt-v3.json` in the private directory. If preparation reports incomplete coverage, start normally so Engram can run repair, then prepare again. A storage error calls for checking the space and write permissions of the receipt directory before retrying.
 
 4. Restart `engram cloud serve` with the same settings. The log entry `protected receipt reused` confirms bounded startup. When scope or database enrollment changes, prepare a new receipt. A timeout, a missing witness after a physical restore, or a declined proof resumes ordinary startup repair. Quiet restarts reuse the existing witness. A verified append records a fresh witness before advancing the receipt. Retention prunes old witnesses with the audit history.
 

@@ -20,11 +20,23 @@ func startupSnapshot(ctx context.Context, db *sql.DB, readOnly bool) (*sql.Tx, e
 	}
 	// Resolve and lock the same source relations as the ordinary startup
 	// path before applying the compiler's fixed deparser search path.
-	var usesFixtureSource bool
-	err = tx.QueryRowContext(ctx, "SELECT 'cloud_chunks'::pg_catalog.regclass = 'public.cloud_chunks'::pg_catalog.regclass AND 'cloud_mutations'::pg_catalog.regclass = 'public.cloud_mutations'::pg_catalog.regclass AND 'cloud_project_sessions'::pg_catalog.regclass = 'public.cloud_project_sessions'::pg_catalog.regclass").Scan(&usesFixtureSource)
-	if err != nil || !usesFixtureSource {
+	var matchesOrdinaryPath bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT 'cloud_chunks'::pg_catalog.regclass OPERATOR(pg_catalog.=) 'public.cloud_chunks'::pg_catalog.regclass
+		   AND 'cloud_mutations'::pg_catalog.regclass OPERATOR(pg_catalog.=) 'public.cloud_mutations'::pg_catalog.regclass
+		   AND 'cloud_project_sessions'::pg_catalog.regclass OPERATOR(pg_catalog.=) 'public.cloud_project_sessions'::pg_catalog.regclass
+		   AND (pg_catalog.to_regoperator('=(pg_catalog.text,pg_catalog.text)') OPERATOR(pg_catalog.=)
+		        pg_catalog.to_regoperator('pg_catalog.=(pg_catalog.text,pg_catalog.text)')) IS TRUE
+		   AND (
+		      SELECT count(*) OPERATOR(pg_catalog.=) 2 FROM pg_catalog.pg_attribute a
+		      WHERE a.atttypid OPERATOR(pg_catalog.=) 'pg_catalog.text'::pg_catalog.regtype
+		        AND ((a.attrelid OPERATOR(pg_catalog.=) 'public.cloud_chunks'::pg_catalog.regclass AND a.attname OPERATOR(pg_catalog.=) 'project_name')
+		          OR (a.attrelid OPERATOR(pg_catalog.=) 'public.cloud_mutations'::pg_catalog.regclass AND a.attname OPERATOR(pg_catalog.=) 'project'))
+		   )
+	`).Scan(&matchesOrdinaryPath)
+	if err != nil || !matchesOrdinaryPath {
 		_ = tx.Rollback()
-		return nil, errors.New("startup relations differ from the proof schema")
+		return nil, errors.New("startup relations or project equality differ from the proof schema")
 	}
 	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path TO pg_catalog, public, pg_temp"); err != nil {
 		_ = tx.Rollback()
