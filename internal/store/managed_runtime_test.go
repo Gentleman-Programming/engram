@@ -36,6 +36,10 @@ func TestManagedRuntimeObservationIntentPinsCanonicalPayloadAndCatalog(t *testin
 	if err := st.RecordManagedRuntimeObservation(scope, generation, "save", original); err != nil {
 		t.Fatal(err)
 	}
+	var staged int
+	if err := st.db.QueryRow("SELECT count(*) FROM managed_runtime_writes WHERE operation_id='save' AND observation_payload IS NOT NULL").Scan(&staged); err != nil || staged != 1 {
+		t.Fatalf("recorded save did not stage its payload: %d, %v", staged, err)
+	}
 	if err := copyValidateDB(st.db, false); err != nil {
 		t.Fatalf("new optional managed catalog: %v", err)
 	}
