@@ -2,7 +2,7 @@
 
 An enrolled Engram Cloud operator can prepare a local receipt before restarting the server. The receipt records which PostgreSQL snapshot already had complete session indexing and mutation chunk coverage. Later starts try a bounded audit check and run ordinary startup repair if that check cannot prove coverage.
 
-This opt-in expects a Linux Cloud process, PostgreSQL 16 or later, and a finite `ENGRAM_CLOUD_ALLOWED_PROJECTS` list. Use an existing private directory owned by the Cloud process user for `ENGRAM_CLOUD_STARTUP_RECEIPT_DIR`. The process needs to read and write the directory. Use storage local to the Cloud deployment with persistent space for the receipt. Each directory serves one configured PostgreSQL database and project list.
+This opt-in expects a Linux Cloud process, PostgreSQL 16 or later, and a finite `ENGRAM_CLOUD_ALLOWED_PROJECTS` list. The PostgreSQL database and client connection must both use UTF-8 so the proof can bound the bytes returned by PostgreSQL. Use an existing private directory owned by the Cloud process user for `ENGRAM_CLOUD_STARTUP_RECEIPT_DIR`. The process needs to read and write the directory. Use storage local to the Cloud deployment with persistent space for the receipt. Each directory serves one configured PostgreSQL database and project list.
 
 The `cloud_mutations`, `cloud_chunks` and `cloud_project_sessions` tables in `public` must be ordinary permanent tables without row security or inheritance. Enrollment rejects unsupported sources. After enrollment, startup uses ordinary repair whenever source eligibility cannot be verified or a replicated write needs verification through the full scan.
 

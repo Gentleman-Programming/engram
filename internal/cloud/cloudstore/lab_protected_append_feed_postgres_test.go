@@ -179,6 +179,21 @@ func TestLabProtectedAppendFeedPostgres(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cs, admin := openProtectedAppendFixture(t, ctx)
+	t.Run("reject a different client encoding", func(t *testing.T) {
+		cs.db.SetMaxOpenConns(1)
+		t.Cleanup(func() {
+			if _, err := cs.db.ExecContext(ctx, `RESET client_encoding`); err != nil {
+				t.Error(err)
+			}
+			cs.db.SetMaxOpenConns(0)
+		})
+		if _, err := cs.db.ExecContext(ctx, `SET client_encoding TO LATIN1`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := captureProtectedReceipt(ctx, cs.db, []string{"alpha"}); err == nil {
+			t.Fatal("receipt prepared with an unaccounted client encoding")
+		}
+	})
 	t.Run("reject shadowed project equality", func(t *testing.T) {
 		// Keep the custom search path on the same isolated database connection.
 		cs.db.SetMaxOpenConns(1)

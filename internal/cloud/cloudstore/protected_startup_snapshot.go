@@ -22,7 +22,9 @@ func startupSnapshot(ctx context.Context, db *sql.DB, readOnly bool) (*sql.Tx, e
 	// path before applying the compiler's fixed deparser search path.
 	var matchesOrdinaryPath bool
 	err = tx.QueryRowContext(ctx, `
-		SELECT 'cloud_chunks'::pg_catalog.regclass OPERATOR(pg_catalog.=) 'public.cloud_chunks'::pg_catalog.regclass
+		SELECT pg_catalog.current_setting('server_encoding') OPERATOR(pg_catalog.=) 'UTF8'
+		   AND pg_catalog.current_setting('client_encoding') OPERATOR(pg_catalog.=) 'UTF8'
+		   AND 'cloud_chunks'::pg_catalog.regclass OPERATOR(pg_catalog.=) 'public.cloud_chunks'::pg_catalog.regclass
 		   AND 'cloud_mutations'::pg_catalog.regclass OPERATOR(pg_catalog.=) 'public.cloud_mutations'::pg_catalog.regclass
 		   AND 'cloud_project_sessions'::pg_catalog.regclass OPERATOR(pg_catalog.=) 'public.cloud_project_sessions'::pg_catalog.regclass
 		   AND (pg_catalog.to_regoperator('=(pg_catalog.text,pg_catalog.text)') OPERATOR(pg_catalog.=)
@@ -36,7 +38,7 @@ func startupSnapshot(ctx context.Context, db *sql.DB, readOnly bool) (*sql.Tx, e
 	`).Scan(&matchesOrdinaryPath)
 	if err != nil || !matchesOrdinaryPath {
 		_ = tx.Rollback()
-		return nil, errors.New("startup relations or project equality differ from the proof schema")
+		return nil, errors.New("startup encoding, relations, or project equality differ from the proof requirements")
 	}
 	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path TO pg_catalog, public, pg_temp"); err != nil {
 		_ = tx.Rollback()
