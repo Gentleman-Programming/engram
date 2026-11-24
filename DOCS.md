@@ -39,6 +39,7 @@ For other docs:
 | [Cloud Inbox State](docs/CLOUD-INBOX-STATE.md) | Read-only foreign state, reserved inbox retention and transport exclusion |
 | [Agent Contract](docs/AGENT-CONTRACT.md)    | Go-owned MCP agent-contract foundation, generation, digest, and explicit Pi parity gaps |
 | [Pi HTTP Runtime Contract](docs/RUNTIME-CONTRACT.md) | Separate Go HTTP handler registry, identity, digest, and expected projection |
+| [Preparatory Windows metadata](docs/WINDOWS-VERSION-RESOURCE.md) | Build-only version-resource helper, disposable fixtures and verification limits |
 | [Architecture](docs/ARCHITECTURE.md)        | How it works, session lifecycle, CLI reference, project structure                             |
 | [Plugins](docs/PLUGINS.md)                  | OpenCode & Claude Code plugin details                                                         |
 | [Team Usage](docs/TEAM-USAGE.md)            | Scope conventions, language strategy, and sync behavior for collaborative teams               |
@@ -111,6 +112,7 @@ This catalog covers the tracked Markdown documentation surfaces. **Owner `GP`** 
 | [docs/RELEASE-POLICY.md](docs/RELEASE-POLICY.md) | Maintainers | Policy: releases | Living | GP |
 | [docs/SELF-TESTING.md](docs/SELF-TESTING.md) | Maintainers | Guide: self-tests | Living | GP |
 | [docs/TEAM-USAGE.md](docs/TEAM-USAGE.md) | Teams | Guide: collaboration | Living | GP |
+| [docs/WINDOWS-VERSION-RESOURCE.md](docs/WINDOWS-VERSION-RESOURCE.md) | Maintainers | Guide: preparatory Windows metadata tooling | Living; release integration deferred | GP |
 | [docs/beta/obsidian-brain.md](docs/beta/obsidian-brain.md) | Beta users | Guide: Obsidian export | Beta | GP |
 | [docs/codebase/*.md](docs/codebase/) | Maintainers | Guide: codebase maps and operations | Living | GP |
 | [docs/engram-cloud/README.md](docs/engram-cloud/README.md) | Cloud readers | Guide: cloud entry point | Living | GP |
