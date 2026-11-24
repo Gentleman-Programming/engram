@@ -25,11 +25,19 @@ func inheritedOwnedListener() (net.Listener, error) {
 		return nil, errors.New("session-owned descriptor 3 is not a listening socket")
 	}
 	local, err := unix.Getsockname(descriptor)
+	if err != nil {
+		return nil, fmt.Errorf("read inherited session-owned listener address: %w", err)
+	}
 	address, ipv4 := local.(*unix.SockaddrInet4)
-	protocol, protocolErr := unix.GetsockoptInt(descriptor, unix.SOL_SOCKET, unix.SO_PROTOCOL)
-	if err != nil || !ipv4 || address.Addr != [4]byte{127, 0, 0, 1} || address.Port == 0 ||
-		protocolErr != nil || protocol != unix.IPPROTO_TCP {
-		return nil, errors.New("inherited session-owned listener must be bound to TCP on IPv4 loopback")
+	if !ipv4 || address.Addr != [4]byte{127, 0, 0, 1} || address.Port == 0 {
+		return nil, fmt.Errorf("inherited session-owned listener must be bound to IPv4 loopback (got %T %v)", local, local)
+	}
+	protocol, err := unix.GetsockoptInt(descriptor, unix.SOL_SOCKET, unix.SO_PROTOCOL)
+	if err != nil {
+		return nil, fmt.Errorf("read inherited session-owned listener protocol: %w", err)
+	}
+	if protocol != unix.IPPROTO_TCP {
+		return nil, fmt.Errorf("inherited session-owned listener must use TCP (got protocol %d)", protocol)
 	}
 	file := os.NewFile(descriptor, "session-owned listener")
 	defer func() { _ = file.Close() }()
