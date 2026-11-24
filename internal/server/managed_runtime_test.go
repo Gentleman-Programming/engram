@@ -80,6 +80,10 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	}
 	delete(body, "resume")
 	call(owned, token, prefix+"admit", body, 200)
+	call(owned, token, "/runtime-sessions/end", map[string]any{
+		"id": "root", "directory": dir, "project": "project",
+		"ownership_mode": mode, "expected_effective_id": "root",
+	}, http.StatusConflict)
 	delete(body, "host")
 	roster := call(owned, token, prefix+"hosts", body, 200)
 	var stored struct{ Hosts []store.ManagedRuntimeHost }

@@ -89,6 +89,40 @@ func TestManagedRuntimeAttachRegistersAndAdmitsAtomically(t *testing.T) {
 	}
 }
 
+func TestManagedRuntimeScopedCloseRequiresManagedGeneration(t *testing.T) {
+	st := newTestStore(t)
+	scope := ManagedRuntimeScope{
+		Root: "root", Project: "project", Directory: t.TempDir(),
+		Mode: SessionOwnershipProjectOwned,
+	}
+	effective, generation, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope.EffectiveID = effective
+	if _, err := st.EndRuntimeSessionIfCurrent(scope.Root, scope.Project, scope.Directory, scope.Mode, "", effective); !errors.Is(err, ErrManagedRuntimeCloseRequiresGeneration) {
+		t.Fatalf("ordinary scoped close while host is attached: %v", err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, generation, managedTestHostA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EndRuntimeSession(scope.Root, scope.Project, scope.Directory, scope.Mode, ""); !errors.Is(err, ErrManagedRuntimeCloseRequiresGeneration) {
+		t.Fatalf("ordinary scoped close while awaiting managed closure: %v", err)
+	}
+	if session, err := st.GetSession(effective); err != nil || session.EndedAt != nil {
+		t.Fatalf("managed session = %+v, %v", session, err)
+	}
+	if err := st.CreateSessionWithOwnershipMode("ordinary", scope.Project, scope.Directory, scope.Mode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EndRuntimeSession("ordinary", scope.Project, scope.Directory, scope.Mode, ""); err != nil {
+		t.Fatalf("ordinary scoped close on a separate session: %v", err)
+	}
+	if err := st.EndSession(effective, "manual exact close"); err != nil {
+		t.Fatalf("manual exact close: %v", err)
+	}
+}
+
 func TestManagedRuntimeWriteAndClosureRollback(t *testing.T) {
 	st := newTestStore(t)
 	dir := t.TempDir()

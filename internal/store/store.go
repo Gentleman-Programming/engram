@@ -4210,6 +4210,9 @@ func (s *Store) endRuntimeSession(root, project, directory, mode, summary, expec
 		if expectedID != "" && currentID != expectedID {
 			return ErrRuntimeSessionEffectiveIDMismatch
 		}
+		if err := requireUnmanagedRuntimeCloseTx(tx, currentID); err != nil {
+			return err
+		}
 		id = currentID
 		return s.endSessionOperation(id, summary)(tx)
 	})

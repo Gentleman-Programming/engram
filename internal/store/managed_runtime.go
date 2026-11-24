@@ -46,11 +46,12 @@ CREATE INDEX IF NOT EXISTS idx_managed_runtime_pending ON managed_runtime_writes
 `
 
 var (
-	ErrManagedRuntimeGeneration       = errors.New("managed runtime generation is not current")
-	ErrManagedRuntimeWriteUnresolved  = errors.New("managed runtime has an unresolved observation write")
-	ErrManagedRuntimeHostsRemain      = errors.New("managed runtime hosts have not been retired")
-	ErrManagedRuntimeHostIdentity     = errors.New("invalid managed runtime host identity")
-	errManagedRuntimeSchemaIncomplete = errors.New("managed runtime schema is incomplete")
+	ErrManagedRuntimeGeneration              = errors.New("managed runtime generation is not current")
+	ErrManagedRuntimeCloseRequiresGeneration = errors.New("managed runtime close requires a cohort generation")
+	ErrManagedRuntimeWriteUnresolved         = errors.New("managed runtime has an unresolved observation write")
+	ErrManagedRuntimeHostsRemain             = errors.New("managed runtime hosts have not been retired")
+	ErrManagedRuntimeHostIdentity            = errors.New("invalid managed runtime host identity")
+	errManagedRuntimeSchemaIncomplete        = errors.New("managed runtime schema is incomplete")
 )
 
 // ManagedRuntimeScope is the exact runtime identity expected by an owned
@@ -168,9 +169,8 @@ func (s *Store) admitManagedRuntimeTx(tx *sql.Tx, admission *managedRuntimeAdmis
 	if err := scope.verifyLive(tx); err != nil {
 		return err
 	}
-	var tables int
-	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table'
-		AND name IN ('managed_runtime_generations', 'managed_runtime_writes', 'managed_runtime_hosts')`).Scan(&tables); err != nil {
+	tables, err := managedRuntimeTableCount(tx)
+	if err != nil {
 		return err
 	}
 	switch tables {
@@ -201,7 +201,7 @@ func (s *Store) admitManagedRuntimeTx(tx *sql.Tx, admission *managedRuntimeAdmis
 		return ErrManagedRuntimeGeneration
 	}
 	var retired bool
-	err := tx.QueryRow(`SELECT retired FROM managed_runtime_hosts
+	err = tx.QueryRow(`SELECT retired FROM managed_runtime_hosts
 		WHERE root=? AND effective_id=? AND pid=? AND start=? AND domain=?`,
 		scope.Root, scope.EffectiveID, host.PID, host.Start, host.Domain).Scan(&retired)
 	if err == nil {
@@ -220,6 +220,32 @@ func (s *Store) admitManagedRuntimeTx(tx *sql.Tx, admission *managedRuntimeAdmis
 	return tx.QueryRow(`
 INSERT INTO managed_runtime_generations(root, project, directory, mode, effective_id)
 VALUES (?, ?, ?, ?, ?) RETURNING generation`, scope.Root, scope.Project, scope.Directory, scope.Mode, scope.EffectiveID).Scan(&admission.generation)
+}
+
+func managedRuntimeTableCount(tx *sql.Tx) (int, error) {
+	var tables int
+	err := tx.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table'
+		AND name IN ('managed_runtime_generations', 'managed_runtime_writes', 'managed_runtime_hosts')`).Scan(&tables)
+	return tables, err
+}
+
+func requireUnmanagedRuntimeCloseTx(tx *sql.Tx, effectiveID string) error {
+	tables, err := managedRuntimeTableCount(tx)
+	if err != nil || tables == 0 {
+		return err
+	}
+	if tables != 3 {
+		return errManagedRuntimeSchemaIncomplete
+	}
+	var managed bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM managed_runtime_generations
+		WHERE effective_id = ? AND closed = 0)`, effectiveID).Scan(&managed); err != nil {
+		return err
+	}
+	if managed {
+		return ErrManagedRuntimeCloseRequiresGeneration
+	}
+	return nil
 }
 
 func (scope ManagedRuntimeScope) generationState(tx *sql.Tx, generation int64) (closed, current bool, err error) {
