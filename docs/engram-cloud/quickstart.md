@@ -218,6 +218,8 @@ engram cloud bootstrap admin --username alice \
 
 **Runtime authentication:** set `ENGRAM_CLOUD_TOKEN_PEPPER` (the same secret used at token-issuance time) on the `engram cloud serve` process to enable managed-token authentication — `engram cloud serve` then checks the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` credentials first and resolves other bearer tokens through managed storage, on every `/sync/*`, `/admin/*`, and dashboard-login request. If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, the server still starts normally and continues to authenticate only via the legacy env-token credentials. Full details: [DOCS.md — Managed users, tokens, and CLI bootstrap](../../DOCS.md#managed-users-tokens-and-cli-bootstrap).
 
+Managed admins can open **Authenticated submissions** from **Contributors**. The view groups chunks by the account that submitted them and counts only projects the viewer can access. The **Chunk authors** view and manifests show the credited author, including the original author of imported chunks. Chunks without a recorded managed submitter appear only in the author view.
+
 ---
 
 Reference compose:
