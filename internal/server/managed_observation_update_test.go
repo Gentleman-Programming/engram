@@ -56,6 +56,8 @@ func TestManagedObservationUpdateOwnerAndExactHost(t *testing.T) {
 		t.Fatalf("first managed receipt: %s", first.Body)
 	}
 	call(owned, token, valid+" {}", http.StatusBadRequest)
+	call(owned, token, strings.Replace(valid, `"title":"After"`, "", 1), http.StatusBadRequest)
+	call(owned, token, payload(host, "", "Missing project"), http.StatusBadRequest)
 	imposter := host
 	imposter.Start = "other-incarnation"
 	call(owned, token, payload(imposter, scope.Project, "Wrong host"), http.StatusConflict)
@@ -73,4 +75,8 @@ func TestManagedObservationUpdateOwnerAndExactHost(t *testing.T) {
 	if err != nil || obs.Title != "After" || obs.RevisionCount != 2 {
 		t.Fatalf("unexpected observation after retries: %+v %v", obs, err)
 	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	call(owned, token, valid, http.StatusInternalServerError)
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -34,8 +35,30 @@ func (s *Server) handleManagedObservationUpdate(w http.ResponseWriter, r *http.R
 		jsonError(w, http.StatusConflict, "an earlier managed save is unresolved")
 	case errors.Is(err, store.ErrObservationProjectMismatch), errors.Is(err, store.ErrObservationNotFound):
 		jsonError(w, http.StatusNotFound, "managed observation not found in the attached project")
+	case errors.Is(err, store.ErrManagedObservationUpdateEmpty),
+		errors.Is(err, store.ErrExpectedProjectRequired),
+		errors.Is(err, store.ErrSessionIDRequired),
+		errors.Is(err, store.ErrProjectRequired),
+		errors.Is(err, store.ErrInvalidSessionOwnershipMode),
+		errors.Is(err, store.ErrObservationTitleRequired),
+		errors.Is(err, store.ErrObservationContentRequired),
+		errors.Is(err, store.ErrObservationFindReplacePairRequired),
+		errors.Is(err, store.ErrObservationFindReplaceContentConflict),
+		errors.Is(err, store.ErrObservationFindReplaceInputTooLarge),
+		errors.Is(err, store.ErrObservationFindReplaceResultTooLarge),
+		errors.Is(err, store.ErrObservationFindReplaceLegacyContentLarge):
+		jsonError(w, http.StatusBadRequest, "invalid managed observation update fields")
+	case errors.Is(err, store.ErrObservationProjectImmutable):
+		jsonError(w, http.StatusConflict, "managed observation project cannot change")
+	case errors.Is(err, store.ErrManagedRuntimeHostIdentity),
+		errors.Is(err, store.ErrRuntimeSessionEffectiveIDMismatch),
+		errors.Is(err, store.ErrRuntimeSessionScopeConflict),
+		errors.Is(err, store.ErrSessionOwnershipMismatch),
+		errors.Is(err, store.ErrSessionAlreadyEnded),
+		errors.Is(err, sql.ErrNoRows):
+		jsonError(w, http.StatusConflict, "managed observation update requires the current attachment")
 	case err != nil:
-		jsonError(w, http.StatusConflict, "managed observation update did not complete")
+		jsonError(w, http.StatusInternalServerError, "managed observation update failed")
 	default:
 		if !result.Replayed {
 			s.notifyWrite()

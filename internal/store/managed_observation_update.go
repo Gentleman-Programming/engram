@@ -25,6 +25,8 @@ type ManagedObservationUpdateReceipt struct {
 
 const managedUpdateFingerprintPrefix = "update:"
 
+var ErrManagedObservationUpdateEmpty = errors.New("managed observation update requires at least one changed field")
+
 // UpdateManagedRuntimeObservation commits the edit and its receipt together.
 // A lost response can be retried by the live attachment with the same key.
 func (s *Store) UpdateManagedRuntimeObservation(ctx context.Context, scope ManagedRuntimeScope, host ManagedRuntimeHost, operationID string, update ManagedObservationUpdate) (ManagedObservationUpdateReceipt, error) {
@@ -51,7 +53,7 @@ func (s *Store) UpdateManagedRuntimeObservation(ctx context.Context, scope Manag
 		return zero, ErrObservationOperationConflict
 	}
 	if update.Changes == (UpdateObservationParams{}) {
-		return zero, errors.New("provide at least one field to update")
+		return zero, ErrManagedObservationUpdateEmpty
 	}
 	// Full title and content edits use the same redaction as storage.
 	fingerprintInput := update
