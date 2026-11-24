@@ -228,6 +228,14 @@ func TestManagedRuntimeRecoveryDistinguishesExactEndedSession(t *testing.T) {
 		"directory": scope.Directory, "ownership_mode": scope.Mode, "generation": generation,
 	}
 	const recover = "/internal/managed-runtime/recover-writes"
+	body["for_retirement"] = true
+	call(recover, body, http.StatusBadRequest)
+	delete(body, "generation")
+	if result := call("/internal/managed-runtime/hosts", body, http.StatusOK); !strings.Contains(result, host.Start) {
+		t.Fatalf("retirement roster missing the recorded host: %s", result)
+	}
+	delete(body, "for_retirement")
+	body["generation"] = generation
 	if result := call(recover, body, http.StatusConflict); !strings.Contains(result, "managed_runtime_scope_ended") {
 		t.Fatalf("exact terminal evidence missing: %s", result)
 	}

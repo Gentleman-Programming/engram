@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -714,6 +716,10 @@ func TestManagedRuntimeKeepsPriorContinuationAdmissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := st.RecordManagedRuntimeObservation(scope, oldGeneration, "old-pending",
+		AddObservationParams{Title: "Pending", Content: "keep in the ended binding"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.EndSession(scope.EffectiveID, "explicit close"); err != nil {
 		t.Fatal(err)
 	}
@@ -736,5 +742,68 @@ func TestManagedRuntimeKeepsPriorContinuationAdmissions(t *testing.T) {
 	newPeer := ManagedRuntimeHost{PID: 22, Start: "birth-c", Domain: "local-domain"}
 	if id, gen, err := st.AttachManagedRuntime(next, newPeer, true); err != nil || id != effective || gen <= generation {
 		t.Fatalf("joining the current continuation changed: %q generation=%d err=%v", id, gen, err)
+	}
+	if _, _, err := st.ListManagedRuntimeHosts(scope); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("current host lookup accepted a historical binding: %v", err)
+	}
+	gen, hosts, err := st.ListManagedRuntimeRetirementHosts(scope)
+	if err != nil || gen != oldGeneration || len(hosts) != 1 || hosts[0] != managedTestHostA {
+		t.Fatalf("historical retirement lookup: generation=%d hosts=%+v err=%v", gen, hosts, err)
+	}
+	wrong := scope
+	wrong.Project = "unrelated"
+	if _, _, err := st.ListManagedRuntimeRetirementHosts(wrong); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("retirement lookup accepted a mismatched project: %v", err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, oldGeneration, managedTestHostB); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("retirement accepted a host from the other binding: %v", err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, oldGeneration, managedTestHostA); err != nil {
+		t.Fatalf("historical host could not retire: %v", err)
+	}
+	if applied, err := st.CloseManagedRuntime(scope, oldGeneration); applied || !errors.Is(err, ErrManagedRuntimeGeneration) {
+		t.Fatalf("retirement authorized stale managed close: %v %v", applied, err)
+	}
+	if applied, _, err := st.RecoverManagedRuntimeObservations(scope, oldGeneration); applied != 0 || !errors.Is(err, ErrManagedRuntimeGeneration) {
+		t.Fatalf("retirement authorized stale recovery: %d %v", applied, err)
+	}
+	var pending bool
+	if err := st.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM managed_runtime_writes
+		WHERE operation_id='old-pending' AND effective_id='root' AND confirmed=0 AND observation_payload IS NOT NULL)`).Scan(&pending); err != nil || !pending {
+		t.Fatalf("historical retirement changed the old pending write: %v %v", pending, err)
+	}
+}
+
+func TestManagedRuntimeEndedGitSubdirectoryCanRetire(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required to verify the worktree scope")
+	}
+	checkout := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", checkout).CombinedOutput(); err != nil {
+		t.Fatalf("initialize checkout: %v %s", err, out)
+	}
+	child := filepath.Join(checkout, "subdirectory")
+	if err := os.Mkdir(child, 0700); err != nil {
+		t.Fatal(err)
+	}
+	scope := ManagedRuntimeScope{Root: "root", EffectiveID: "root", Project: "project",
+		Directory: project.RuntimeWorktreeDirectory(checkout), Mode: SessionOwnershipProjectOwned}
+	if err := st.StartSessionWithOwnershipMode(scope.Root, scope.Project, child, scope.Mode); err != nil {
+		t.Fatal(err)
+	}
+	_, generation, err := st.AttachManagedRuntime(scope, managedTestHostA, false)
+	if err != nil {
+		t.Fatalf("live admission from same worktree: %v", err)
+	}
+	row, err := st.GetSession(scope.Root)
+	if err != nil || row.Directory == scope.Directory {
+		t.Fatalf("fixture must preserve a stored subdirectory: %+v %v", row, err)
+	}
+	if err := st.EndSession(scope.Root, "explicit end"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RetireManagedRuntimeHost(scope, generation, managedTestHostA); err != nil {
+		t.Fatalf("externally ended host in the same worktree could not retire: %v", err)
 	}
 }

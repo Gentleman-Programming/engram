@@ -25,9 +25,26 @@ func (scope ManagedRuntimeScope) latestOpenGeneration(tx *sql.Tx, generation *in
 		scope.Root, scope.Project, scope.Directory, scope.Mode, scope.EffectiveID, scope.Root).Scan(generation)
 }
 
+func (scope ManagedRuntimeScope) latestOpenBindingGeneration(tx *sql.Tx, generation *int64) error {
+	return tx.QueryRow(`SELECT generation FROM managed_runtime_generations
+		WHERE root=? AND project=? AND directory=? AND mode=? AND effective_id=? AND closed=0
+		AND generation=(SELECT max(generation) FROM managed_runtime_generations WHERE root=? AND effective_id=?)`,
+		scope.Root, scope.Project, scope.Directory, scope.Mode, scope.EffectiveID, scope.Root, scope.EffectiveID).Scan(generation)
+}
+
 // ListManagedRuntimeHosts recovers the current generation and its outstanding
 // memberships without issuing a new generation during supervisor recovery.
 func (s *Store) ListManagedRuntimeHosts(scope ManagedRuntimeScope) (int64, []ManagedRuntimeHost, error) {
+	return s.listManagedRuntimeHosts(scope, false)
+}
+
+// ListManagedRuntimeRetirementHosts can also find the latest open generation
+// of an exact ended binding for a later, separately verified host retirement.
+func (s *Store) ListManagedRuntimeRetirementHosts(scope ManagedRuntimeScope) (int64, []ManagedRuntimeHost, error) {
+	return s.listManagedRuntimeHosts(scope, true)
+}
+
+func (s *Store) listManagedRuntimeHosts(scope ManagedRuntimeScope, forRetirement bool) (int64, []ManagedRuntimeHost, error) {
 	scope, err := scope.normalized()
 	if err != nil {
 		return 0, nil, err
@@ -37,7 +54,19 @@ func (s *Store) ListManagedRuntimeHosts(scope ManagedRuntimeScope) (int64, []Man
 	err = s.withTx(func(tx *sql.Tx) error {
 		hosts = make([]ManagedRuntimeHost, 0)
 		if err := scope.latestOpenGeneration(tx, &generation); err != nil {
-			return err
+			if !forRetirement || !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if err := scope.latestOpenBindingGeneration(tx, &generation); err != nil {
+				return err
+			}
+			scopeErr := scope.verifyLiveOrEnded(tx)
+			if scopeErr == nil {
+				return sql.ErrNoRows
+			}
+			if !errors.Is(scopeErr, ErrManagedRuntimeScopeEnded) {
+				return scopeErr
+			}
 		}
 		rows, err := tx.Query(`SELECT pid,start,domain FROM managed_runtime_hosts
 			WHERE root=? AND effective_id=? AND retired=0 ORDER BY pid,start,domain`, scope.Root, scope.EffectiveID)
@@ -76,11 +105,25 @@ func (s *Store) RetireManagedRuntimeHost(scope ManagedRuntimeScope, generation i
 		if err != nil {
 			return err
 		}
-		if !current || closed {
+		if closed {
 			return ErrManagedRuntimeGeneration
 		}
-		if err := scope.verifyLiveOrEnded(tx); err != nil && !errors.Is(err, ErrManagedRuntimeScopeEnded) {
-			return err
+		scopeErr := scope.verifyLiveOrEnded(tx)
+		ended := errors.Is(scopeErr, ErrManagedRuntimeScopeEnded)
+		if !current {
+			if !ended {
+				return ErrManagedRuntimeGeneration
+			}
+			var latest int64
+			if err := scope.latestOpenBindingGeneration(tx, &latest); err != nil {
+				return err
+			}
+			if generation != latest {
+				return ErrManagedRuntimeGeneration
+			}
+		}
+		if scopeErr != nil && !ended {
+			return scopeErr
 		}
 		result, err := s.execHook(tx, `UPDATE managed_runtime_hosts SET retired=1
 			WHERE root=? AND effective_id=? AND pid=? AND start=? AND domain=?`,

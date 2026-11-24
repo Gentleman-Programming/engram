@@ -120,13 +120,14 @@ func (scope ManagedRuntimeScope) verifyLiveOrEnded(tx *sql.Tx) error {
 	if !errors.Is(liveErr, sql.ErrNoRows) && !errors.Is(liveErr, ErrRuntimeSessionEffectiveIDMismatch) {
 		return liveErr
 	}
-	var ended bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sessions
-		WHERE id=? AND project=? AND directory=? AND ownership_mode=? AND ended_at IS NOT NULL)`,
-		scope.EffectiveID, scope.Project, scope.Directory, scope.Mode).Scan(&ended); err != nil {
+	var directory string
+	err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions
+		WHERE id=? AND project=? AND ownership_mode=? AND ended_at IS NOT NULL`,
+		scope.EffectiveID, scope.Project, scope.Mode).Scan(&directory)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if ended {
+	if strings.TrimSpace(directory) != "" && projectpkg.RuntimeWorktreeDirectory(directory) == scope.Directory {
 		return ErrManagedRuntimeScopeEnded
 	}
 	return liveErr

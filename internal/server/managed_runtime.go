@@ -22,16 +22,17 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 	attach := r.URL.Path == "/internal/managed-runtime/attach"
 	save := r.URL.Path == "/internal/managed-runtime/save"
 	var body struct {
-		Root        string                      `json:"root"`
-		EffectiveID string                      `json:"effective_id"`
-		Project     string                      `json:"project"`
-		Directory   string                      `json:"directory"`
-		Mode        string                      `json:"ownership_mode"`
-		Generation  int64                       `json:"generation"`
-		OperationID string                      `json:"operation_id"`
-		Observation *store.AddObservationParams `json:"observation"`
-		Host        *store.ManagedRuntimeHost   `json:"host"`
-		Resume      *bool                       `json:"resume"`
+		Root          string                      `json:"root"`
+		EffectiveID   string                      `json:"effective_id"`
+		Project       string                      `json:"project"`
+		Directory     string                      `json:"directory"`
+		Mode          string                      `json:"ownership_mode"`
+		Generation    int64                       `json:"generation"`
+		OperationID   string                      `json:"operation_id"`
+		Observation   *store.AddObservationParams `json:"observation"`
+		Host          *store.ManagedRuntimeHost   `json:"host"`
+		Resume        *bool                       `json:"resume"`
+		ForRetirement *bool                       `json:"for_retirement"`
 	}
 	var input io.Reader = r.Body
 	switch r.URL.Path {
@@ -65,6 +66,10 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, http.StatusBadRequest, "observation identity comes from its managed scope")
 			return
 		}
+	}
+	if body.ForRetirement != nil && r.URL.Path != "/internal/managed-runtime/hosts" {
+		jsonError(w, http.StatusBadRequest, "only host lookup takes a retirement option")
+		return
 	}
 	var hosts []store.ManagedRuntimeHost
 	if attach != (body.Resume != nil) {
@@ -105,7 +110,11 @@ func (s *Server) handleManagedRuntime(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, http.StatusBadRequest, "host lookup takes only a runtime scope")
 			return
 		}
-		body.Generation, hosts, err = s.store.ListManagedRuntimeHosts(scope)
+		if body.ForRetirement != nil && *body.ForRetirement {
+			body.Generation, hosts, err = s.store.ListManagedRuntimeRetirementHosts(scope)
+		} else {
+			body.Generation, hosts, err = s.store.ListManagedRuntimeHosts(scope)
+		}
 	case "/internal/managed-runtime/retire":
 		if body.Generation <= 0 || body.OperationID != "" || body.Host == nil ||
 			body.Host.PID <= 1 || strings.TrimSpace(body.Host.Start) == "" || strings.TrimSpace(body.Host.Domain) == "" {
