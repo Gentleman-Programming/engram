@@ -979,6 +979,16 @@ var localServeTraceEpoch = time.Now()
 // (foreground mode). It owns the store, server, autosync, and signal loop.
 func serveWith(cfg store.Config, options serveOptions) error {
 	var err error
+	var ownedListener net.Listener
+	if options.sessionOwned {
+		ownedListener, err = inheritedOwnedListener()
+		if err != nil {
+			return err
+		}
+		if ownedListener != nil {
+			defer func() { _ = ownedListener.Close() }()
+		}
+	}
 	readyFile, readyToken := os.Getenv("ENGRAM_RUN_READY_FILE"), os.Getenv("ENGRAM_RUN_READY_TOKEN")
 	detachedDaemon := readyFile != "" && readyToken != ""
 	var startup *server.LocalStartup
@@ -1007,6 +1017,18 @@ func serveWith(cfg store.Config, options serveOptions) error {
 	var s *store.Store
 	if options.sessionOwned {
 		parentEOF = watchOwnedParent(os.Stdin, cancel)
+		if ownedListener != nil {
+			cfg.DataDir = filepath.Clean(cfg.DataDir)
+			if err := store.ValidateDataDirectory(cfg.DataDir); err != nil {
+				return err
+			}
+			if err := retainOwnedStoreLease(ctx, cfg.DataDir); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return nil
+				}
+				return err
+			}
+		}
 		s, err = store.NewWithContext(ctx, cfg)
 	} else if startup != nil {
 		trace.Mark("store-open")
@@ -1037,13 +1059,16 @@ func serveWith(cfg store.Config, options serveOptions) error {
 	}
 	if options.sessionOwned {
 		srv.SetSessionOwnedToken(os.Getenv("ENGRAM_TOKEN"))
+		if ownedListener != nil {
+			srv.UseSessionOwnedListener(ownedListener)
+		}
 		srv.SetOnReady(func(addr net.Addr) error {
 			select {
 			case <-parentEOF:
 				return fmt.Errorf("session-owned parent closed before readiness")
 			default:
 			}
-			return emitOwnedReadiness(addr, s.InstanceID())
+			return emitOwnedReadiness(addr, s.InstanceID(), ownedListener != nil)
 		})
 	}
 	// Daemon child mode (`engram run -d`): publish the pidfile and the parent
