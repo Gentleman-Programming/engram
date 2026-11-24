@@ -41,6 +41,9 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	call(owned, "invalid", prefix+"admit", body, 401)
 	call(shared, token, prefix+"attach", body, 404)
 	call(owned, "invalid", prefix+"attach", body, 401)
+	call(shared, token, prefix+"recover-writes", body, 404)
+	call(owned, "invalid", prefix+"recover-writes", body, 401)
+	call(owned, token, prefix+"recover-writes", body, 400)
 	if runtime.GOOS != "linux" {
 		body["host"] = map[string]any{"pid": 10, "start": "fixture"}
 		call(owned, token, prefix+"admit", body, 503)
@@ -115,8 +118,6 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	call(owned, token, prefix+"write-intent", body, 200)
 	body["observation"] = map[string]any{"title": "Recoverable observation", "content": "changed"}
 	call(owned, token, prefix+"save", body, 409)
-	body["observation"] = map[string]any{"title": "Recoverable observation", "content": content}
-	call(owned, token, prefix+"save", body, 201)
 	delete(body, "observation")
 	body["operation_id"] = "managed-save"
 	call(owned, token, prefix+"write-intent", body, 200)
@@ -132,6 +133,23 @@ func TestManagedRuntimeOwnedAPI(t *testing.T) {
 	body["host"] = stored.Hosts[0]
 	call(owned, token, prefix+"retire", body, 200)
 	delete(body, "host")
+	for _, want := range []int{1, 0} {
+		recovered := call(owned, token, prefix+"recover-writes", body, 200)
+		var result struct {
+			Recovered int
+			More      bool
+		}
+		if err := json.Unmarshal(recovered.Body.Bytes(), &result); err != nil || result.Recovered != want || result.More {
+			t.Fatalf("recovery result = %s, expected %d newly recovered writes", recovered.Body, want)
+		}
+	}
+	recoveredID, err := st.GetObservationSaveResult("recoverable-save")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, err := st.GetObservation(recoveredID); err != nil || row.Content != content {
+		t.Fatalf("recovered observation content did not round-trip: %v", err)
+	}
 	pending := call(owned, token, prefix+"close", body, 409)
 	if !strings.Contains(pending.Body.String(), "managed_runtime_write_unresolved") {
 		t.Fatal(pending.Body)
