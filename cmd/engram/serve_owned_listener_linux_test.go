@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,20 +20,87 @@ import (
 )
 
 func TestServeOwnedInheritedRejectsNonListenerBeforeStore(t *testing.T) {
-	cmd, data := ownedCommand(t)
 	bad, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = bad.Close() }()
-	cmd.ExtraFiles = []*os.File{bad}
-	cmd.Env = append(cmd.Env, "ENGRAM_OWNED_LISTENER_FD=3")
-	output, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "descriptor 3 is not a listening socket") {
-		t.Fatalf("wrong startup result: %s (%v)", output, err)
-	}
+	data := filepath.Join(t.TempDir(), "store")
+	checkInheritedStartupRejected(t, bad, data, "descriptor 3 is not a listening socket")
 	if _, err := os.Stat(data); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("invalid inherited socket opened the store: %v", err)
+		t.Fatalf("invalid descriptor changed the Store path: %v", err)
+	}
+}
+
+func TestServeOwnedInheritedRejectsMappedIPv6BeforeStore(t *testing.T) {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, unix.IPPROTO_TCP)
+	if errors.Is(err, unix.EAFNOSUPPORT) || errors.Is(err, unix.EPROTONOSUPPORT) {
+		t.Skipf("IPv6 unavailable: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := os.NewFile(uintptr(fd), "mapped IPv6 fixture")
+	defer func() { _ = file.Close() }()
+	if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 0); err != nil {
+		t.Fatal(err)
+	}
+	mapped := unix.SockaddrInet6{Addr: [16]byte{10: 0xff, 11: 0xff, 12: 127, 15: 1}}
+	if err := unix.Bind(fd, &mapped); errors.Is(err, unix.EADDRNOTAVAIL) {
+		t.Skipf("mapped loopback unavailable: %v", err)
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Listen(fd, 1); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(t.TempDir(), "store")
+	checkInheritedStartupRejected(t, file, data, "must be bound to IPv4 loopback")
+	if _, err := os.Stat(data); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mapped IPv6 changed the Store path: %v", err)
+	}
+}
+
+func TestServeOwnedInheritedRejectsUnsafeStorePaths(t *testing.T) {
+	_, fd := inheritedLoopback(t)
+	t.Run("writable ancestor", func(t *testing.T) {
+		parent := t.TempDir()
+		if err := os.Chmod(parent, 0777); err != nil {
+			t.Fatal(err)
+		}
+		data := filepath.Join(parent, "store")
+		if err := os.Mkdir(data, 0700); err != nil {
+			t.Fatal(err)
+		}
+		checkInheritedStartupRejected(t, fd, data, "requires trusted parent directories")
+		if entries, err := os.ReadDir(data); err != nil || len(entries) != 0 {
+			t.Fatalf("untrusted path changed: %v %v", entries, err)
+		}
+	})
+	t.Run("linked lease", func(t *testing.T) {
+		data := filepath.Join(t.TempDir(), "store")
+		if err := os.Mkdir(data, 0700); err != nil {
+			t.Fatal(err)
+		}
+		const target = "target"
+		lock := filepath.Join(data, ownedStoreLeaseName)
+		if err := os.Symlink(target, lock); err != nil {
+			t.Fatal(err)
+		}
+		checkInheritedStartupRejected(t, fd, data, "open session-owned store lease")
+		if entries, err := os.ReadDir(data); err != nil || len(entries) != 1 || entries[0].Name() != ownedStoreLeaseName {
+			t.Fatalf("linked lease changed Store files: %v %v", entries, err)
+		}
+	})
+}
+
+func checkInheritedStartupRejected(t *testing.T, fd *os.File, data, reason string) {
+	t.Helper()
+	cmd := inheritedCoreCommand(t, fd, data)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err == nil || stdout.Len() != 0 || !strings.Contains(stderr.String(), reason) {
+		t.Fatalf("wrong startup result: stdout=%q stderr=%q (%v)", stdout.String(), stderr.String(), err)
 	}
 }
 
@@ -127,24 +195,13 @@ type inheritedCoreFixture struct {
 
 func startInheritedCore(t *testing.T, data string) inheritedCoreFixture {
 	t.Helper()
-	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	fd, err := listener.File()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = fd.Close() }()
+	address, fd := inheritedLoopback(t)
 	protocol, err := unix.GetsockoptInt(int(fd.Fd()), unix.SOL_SOCKET, unix.SO_PROTOCOL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("passing a loopback listener with IP protocol %d", protocol)
-	cmd, _ := ownedCommand(t)
-	cmd.Env = append(cmd.Env, "ENGRAM_DATA_DIR="+data, "ENGRAM_OWNED_LISTENER_FD=3")
-	cmd.ExtraFiles = []*os.File{fd}
+	cmd := inheritedCoreCommand(t, fd, data)
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -172,7 +229,30 @@ func startInheritedCore(t *testing.T, data string) inheritedCoreFixture {
 			_ = cmd.Wait()
 		}
 	})
-	return inheritedCoreFixture{listener.Addr().String(), cmd, stdin, line}
+	return inheritedCoreFixture{address, cmd, stdin, line}
+}
+
+func inheritedLoopback(t *testing.T) (string, *os.File) {
+	t.Helper()
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	fd, err := listener.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fd.Close() })
+	return listener.Addr().String(), fd
+}
+
+func inheritedCoreCommand(t *testing.T, fd *os.File, data string) *exec.Cmd {
+	t.Helper()
+	cmd, _ := ownedCommand(t)
+	cmd.Env = append(cmd.Env, "ENGRAM_DATA_DIR="+data, "ENGRAM_OWNED_LISTENER_FD=3")
+	cmd.ExtraFiles = []*os.File{fd}
+	return cmd
 }
 
 func (c inheritedCoreFixture) readReady(t *testing.T) ownedReadiness {
