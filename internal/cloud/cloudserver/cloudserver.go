@@ -839,7 +839,7 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.store.WriteChunk(r.Context(), project, computedChunkID, req.CreatedBy, clientCreatedAt, normalizedData); err != nil {
+	if err := s.store.WriteChunk(managedChunkSubmissionContext(r.Context()), project, computedChunkID, req.CreatedBy, clientCreatedAt, normalizedData); err != nil {
 		if errors.Is(err, cloudstore.ErrChunkConflict) {
 			writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodeChunkConflict, fmt.Sprintf("write chunk: %v", err))
 			return
