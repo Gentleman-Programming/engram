@@ -70,13 +70,24 @@ type ManagedRuntimeScope struct {
 }
 
 func (scope ManagedRuntimeScope) normalized() (ManagedRuntimeScope, error) {
+	return scope.normalizedContext(context.Background())
+}
+
+func (scope ManagedRuntimeScope) normalizedContext(ctx context.Context) (ManagedRuntimeScope, error) {
 	if err := validateSessionID(scope.EffectiveID); err != nil {
 		return scope, err
 	}
-	return scope.normalizedBinding()
+	return scope.normalizedBindingContext(ctx)
 }
 
 func (scope ManagedRuntimeScope) normalizedBinding() (ManagedRuntimeScope, error) {
+	return scope.normalizedBindingContext(context.Background())
+}
+
+func (scope ManagedRuntimeScope) normalizedBindingContext(ctx context.Context) (ManagedRuntimeScope, error) {
+	if err := ctx.Err(); err != nil {
+		return scope, err
+	}
 	if err := validateSessionID(scope.Root); err != nil {
 		return scope, err
 	}
@@ -90,12 +101,16 @@ func (scope ManagedRuntimeScope) normalizedBinding() (ManagedRuntimeScope, error
 	if strings.TrimSpace(scope.Directory) == "" {
 		return scope, ErrRuntimeSessionScopeConflict
 	}
-	scope.Directory = projectpkg.RuntimeWorktreeDirectory(scope.Directory)
-	return scope, nil
+	scope.Directory = projectpkg.RuntimeWorktreeDirectoryContext(ctx, scope.Directory)
+	return scope, ctx.Err()
 }
 
 func (scope ManagedRuntimeScope) verifyLive(tx *sql.Tx) error {
-	id, err := runtimeSessionTx(context.Background(), tx, scope.Root, scope.Project, scope.Directory, scope.Mode)
+	return scope.verifyLiveContext(context.Background(), tx)
+}
+
+func (scope ManagedRuntimeScope) verifyLiveContext(ctx context.Context, tx *sql.Tx) error {
+	id, err := runtimeSessionTx(ctx, tx, scope.Root, scope.Project, scope.Directory, scope.Mode)
 	if err != nil {
 		return err
 	}
@@ -107,7 +122,7 @@ func (scope ManagedRuntimeScope) verifyLive(tx *sql.Tx) error {
 	if scope.Root == scope.EffectiveID {
 		want = 1
 	}
-	if err := tx.QueryRow(`SELECT count(*) FROM sessions
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sessions
 		WHERE id IN (?, ?) AND project = ?`, scope.Root, scope.EffectiveID, scope.Project).Scan(&matches); err != nil {
 		return err
 	}

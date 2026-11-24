@@ -26,6 +26,29 @@ func (scope ManagedRuntimeScope) latestOpenGeneration(tx *sql.Tx, generation *in
 		scope.Root, scope.Project, scope.Directory, scope.Mode, scope.EffectiveID, scope.Root).Scan(generation)
 }
 
+func (scope ManagedRuntimeScope) verifyAttachment(ctx context.Context, tx *sql.Tx, host ManagedRuntimeHost) error {
+	if err := scope.verifyLiveContext(ctx, tx); err != nil {
+		return err
+	}
+	var attached bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM managed_runtime_generations AS g
+		JOIN managed_runtime_hosts AS h ON h.root = g.root AND h.effective_id = g.effective_id
+		WHERE g.root = ? AND g.effective_id = ? AND g.project = ? AND g.directory = ?
+		AND g.mode = ? AND g.closed = 0 AND h.pid = ? AND h.start = ? AND h.domain = ?
+		AND h.retired = 0 AND g.generation = (
+			SELECT max(generation) FROM managed_runtime_generations WHERE root = g.root
+		)
+	)`, scope.Root, scope.EffectiveID, scope.Project, scope.Directory, scope.Mode, host.PID, host.Start, host.Domain).Scan(&attached)
+	if err != nil {
+		return err
+	}
+	if !attached {
+		return ErrManagedRuntimeHostIdentity
+	}
+	return nil
+}
+
 // ListManagedRuntimeScopes enumerates the current open binding for each root.
 // An explicit session end leaves that binding open for host reconciliation.
 func (s *Store) ListManagedRuntimeScopes(ctx context.Context) ([]ManagedRuntimeScope, error) {
